@@ -1,0 +1,17 @@
+<service>
+  <id>WebGPTCodingToolsMCP</id>
+  <name>Web GPT Coding Tools MCP</name>
+  <description>Private coding-tools-mcp endpoint for ChatGPT Web.</description>
+  <executable>C:\Program Files\PowerShell\7\pwsh.exe</executable>
+  <arguments>-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BASE%\run-mcp-service.ps1"</arguments>
+  <workingdirectory>D:\coding-tools-mcp</workingdirectory>
+  <startmode>Automatic</startmode>
+  <delayedAutoStart>true</delayedAutoStart>
+  <hidewindow>true</hidewindow>
+  <stoptimeout>15sec</stoptimeout>
+  <logpath>%BASE%\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>4</keepFiles>
+  </log>
+</service>

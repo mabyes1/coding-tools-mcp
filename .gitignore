@@ -1,0 +1,29 @@
+private/**/__pycache__/
+private/**/*.pyc
+.test-runtime*/
+service-install-result.log
+
+# Local/runtime state and credentials must never enter version control.
+*.dpapi
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
+*.pid
+*.tmp
+
+# Installed service artifacts and generated runtime data.
+venv/
+runtime/
+data/
+logs/
+releases/
+update-stage-*/
+elevated-requests/
+
+# Python and test caches.
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/

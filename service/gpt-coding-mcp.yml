@@ -1,0 +1,9 @@
+tunnel: 18b544a3-7f65-4842-a5f9-e3aec9b534b4
+credentials-file: 'C:\ProgramData\WebGPTCodingToolsMCPService\18b544a3-7f65-4842-a5f9-e3aec9b534b4.json'
+metrics: 127.0.0.1:20242
+no-autoupdate: true
+
+ingress:
+  - hostname: mcp.kennyxizi.pp.ua
+    service: http://127.0.0.1:8765
+  - service: http_status:404

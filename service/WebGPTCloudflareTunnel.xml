@@ -1,0 +1,17 @@
+<service>
+  <id>WebGPTCloudflareTunnel</id>
+  <name>Web GPT Cloudflare Tunnel</name>
+  <description>Cloudflare tunnel for mcp.kennyxizi.pp.ua only.</description>
+  <executable>C:\Program Files (x86)\cloudflared\cloudflared.exe</executable>
+  <arguments>tunnel --config "%BASE%\gpt-coding-mcp.yml" run gpt-coding-mcp</arguments>
+  <startmode>Automatic</startmode>
+  <delayedAutoStart>true</delayedAutoStart>
+  <depend>WebGPTCodingToolsMCP</depend>
+  <hidewindow>true</hidewindow>
+  <stoptimeout>15sec</stoptimeout>
+  <logpath>%BASE%\logs</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>4</keepFiles>
+  </log>
+</service>
