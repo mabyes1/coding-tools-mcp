@@ -53,7 +53,7 @@ class ProjectContext:
             "Use these tools only for coding operations inside the configured workspace.",
             "Use apply_patch as the only direct file-modification tool; do not modify files through exec_command.",
             "Relative paths, including apply_patch paths, use the persistent default cwd. Use set_default_cwd when entering a project; a directory-only cd/chdir/Set-Location exec is also persisted automatically.",
-            "When a tool returns PERMISSION_REQUIRED, call request_permissions with the same blocked tool name and arguments. The signed-in user will receive a Windows approval dialog; retry the original call unchanged only after approval.",
+            "When a tool returns PERMISSION_REQUIRED, call request_permissions with the same blocked tool name and arguments. The signed-in user will receive a Windows approval dialog; retry the original call unchanged only after approval. Permission grants never elevate Windows or Linux OS privileges; privileged work needs a registered request_elevated_action.",
         ]
         for item in self.root_files:
             suffix = " [truncated]" if item.truncated else ""

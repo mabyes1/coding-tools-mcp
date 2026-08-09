@@ -4501,6 +4501,12 @@ class Runtime:
                 "scope": scope,
                 "workspace": str(self.workspace.root),
                 "same_arguments_required": scope == "once",
+                "os_privileges": "unchanged; this grant only relaxes an MCP policy gate",
+                "privileged_executable_effect": (
+                    "allows only the MCP setuid/setgid executable gate where applicable; it never grants Administrator, root, UAC, or ACL access"
+                    if permission == "privileged_executable"
+                    else None
+                ),
             },
             "warnings": (["Session grant applies to this OAuth owner until expiry."] if scope == "session" else []),
         }

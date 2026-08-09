@@ -389,10 +389,13 @@ def _render_permission(payload: dict[str, Any]) -> str:
     status = str(payload.get("status", "completed"))
     if status == "granted":
         constraints = payload.get("constraints") if isinstance(payload.get("constraints"), dict) else {}
-        return (
+        message = (
             f"Permission granted ({constraints.get('scope', 'once')}) until {payload.get('expires_at', 'service restart')}. "
             "Retry the blocked tool now with the same arguments."
         )
+        if constraints.get("permission") == "privileged_executable":
+            message += " This does not grant OS Administrator/root/UAC/ACL privileges."
+        return message
     if status == "denied":
         return "Permission denied by the signed-in user; do not retry unchanged unless they ask again."
     return f"Permission request: {status}."

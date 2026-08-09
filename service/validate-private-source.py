@@ -135,6 +135,17 @@ def main() -> int:
                     )
                     if once.get("status") != "granted":
                         raise RuntimeError("interactive approval did not create a permission grant")
+                    privileged = primary.request_permissions(
+                        {
+                            "tool_name": "exec_command",
+                            "permission": "privileged_executable",
+                            "reason": "privilege-boundary self-check",
+                            "arguments": {"cmd": "approved-tool"},
+                        }
+                    )
+                    privileged_constraints = privileged.get("constraints", {})
+                    if "never grants Administrator" not in str(privileged_constraints.get("privileged_executable_effect", "")):
+                        raise RuntimeError("privileged_executable grant does not disclose its OS privilege boundary")
                     primary.request_context.tool_name = "exec_command"
                     primary.request_context.arguments = blocked_arguments
                     primary.request_context.claimed_permission_grants = set()
