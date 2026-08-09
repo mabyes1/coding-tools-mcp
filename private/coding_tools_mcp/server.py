@@ -819,7 +819,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "apply_patch": ToolSpec(
         title="Apply patch",
-        description="Use for all direct file edits. Patch paths are workspace-rooted, not default-cwd-relative; changes are validated and applied atomically.",
+        description="Use for all direct file edits. Relative patch paths use the persistent default cwd, like other path tools; changes are validated and applied atomically.",
         destructive=True,
     ),
     "exec_command": ToolSpec(
@@ -2868,17 +2868,22 @@ class Runtime:
         dry_run = bool(args.get("dry_run", False))
         with self.patch_lock:
             operations = parse_patch(patch)
+            for op in operations:
+                op.path = self._normalize_patch_path(
+                    op.path,
+                    require_existing=op.kind in {"update", "delete"},
+                )
+                if op.move_to:
+                    op.move_to = self._normalize_patch_path(op.move_to, require_existing=False)
             staged: dict[str, StagedFile] = {}
             summaries: list[str] = []
             affected: list[dict[str, str]] = []
             additions = 0
             removals = 0
             for op in operations:
-                self._validate_patch_path(op.path, require_existing=op.kind in {"update", "delete"})
                 if op.kind in {"add", "update", "delete"}:
                     self.workspace.reject_write_symlink(op.path)
                 if op.move_to:
-                    self._validate_patch_path(op.move_to, require_existing=False)
                     self.workspace.reject_write_symlink(op.move_to)
                 if op.kind == "add":
                     target = self.workspace.resolve_for_write(op.path)
@@ -2959,6 +2964,7 @@ class Runtime:
         return {
             "dry_run": dry_run,
             "clean": True,
+            "base": self.default_cwd_display(),
             "summary": "\n".join(summaries),
             "affected_files": affected,
             "additions": additions,
@@ -2966,11 +2972,10 @@ class Runtime:
             "warnings": [],
         }
 
-    def _validate_patch_path(self, raw_path: str, *, require_existing: bool) -> None:
-        if require_existing:
-            self.workspace.resolve_existing(raw_path)
-        else:
-            self.workspace.resolve_for_write(raw_path)
+    def _normalize_patch_path(self, raw_path: str, *, require_existing: bool) -> str:
+        """Return a workspace-relative patch path resolved from the default cwd."""
+        resolved = self.resolve_existing(raw_path) if require_existing else self.resolve_for_write(raw_path)
+        return resolved.display
 
     def _commit_staged_files(self, staged: list[StagedFile]) -> None:
         self.patch_committer.commit(staged)
@@ -3502,7 +3507,16 @@ class Runtime:
         repo: Path | None = None
         filters: list[str] = []
         for raw_path in requested:
-            resolved = self.resolve_for_write(raw_path)
+            # A Git scope may deliberately be a directory (especially ".").
+            # Resolve existing paths first so they follow the default cwd just
+            # like every other path-taking tool. Only use write resolution to
+            # infer a repository for a not-yet-created path filter.
+            try:
+                resolved = self.resolve_existing(raw_path)
+            except ToolFailure as exc:
+                if exc.code != "NOT_FOUND":
+                    raise
+                resolved = self.resolve_for_write(raw_path)
             probe = resolved.path if resolved.existed else resolved.path.parent
             current_repo = self.workspace.git_repository_for(probe)
             if current_repo is None:

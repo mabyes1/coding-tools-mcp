@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -20,6 +21,7 @@ def main() -> int:
 
     from coding_tools_mcp import server
     from coding_tools_mcp import elevated_actions
+    from coding_tools_mcp.patching import find_subsequence_all
     from coding_tools_mcp.project_context import load_project_context
     from coding_tools_mcp.transport_http import (
         HTTP_IN_FLIGHT_TTL_SECONDS,
@@ -48,6 +50,9 @@ def main() -> int:
     if scan_warnings:
         raise RuntimeError("project-context discovery hit a scan limit: " + "; ".join(scan_warnings))
 
+    if find_subsequence_all(["x"] * 12_000, ["x"] * 6_000) != list(range(6_001)):
+        raise RuntimeError("linear patch hunk matcher did not find overlapping matches correctly")
+
     # A directory-only shell change is a common model/user expectation. Verify
     # it becomes the shared owner cwd instead of disappearing with a one-shot
     # child shell, and verify another owner cannot inherit it.
@@ -67,6 +72,33 @@ def main() -> int:
             windows_style = primary.exec_command({"cmd": 'cd /d "project"'})
             if windows_style.get("default_cwd") != "project":
                 raise RuntimeError("CMD-style cd /d did not persist the new default cwd")
+            patch_target = project / "patch-target.txt"
+            patch_target.write_text("before\n", encoding="utf-8")
+            subprocess.run(
+                [server.require_git(), "init", "-q", str(project)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            patch_result = primary.apply_patch(
+                {
+                    "patch": "\n".join(
+                        [
+                            "*** Begin Patch",
+                            "*** Update File: patch-target.txt",
+                            "@@",
+                            "-before",
+                            "+after",
+                            "*** End Patch",
+                        ]
+                    )
+                }
+            )
+            if patch_target.read_text(encoding="utf-8") != "after\n" or patch_result.get("base") != "project":
+                raise RuntimeError("apply_patch did not resolve a relative path from the default cwd")
+            repo, filters = primary._git_repo_scope({"path": "."})
+            if repo != project or filters:
+                raise RuntimeError("git_diff scope did not resolve '.' from the default cwd")
             reconnect = server.Runtime(
                 cwd_workspace,
                 enable_view_image=False,

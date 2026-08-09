@@ -380,9 +380,16 @@ def apply_update_hunks(content: str, hunks: list[list[str]], path: str = "<patch
                 },
             )
 
-    updated_lines = list(lines)
-    for matched_hunk in sorted(matched, key=lambda item: item.start, reverse=True):
-        updated_lines = updated_lines[: matched_hunk.start] + matched_hunk.new + updated_lines[matched_hunk.end :]
+    # Apply in a single forward pass. Repeated slicing once per hunk makes a
+    # large topology patch quadratic and can hold the HTTP server GIL long
+    # enough for unrelated connector calls to time out.
+    updated_lines: list[str] = []
+    cursor = 0
+    for matched_hunk in matched:
+        updated_lines.extend(lines[cursor : matched_hunk.start])
+        updated_lines.extend(matched_hunk.new)
+        cursor = matched_hunk.end
+    updated_lines.extend(lines[cursor:])
     updated = "\n".join(updated_lines)
     if had_trailing_newline and (updated_lines or updated == ""):
         updated += "\n"
@@ -416,13 +423,32 @@ def parse_update_hunk(hunk: list[str]) -> ParsedHunk:
 def find_subsequence_all(lines: list[str], needle: list[str]) -> list[int]:
     if not needle:
         return [0]
-    limit = len(lines) - len(needle) + 1
-    first = needle[0]
-    return [
-        index
-        for index in range(max(0, limit))
-        if lines[index] == first and lines[index : index + len(needle)] == needle
-    ]
+    if len(needle) > len(lines):
+        return []
+
+    # Knuth-Morris-Pratt finds every (including overlapping) match in O(n+m).
+    # The earlier slice comparison was O(n*m), which made a single large patch
+    # capable of starving every HTTP worker under the GIL.
+    prefix = [0] * len(needle)
+    matched = 0
+    for index in range(1, len(needle)):
+        while matched and needle[index] != needle[matched]:
+            matched = prefix[matched - 1]
+        if needle[index] == needle[matched]:
+            matched += 1
+        prefix[index] = matched
+
+    positions: list[int] = []
+    matched = 0
+    for index, line in enumerate(lines):
+        while matched and line != needle[matched]:
+            matched = prefix[matched - 1]
+        if line == needle[matched]:
+            matched += 1
+        if matched == len(needle):
+            positions.append(index - len(needle) + 1)
+            matched = prefix[matched - 1]
+    return positions
 
 
 def strip_bom(text: str) -> tuple[str, str]:
