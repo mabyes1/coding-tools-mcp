@@ -8,7 +8,7 @@ if errorlevel 1 (
 )
 
 echo WebGPT fixed-action elevated broker
-echo [1] Install / enable at user logon
+echo [1] Install / repair / enable at user logon and start now
 echo [2] Start now
 echo [3] Stop now
 echo [4] Disable logon task
@@ -39,6 +39,6 @@ goto done
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0service\manage-elevated-broker.ps1" -Action Start
 goto done
 :install
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0service\manage-elevated-broker.ps1" -Action Install
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0service\install-elevated-broker.ps1"
 :done
 pause

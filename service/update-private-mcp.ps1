@@ -1,15 +1,30 @@
 [CmdletBinding()]
 param(
     [switch]$Rollback,
-    [switch]$ValidateOnly
+    [switch]$ValidateOnly,
+    [switch]$SkipBrokerRefresh,
+    [ValidateRange(0, 30)]
+    [int]$StartDelaySeconds = 0
 )
 
 $ErrorActionPreference = "Stop"
+
+function Get-Sha256Hex([string]$Path) {
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try { return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "") }
+        finally { $sha256.Dispose() }
+    }
+    finally { $stream.Dispose() }
+}
 
 $serviceRoot = "C:\ProgramData\WebGPTCodingToolsMCPService"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $privateSource = Join-Path $repoRoot "private\coding_tools_mcp"
 $sourceRunner = Join-Path $PSScriptRoot "run-mcp-service.ps1"
+$sourceValidator = Join-Path $PSScriptRoot "validate-private-source.py"
+$workspaceRoot = Split-Path -Parent $repoRoot
 $serverPython = Join-Path $serviceRoot "venv\Scripts\python.exe"
 $appPath = Join-Path $serviceRoot "app"
 $runnerPath = Join-Path $serviceRoot "run-mcp-service.ps1"
@@ -38,6 +53,19 @@ function Test-Package([string]$PackageRoot) {
     & $serverPython -m compileall -q $PackageRoot
     if ($LASTEXITCODE -ne 0) { throw "Private package compile check failed." }
     return $version
+}
+
+function Test-SourceBehavior([string]$PackageParent) {
+    Assert-Path $sourceValidator "Private source validator"
+    $previousPythonPath = $env:PYTHONPATH
+    try {
+        $env:PYTHONPATH = $PackageParent
+        & $serverPython $sourceValidator --package-parent $PackageParent --workspace $workspaceRoot
+        if ($LASTEXITCODE -ne 0) { throw "Private source behavioral validation failed." }
+    }
+    finally {
+        $env:PYTHONPATH = $previousPythonPath
+    }
 }
 
 function Wait-McpHealth([int]$Seconds = 30) {
@@ -104,15 +132,19 @@ function Install-BrokerFiles {
         Assert-Path $source "Elevated broker source"
         Copy-Item -LiteralPath $source -Destination (Join-Path $serviceRoot $brokerFile) -Force
     }
-    $webrootSourceScript = Join-Path "D:\coding-tools-mcp" "phoneMonitor\scripts\sync-installed-webroot.ps1"
     $brokerPath = Join-Path $serviceRoot "elevated-broker.ps1"
+    $webrootSourceScript = Join-Path "D:\coding-tools-mcp" "phoneMonitor\scripts\sync-installed-webroot.ps1"
     if (Test-Path -LiteralPath $webrootSourceScript -PathType Leaf) {
-        $webrootHash = (Get-FileHash -LiteralPath $webrootSourceScript -Algorithm SHA256).Hash
+        $webrootHash = Get-Sha256Hex $webrootSourceScript
         $brokerText = Get-Content -LiteralPath $brokerPath -Raw
-        $brokerText = [regex]::Replace($brokerText, '(ExpectedSha256\s*=\s*")[A-Fa-f0-9]{64}("?)', { param($match) $match.Groups[1].Value + $webrootHash + $match.Groups[2].Value })
         $brokerText = $brokerText.Replace("REPLACE_WITH_SYNC_WEBROOT_SHA256", $webrootHash)
         [IO.File]::WriteAllText($brokerPath, $brokerText, [Text.UTF8Encoding]::new($false))
     }
+    $updateSourceScript = Join-Path $PSScriptRoot "update-private-mcp.ps1"
+    $updateHash = Get-Sha256Hex $updateSourceScript
+    $brokerText = Get-Content -LiteralPath $brokerPath -Raw
+    $brokerText = $brokerText.Replace("REPLACE_WITH_UPDATE_PRIVATE_MCP_SHA256", $updateHash)
+    [IO.File]::WriteAllText($brokerPath, $brokerText, [Text.UTF8Encoding]::new($false))
     & icacls.exe $elevatedQueueRoot /inheritance:r /grant:r `
         "*S-1-5-18:(OI)(CI)F" `
         "*S-1-5-32-544:(OI)(CI)F" `
@@ -124,6 +156,13 @@ function Install-BrokerFiles {
         & icacls.exe $installedBrokerFile /grant:r "${localServiceSid}:RX" /C | Out-Null
         if ($LASTEXITCODE -ne 0) { throw "Could not grant LocalService read access to $installedBrokerFile." }
     }
+
+    $brokerManager = Join-Path $serviceRoot "manage-elevated-broker.ps1"
+    $windowsPowerShell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+    & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $brokerManager -Action Install
+    if ($LASTEXITCODE -ne 0) { throw "Could not install the interactive elevated broker task." }
+    & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $brokerManager -Action Start
+    if ($LASTEXITCODE -ne 0) { throw "Could not start the interactive elevated broker." }
 }
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
@@ -135,6 +174,10 @@ if (-not $ValidateOnly -and -not $isAdmin) {
 
 Assert-Path $serverPython "Service Python"
 
+if ($StartDelaySeconds -gt 0) {
+    Start-Sleep -Seconds $StartDelaySeconds
+}
+
 if ($ValidateOnly) {
     Assert-Path $privateSource "Private source"
     $validationRoot = Join-Path ([IO.Path]::GetTempPath()) ("webgpt-mcp-validate-" + [Guid]::NewGuid().ToString("N"))
@@ -144,6 +187,7 @@ if ($ValidateOnly) {
         New-Item -ItemType Directory -Path $stageApp -Force | Out-Null
         Copy-Item -LiteralPath $privateSource -Destination (Join-Path $stageApp "coding_tools_mcp") -Recurse -Force
         $version = Test-Package (Join-Path $stageApp "coding_tools_mcp")
+        Test-SourceBehavior $stageApp
         Write-Host "PRIVATE_MCP_VALIDATE_OK version=$version"
         exit 0
     }
@@ -178,6 +222,9 @@ try {
     }
 
     $expectedVersion = Test-Package (Join-Path $stageRoot "app\coding_tools_mcp")
+    if (-not $Rollback) {
+        Test-SourceBehavior (Join-Path $stageRoot "app")
+    }
     if ($Rollback) {
         Write-Host "Rolling back private MCP to $bundlePath (version $expectedVersion)..."
     }
@@ -196,7 +243,9 @@ try {
     Move-Item -LiteralPath $runnerPath -Destination $oldRunnerPath
     Move-Item -LiteralPath (Join-Path $stageRoot "app") -Destination $appPath
     Copy-Item -LiteralPath (Join-Path $stageRoot "run-mcp-service.ps1") -Destination $runnerPath -Force
-    Install-BrokerFiles
+    if (-not $SkipBrokerRefresh) {
+        Install-BrokerFiles
+    }
     & icacls.exe $appPath /grant "${localServiceSid}:(OI)(CI)RX" /C | Out-Null
     & icacls.exe $runnerPath /grant "${localServiceSid}:RX" /C | Out-Null
     $swapped = $true

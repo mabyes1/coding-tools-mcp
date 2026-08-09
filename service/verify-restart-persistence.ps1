@@ -75,8 +75,13 @@ issued = token({
 })
 if not issued.get("access_token"):
     raise RuntimeError("access token missing")
+if not issued.get("refresh_token"):
+    raise RuntimeError("refresh token missing")
 with open(os.environ["TEST_MCP_TOKEN_FILE"], "w", encoding="utf-8") as handle:
-    json.dump({"access_token": issued["access_token"]}, handle)
+    json.dump({
+        "access_token": issued["access_token"],
+        "refresh_token": issued["refresh_token"],
+    }, handle)
 print("TOKEN_BEFORE_RESTART_READY")
 '@ | & $serverPython -
     if ($LASTEXITCODE -ne 0) { throw "token acquisition failed" }
@@ -93,9 +98,25 @@ print("TOKEN_BEFORE_RESTART_READY")
 
     $env:TEST_MCP_TOKEN_FILE = $tokenFile
     @'
-import json, os, urllib.request
+import json, os, urllib.parse, urllib.request
 with open(os.environ["TEST_MCP_TOKEN_FILE"], encoding="utf-8") as handle:
-    access_token = json.load(handle)["access_token"]
+    saved = json.load(handle)
+refresh_body = urllib.parse.urlencode({
+    "grant_type": "refresh_token",
+    "client_id": "PQWKcrcy4yTeumHoguSJuph3a2oHagI2",
+    "refresh_token": saved["refresh_token"],
+    "resource": "https://mcp.kennyxizi.pp.ua",
+}).encode()
+refresh_response = urllib.request.urlopen(urllib.request.Request(
+    "http://127.0.0.1:8765/oauth/token",
+    data=refresh_body,
+    headers={"Content-Type": "application/x-www-form-urlencoded"},
+    method="POST",
+), timeout=20)
+refreshed = json.load(refresh_response)
+access_token = refreshed.get("access_token")
+if not access_token:
+    raise RuntimeError("refresh token did not yield a new access token")
 body = json.dumps({
     "jsonrpc": "2.0", "id": "restart-check", "method": "initialize",
     "params": {"protocolVersion": "2025-06-18", "capabilities": {},
@@ -108,7 +129,7 @@ response = urllib.request.urlopen(urllib.request.Request(
 ), timeout=20)
 if response.status != 200:
     raise RuntimeError("MCP after restart failed: " + str(response.status))
-print("PRODUCTION_RESTART_TOKEN_PERSISTENCE_OK")
+print("PRODUCTION_RESTART_REFRESH_PERSISTENCE_OK")
 '@ | & $serverPython -
     if ($LASTEXITCODE -ne 0) { throw "token validation after restart failed" }
 }

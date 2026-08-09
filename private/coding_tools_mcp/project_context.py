@@ -5,6 +5,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .gitutils import git_command
+
 
 CONTEXT_FILE_NAMES = frozenset({"AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"})
 SKIPPED_CONTEXT_DIRS = frozenset(
@@ -29,7 +31,7 @@ SKIPPED_CONTEXT_DIRS = frozenset(
 MAX_ROOT_CONTEXT_BYTES = 32 * 1024
 MAX_CONTEXT_FILE_BYTES = 16 * 1024
 MAX_NESTED_CONTEXT_FILES = 64
-MAX_CONTEXT_SCAN_FILES = 20_000
+MAX_CONTEXT_SCAN_DIRS = 5_000
 MAX_CONTEXT_SCAN_DEPTH = 12
 
 
@@ -110,22 +112,79 @@ def _discover_context_files(root: Path, warnings: list[str]) -> list[str]:
     git_paths = _git_context_files(root)
     if git_paths is not None:
         return git_paths
+
+    # The configured workspace is often an umbrella directory containing
+    # several independent repositories. Probe immediate child repositories
+    # with git first so large dependency/build trees never enter the Python
+    # directory walk merely to discover AGENTS.md / CLAUDE.md files.
     discovered: list[str] = []
-    scanned = 0
+    git_scanned_children: set[str] = set()
+    try:
+        children = sorted(root.iterdir(), key=lambda path: path.name.casefold())
+    except OSError:
+        children = []
+    for child in children:
+        if not child.is_dir() or child.is_symlink() or child.name in SKIPPED_CONTEXT_DIRS:
+            continue
+        child_paths = _git_context_files(child)
+        if child_paths is None:
+            continue
+        git_scanned_children.add(child.name)
+        discovered.extend(f"{child.name}/{path}" for path in child_paths)
+        for worktree in _git_worktree_roots(child):
+            try:
+                worktree_relative = worktree.relative_to(root)
+            except ValueError:
+                continue
+            if worktree_relative == Path(child.name):
+                continue
+            worktree_paths = _git_context_files(worktree)
+            if worktree_paths is None:
+                continue
+            prefix = worktree_relative.as_posix()
+            discovered.extend(f"{prefix}/{path}" for path in worktree_paths)
+        if len(discovered) > MAX_NESTED_CONTEXT_FILES:
+            return sorted(set(discovered))
+
+    # When the workspace is an umbrella containing real child repositories,
+    # those repositories define the project boundaries. Do not recursively
+    # walk unrelated non-repository trees such as SDKs, device dumps, caches,
+    # or tool installations merely to look for instruction filenames. We
+    # still honor instruction files placed directly at a non-repository
+    # child's root.
+    if git_scanned_children:
+        for child in children:
+            if (
+                not child.is_dir()
+                or child.is_symlink()
+                or child.name in SKIPPED_CONTEXT_DIRS
+                or child.name in git_scanned_children
+            ):
+                continue
+            for name in sorted(CONTEXT_FILE_NAMES):
+                candidate = child / name
+                if candidate.is_file() and not candidate.is_symlink():
+                    discovered.append(candidate.relative_to(root).as_posix())
+        return sorted(set(discovered))
+
+    scanned_dirs = 0
     for current, dirs, files in os.walk(root, followlinks=False):
+        scanned_dirs += 1
+        if scanned_dirs > MAX_CONTEXT_SCAN_DIRS:
+            warnings.append(f"Project-context scan stopped after {MAX_CONTEXT_SCAN_DIRS} directories.")
+            return discovered
         current_path = Path(current)
         depth = len(current_path.relative_to(root).parts)
         dirs[:] = sorted(
             name
             for name in dirs
-            if name not in SKIPPED_CONTEXT_DIRS and depth < MAX_CONTEXT_SCAN_DEPTH
+            if name not in SKIPPED_CONTEXT_DIRS
+            and not (depth == 0 and name in git_scanned_children)
+            and depth < MAX_CONTEXT_SCAN_DEPTH
         )
-        for name in sorted(files):
-            scanned += 1
-            if scanned > MAX_CONTEXT_SCAN_FILES:
-                warnings.append(f"Project-context scan stopped after {MAX_CONTEXT_SCAN_FILES} files.")
-                return discovered
-            if name not in CONTEXT_FILE_NAMES:
+        file_names = set(files)
+        for name in sorted(CONTEXT_FILE_NAMES):
+            if name not in file_names:
                 continue
             path = current_path / name
             if path.is_symlink():
@@ -140,8 +199,9 @@ def _git_context_files(root: Path) -> list[str] | None:
     ]
     try:
         completed = subprocess.run(
-            [
+            git_command(
                 "git",
+                root,
                 "-C",
                 str(root),
                 "ls-files",
@@ -150,7 +210,7 @@ def _git_context_files(root: Path) -> list[str] | None:
                 "-z",
                 "--",
                 *pathspecs,
-            ],
+            ),
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             timeout=5,
@@ -175,6 +235,40 @@ def _git_context_files(root: Path) -> list[str] | None:
         if len(paths) >= MAX_NESTED_CONTEXT_FILES + 1:
             break
     return sorted(set(paths))
+
+
+def _git_worktree_roots(repo_root: Path) -> list[Path]:
+    try:
+        completed = subprocess.run(
+            git_command(
+                "git",
+                repo_root,
+                "-C",
+                str(repo_root),
+                "worktree",
+                "list",
+                "--porcelain",
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if completed.returncode != 0:
+        return []
+
+    roots: list[Path] = []
+    marker = b"worktree "
+    for raw_line in completed.stdout.splitlines():
+        if not raw_line.startswith(marker):
+            continue
+        try:
+            candidate = Path(raw_line[len(marker) :].decode("utf-8")).resolve(strict=True)
+        except (OSError, UnicodeDecodeError):
+            continue
+        roots.append(candidate)
+    return roots
 
 
 def _decode_utf8_prefix(data: bytes) -> str:

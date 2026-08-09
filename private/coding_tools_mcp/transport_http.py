@@ -13,8 +13,9 @@ from typing import Any
 # the process indefinitely.  They are configuration values so the single-user
 # service can be adjusted without another source edit.
 MAX_HTTP_SESSIONS = 256
-HTTP_SESSION_TTL_SECONDS = 5 * 60
-MAX_HTTP_SESSIONS_PER_OWNER = 8
+HTTP_SESSION_TTL_SECONDS = 90
+HTTP_IN_FLIGHT_TTL_SECONDS = 90
+MAX_HTTP_SESSIONS_PER_OWNER = 64
 
 
 def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -49,6 +50,8 @@ class HTTPSessionRecord:
     session_id: str
     last_seen: float
     owner: str | None
+    in_flight: int = 0
+    in_flight_since: float | None = None
 
 
 class HTTPSessionManager:
@@ -66,6 +69,7 @@ class HTTPSessionManager:
         *,
         max_sessions: int | None = None,
         session_ttl_seconds: int | None = None,
+        in_flight_ttl_seconds: int | None = None,
         max_sessions_per_owner: int | None = None,
     ) -> None:
         self._factory = factory
@@ -75,6 +79,9 @@ class HTTPSessionManager:
         self.session_ttl_seconds = session_ttl_seconds or _bounded_env_int(
             "CODING_TOOLS_MCP_HTTP_SESSION_TTL_SECONDS", HTTP_SESSION_TTL_SECONDS, 30, 86_400
         )
+        self.in_flight_ttl_seconds = in_flight_ttl_seconds or _bounded_env_int(
+            "CODING_TOOLS_MCP_HTTP_IN_FLIGHT_TTL_SECONDS", HTTP_IN_FLIGHT_TTL_SECONDS, 60, 3_600
+        )
         self.max_sessions_per_owner = max_sessions_per_owner or _bounded_env_int(
             "CODING_TOOLS_MCP_MAX_HTTP_SESSIONS_PER_OWNER", MAX_HTTP_SESSIONS_PER_OWNER, 1, 256
         )
@@ -82,10 +89,12 @@ class HTTPSessionManager:
         self._lock = threading.Lock()
         self._creating = 0
         self._closed = False
-        self._evicted = 0
+        self._expired = 0
+        self._stale_in_flight_evicted = 0
+        self._capacity_evicted = 0
         self._rejected = 0
 
-    def create(self, owner: str | None = None) -> HTTPSessionBinding:
+    def create(self, owner: str | None = None, *, acquire: bool = False) -> HTTPSessionBinding:
         stale_records: list[HTTPSessionRecord] = []
         self.prune()
         with self._lock:
@@ -94,17 +103,23 @@ class HTTPSessionManager:
             owner_records = [record for record in self._sessions.values() if record.owner == owner]
             victim: HTTPSessionRecord | None = None
             if owner is not None and len(owner_records) >= self.max_sessions_per_owner:
-                victim = min(owner_records, key=lambda record: record.last_seen)
+                idle_owner_records = [record for record in owner_records if record.in_flight == 0]
+                if idle_owner_records:
+                    victim = min(idle_owner_records, key=lambda record: record.last_seen)
+                else:
+                    self._rejected += 1
+                    raise SessionCapacityError("maximum active HTTP sessions for owner reached")
             elif len(self._sessions) + self._creating >= self.max_sessions:
-                if self._sessions:
-                    victim = min(self._sessions.values(), key=lambda record: record.last_seen)
+                idle_records = [record for record in self._sessions.values() if record.in_flight == 0]
+                if idle_records:
+                    victim = min(idle_records, key=lambda record: record.last_seen)
                 else:
                     self._rejected += 1
                     raise SessionCapacityError("maximum HTTP session count reached")
             if victim is not None:
                 self._sessions.pop(victim.session_id, None)
                 stale_records.append(victim)
-                self._evicted += 1
+                self._capacity_evicted += 1
             if len(self._sessions) + self._creating >= self.max_sessions:
                 self._rejected += 1
                 raise SessionCapacityError("maximum HTTP session count reached")
@@ -116,12 +131,17 @@ class HTTPSessionManager:
         installed = False
         try:
             runtime = self._factory()
+            if owner is not None:
+                runtime.state_owner = owner
             session_id = str(runtime.http_session_id)
+            now = time.time()
             record = HTTPSessionRecord(
                 runtime=runtime,
                 session_id=session_id,
-                last_seen=time.time(),
+                last_seen=now,
                 owner=owner,
+                in_flight=1 if acquire else 0,
+                in_flight_since=now if acquire else None,
             )
             with self._lock:
                 if self._closed:
@@ -148,6 +168,31 @@ class HTTPSessionManager:
             record.last_seen = time.time()
             return HTTPSessionBinding(runtime=record.runtime, session_id=record.session_id)
 
+    def acquire(self, session_id: str) -> HTTPSessionBinding | None:
+        self.prune()
+        with self._lock:
+            if self._closed:
+                return None
+            record = self._sessions.get(session_id)
+            if record is None:
+                return None
+            now = time.time()
+            record.last_seen = now
+            if record.in_flight == 0:
+                record.in_flight_since = now
+            record.in_flight += 1
+            return HTTPSessionBinding(runtime=record.runtime, session_id=record.session_id)
+
+    def release(self, session_id: str) -> None:
+        with self._lock:
+            record = self._sessions.get(session_id)
+            if record is None:
+                return
+            record.in_flight = max(0, record.in_flight - 1)
+            record.last_seen = time.time()
+            if record.in_flight == 0:
+                record.in_flight_since = None
+
     def delete(self, session_id: str) -> bool:
         with self._lock:
             record = self._sessions.pop(session_id, None)
@@ -157,16 +202,27 @@ class HTTPSessionManager:
         return True
 
     def prune(self) -> None:
-        cutoff = time.time() - self.session_ttl_seconds
+        now = time.time()
+        cutoff = now - self.session_ttl_seconds
+        in_flight_cutoff = now - self.in_flight_ttl_seconds
         with self._lock:
             expired_ids = [
                 session_id
                 for session_id, record in self._sessions.items()
-                if record.last_seen < cutoff
+                if record.in_flight == 0 and record.last_seen < cutoff
             ]
-            records = [self._sessions.pop(session_id) for session_id in expired_ids]
-            self._evicted += len(records)
-        for record in records:
+            stale_in_flight_ids = [
+                session_id
+                for session_id, record in self._sessions.items()
+                if record.in_flight > 0
+                and record.in_flight_since is not None
+                and record.in_flight_since < in_flight_cutoff
+            ]
+            expired_records = [self._sessions.pop(session_id) for session_id in expired_ids]
+            stale_records = [self._sessions.pop(session_id) for session_id in stale_in_flight_ids]
+            self._expired += len(expired_records)
+            self._stale_in_flight_evicted += len(stale_records)
+        for record in expired_records + stale_records:
             _close_runtime(record.runtime)
 
     def stats(self) -> dict[str, int | float]:
@@ -174,13 +230,23 @@ class HTTPSessionManager:
         now = time.time()
         with self._lock:
             ages = [max(0.0, now - record.last_seen) for record in self._sessions.values()]
+            in_flight_ages = [
+                max(0.0, now - record.in_flight_since)
+                for record in self._sessions.values()
+                if record.in_flight > 0 and record.in_flight_since is not None
+            ]
             return {
                 "active": len(self._sessions),
+                "in_flight": sum(record.in_flight for record in self._sessions.values()),
                 "creating": self._creating,
                 "max": self.max_sessions,
                 "ttl_seconds": self.session_ttl_seconds,
+                "in_flight_ttl_seconds": self.in_flight_ttl_seconds,
                 "oldest_age_seconds": max(ages, default=0.0),
-                "evicted": self._evicted,
+                "oldest_in_flight_seconds": max(in_flight_ages, default=0.0),
+                "expired": self._expired,
+                "stale_in_flight_evicted": self._stale_in_flight_evicted,
+                "capacity_evicted": self._capacity_evicted,
                 "rejected": self._rejected,
             }
 

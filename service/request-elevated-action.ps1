@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("sync-installed-webroot")]
+    [ValidateNotNullOrEmpty()]
     [string]$Action,
     [int]$TimeoutSeconds = 300
 )
@@ -15,7 +15,8 @@ if (-not (Test-Path -LiteralPath $queueRoot -PathType Container)) {
 $brokerPidPath = Join-Path $queueRoot "broker.pid"
 $brokerPid = $null
 try { $brokerPid = [int](Get-Content -LiteralPath $brokerPidPath -Raw -ErrorAction Stop) } catch { }
-if (-not $brokerPid -or -not (Get-Process -Id $brokerPid -ErrorAction SilentlyContinue)) {
+$brokerProcess = if ($brokerPid) { Get-Process -Id $brokerPid -ErrorAction SilentlyContinue } else { $null }
+if (-not $brokerProcess -or $brokerProcess.SessionId -le 0) {
     [Console]::Error.WriteLine("uac_unavailable: interactive elevated broker is not running; start WebGPT-Elevated-Broker first.")
     exit 125
 }
@@ -37,7 +38,8 @@ try {
     $deadline = (Get-Date).AddSeconds([Math]::Max(1, [Math]::Min($TimeoutSeconds, 600)))
     do {
         if (Test-Path -LiteralPath $responsePath -PathType Leaf) {
-            $response = Get-Content -LiteralPath $responsePath -Raw | ConvertFrom-Json
+            $responseJson = [IO.File]::ReadAllText($responsePath, [Text.UTF8Encoding]::new($false))
+            $response = $responseJson | ConvertFrom-Json
             Remove-Item -LiteralPath $responsePath -Force -ErrorAction SilentlyContinue
             if ($response.ok) {
                 Write-Host ([string]$response.message)

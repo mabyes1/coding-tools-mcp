@@ -1,5 +1,15 @@
 $ErrorActionPreference = "Stop"
 
+function Get-Sha256Hex([string]$Path) {
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try { return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "") }
+        finally { $sha256.Dispose() }
+    }
+    finally { $stream.Dispose() }
+}
+
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator
 )
@@ -140,7 +150,7 @@ try {
     $webrootSourceScript = Join-Path $workspaceRoot "phoneMonitor\scripts\sync-installed-webroot.ps1"
     $brokerPath = Join-Path $serviceRoot "elevated-broker.ps1"
     if (Test-Path -LiteralPath $webrootSourceScript -PathType Leaf) {
-        $webrootHash = (Get-FileHash -LiteralPath $webrootSourceScript -Algorithm SHA256).Hash
+        $webrootHash = Get-Sha256Hex $webrootSourceScript
         $brokerText = Get-Content -LiteralPath $brokerPath -Raw
         $brokerText = [regex]::Replace($brokerText, '(ExpectedSha256\s*=\s*")[A-Fa-f0-9]{64}("?)', { param($match) $match.Groups[1].Value + $webrootHash + $match.Groups[2].Value })
         $brokerText = $brokerText.Replace("REPLACE_WITH_SYNC_WEBROOT_SHA256", $webrootHash)
@@ -223,6 +233,14 @@ try {
         "${localServiceSid}:(OI)(CI)M" /T /C | Out-Host
     & icacls.exe $pythonRoot /grant `
         "${localServiceSid}:(OI)(CI)RX" /C | Out-Host
+
+    Write-Host "Installing the interactive elevated action broker..."
+    $brokerManager = Join-Path $serviceRoot "manage-elevated-broker.ps1"
+    $windowsPowerShell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+    & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $brokerManager -Action Install
+    if ($LASTEXITCODE -ne 0) { throw "Could not install the interactive elevated broker task." }
+    & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $brokerManager -Action Start
+    if ($LASTEXITCODE -ne 0) { throw "Could not start the interactive elevated broker." }
 
     Write-Host "Stopping and removing the old scheduled supervisors..."
     foreach ($taskName in @("WebGPT-CodingTools-MCP", "WebGPT-Cloudflare-Tunnel")) {

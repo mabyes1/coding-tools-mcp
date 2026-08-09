@@ -37,6 +37,7 @@ from . import __version__
 from .envutils import ENV_PREFIX, truthy_env
 from .errors import JsonRpcError, ToolFailure
 from .elevated_actions import ELEVATED_ACTIONS, request_elevated_action
+from .gitutils import git_command
 from .landlock_exec import libc_syscall
 from .oauth import (
     OAUTH_CODE_TTL_SECONDS,
@@ -345,7 +346,19 @@ POSIX_CORE_ENV_NAMES = {"PATH", "LANG", "LC_ALL", "TERM"}
 # Not POSIX core, but inherited under inherit="core" so git helper subprocesses and
 # exec_command share the host's global git config (e.g. safe.directory entries).
 GIT_ENV_NAMES = {"GIT_CONFIG_GLOBAL"}
-WINDOWS_CORE_ENV_NAMES = {"PATH", "PATHEXT", "COMSPEC", "SYSTEMROOT", "WINDIR"}
+WINDOWS_CORE_ENV_NAMES = {
+    "PATH",
+    "PATHEXT",
+    "COMSPEC",
+    "SYSTEMROOT",
+    "WINDIR",
+    # Common Windows developer tools resolve SDK/config roots through these
+    # variables even when their executable was found through PATH. They are
+    # machine-level locations, not user secrets.
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "PROGRAMW6432",
+}
 NETWORK_RE = re.compile(
     r"(https?://|urllib\.request|urllib3|requests\.|http\.client|\bHTTPConnection\b|\bHTTPSConnection\b|socket\.|aiohttp|httpx|\bcurl\b|\bwget\b|\bnc\b|\bnetcat\b|\bssh\b|\bscp\b|\bftp\b)",
     re.I,
@@ -726,192 +739,225 @@ def _image_content(payload: dict[str, Any]) -> list[dict[str, Any]]:
 TOOL_REGISTRY: dict[str, ToolSpec] = {
     "server_info": ToolSpec(
         title="Server info",
-        description="Return server, workspace, project-context, auth, policy, and fixed-tool metadata.",
+        description="Use first for MCP/infrastructure diagnosis: server/version, workspace, auth, policy, HTTP state, and active execution-session pressure.",
         read_only=True,
         idempotent=True,
     ),
     "check_exec_environment": ToolSpec(
         title="Check exec environment",
-        description="Return lightweight exec_command sandbox and environment status known to the server.",
+        description="Use when command execution may fail: inspect sandbox/policy, available developer executables, and active execution-session pressure.",
         read_only=True,
         idempotent=True,
     ),
     "which_tools": ToolSpec(
         title="Discover tools",
-        description="Return availability and resolved paths for requested developer tools.",
+        description="Use to check whether specific executables exist and resolve their exact paths.",
         read_only=True,
         idempotent=True,
     ),
     "get_default_cwd": ToolSpec(
         title="Get default cwd",
-        description="Return the current default cwd inside the workspace.",
+        description="Use to inspect the current default directory used by relative tool paths.",
         read_only=True,
         idempotent=True,
     ),
     "list_workspaces": ToolSpec(
         title="List workspaces",
-        description="List the explicitly allowlisted workspace selectors available to this connector session.",
+        description="Use to see which explicitly allowlisted workspaces this connector may access.",
         read_only=True,
         idempotent=True,
     ),
     "switch_workspace": ToolSpec(
         title="Switch workspace",
-        description=(
-            "Switch this connector session to one explicitly allowlisted workspace. "
-            "Running commands block the switch."
-        ),
+        description="Use to switch to another allowlisted workspace; blocked while commands are running.",
         idempotent=True,
     ),
     "set_default_cwd": ToolSpec(
         title="Set default cwd",
-        description="Set the default cwd for relative tool paths inside the workspace.",
+        description="Use to change the default directory for later relative paths within the current owner/workspace.",
         idempotent=True,
     ),
     "read_file": ToolSpec(
         title="Read file",
-        description="Read a UTF-8 text file slice inside the configured workspace.",
+        description="Use for a known UTF-8 file or line range. Relative paths use the default cwd; locate unknown files with list_files/search_text first.",
         read_only=True,
         idempotent=True,
     ),
     "list_dir": ToolSpec(
         title="List directory",
-        description="List directory entries inside the configured workspace.",
+        description="Use to inspect a directory. Relative paths use the default cwd; use list_files for recursive or glob-based discovery.",
         read_only=True,
         idempotent=True,
     ),
     "list_files": ToolSpec(
         title="List files",
-        description="List workspace files using glob filters.",
+        description="Use to find files by path or glob. Relative paths use the default cwd; use search_text for file contents.",
         read_only=True,
         idempotent=True,
     ),
     "search_text": ToolSpec(
         title="Search text",
-        description="Search UTF-8 workspace files for text or regex matches.",
+        description="Use to locate text or regex matches in UTF-8 files. Relative path scopes use the default cwd; results include paths and line numbers.",
         read_only=True,
         idempotent=True,
     ),
     "apply_patch": ToolSpec(
         title="Apply patch",
-        description="Stage, validate, and atomically replace files from a patch envelope inside the workspace.",
+        description="Use for all direct file edits. Patch paths are workspace-rooted, not default-cwd-relative; changes are validated and applied atomically.",
         destructive=True,
     ),
     "exec_command": ToolSpec(
         title="Execute command",
-        description="Run a bounded command in the workspace under runtime policy.",
+        description="Use for builds, tests, scripts, or commands without a dedicated tool. Fast commands exit one-shot; running commands retain a session. Never edit files with it; prefer git_* for Git inspection.",
         destructive=True,
         open_world=True,
         error_status="failed",
     ),
     "write_stdin": ToolSpec(
         title="Write stdin",
-        description=(
-            "Poll or interact with a running command session. Pass empty chars to wait for more output; "
-            "pass non-empty chars to write to stdin."
-        ),
+        description="Use only with a running exec_command session. Send non-empty chars to stdin, or empty chars to wait/poll; it does not start or revive sessions.",
         ),
     "poll_session": ToolSpec(
         title="Poll session",
-        description=(
-            "Poll a command session using a reconnect-safe stdout/stderr cursor. "
-            "Returns only output after after_cursor by default."
-        ),
+        description="Use to fetch only new stdout/stderr from a running command using reconnect-safe cursors.",
         read_only=True,
         idempotent=True,
     ),
     "kill_session": ToolSpec(
         title="Kill session",
-        description="Terminate a server-managed running command session.",
+        description="Use to stop a known running exec_command session when it is no longer needed or is stuck; terminal one-shot commands do not need killing.",
         destructive=True,
     ),
     "kill_tree": ToolSpec(
         title="Kill process tree",
-        description="Terminate a command session and its Windows child-process tree.",
+        description="Use when stopping a command must also terminate all child processes it launched.",
         destructive=True,
     ),
     "list_sessions": ToolSpec(
         title="List sessions",
-        description="List active and recently completed command sessions that survive connector reconnects.",
+        description="Use to find active or retained command sessions, especially after a connector reconnect.",
         read_only=True,
         idempotent=True,
     ),
     "process_tree": ToolSpec(
         title="Process tree",
-        description="Inspect the bounded process tree belonging to a command session.",
+        description="Use to inspect child processes belonging to a managed command session before deciding what to stop.",
         read_only=True,
         idempotent=True,
     ),
     "read_output": ToolSpec(
         title="Read output",
-        description="Read retained stdout or stderr by output_ref with per-stream byte offset pagination.",
+        description="Use only when exec/write/kill returned an output_ref and more retained stdout/stderr is needed; page by byte offset instead of rerunning the command.",
         read_only=True,
         idempotent=True,
     ),
     "tail_output": ToolSpec(
         title="Tail output",
-        description="Return only the last N lines of retained command output.",
+        description="Use when only the latest lines of retained command output matter.",
         read_only=True,
         idempotent=True,
     ),
     "find_output": ToolSpec(
         title="Find output",
-        description="Search retained command output without returning the whole buffer.",
+        description="Use to search large retained command output for a term without reading the whole buffer.",
         read_only=True,
         idempotent=True,
     ),
     "git_status": ToolSpec(
         title="Git status",
-        description="Return git working tree status for the workspace.",
+        description="Use to inspect tracked, staged, modified, and untracked changes for the repository containing a path.",
         read_only=True,
         idempotent=True,
     ),
     "git_diff": ToolSpec(
         title="Git diff",
-        description="Return unified git diff for workspace changes.",
+        description="Use to review exact staged or unstaged code changes before judging or finishing an edit.",
         read_only=True,
         idempotent=True,
     ),
     "git_log": ToolSpec(
         title="Git log",
-        description="Return recent git commits with bounded structured metadata.",
+        description="Use to inspect recent commit history for a repository or path without reading patch contents.",
         read_only=True,
         idempotent=True,
     ),
     "git_show": ToolSpec(
         title="Git show",
-        description="Return bounded git show output for a revision.",
+        description="Use to inspect one revision, commit metadata, and optionally its diff.",
         read_only=True,
         idempotent=True,
     ),
     "git_blame": ToolSpec(
         title="Git blame",
-        description="Return bounded git blame metadata for a workspace file.",
+        description="Use to identify which commits/authors last changed specific lines of a file.",
         read_only=True,
         idempotent=True,
     ),
     "request_permissions": ToolSpec(
         title="Request permissions",
-        description="Report scoped permission-request status without silently granting operations.",
+        description="Use only after exec_command/apply_patch returns PERMISSION_REQUIRED. Request the exact reported permission and retry only if a grant is returned; unsupported clients cannot grant it.",
         read_only=True,
     ),
     "request_elevated_action": ToolSpec(
         title="Request elevated action",
-        description=(
-            "Ask the interactive user-session broker to approve one fixed deployment action; "
-            "arbitrary commands and paths are rejected."
-        ),
+        description="Use for a registered fixed admin/deployment action through the interactive elevated broker; arbitrary commands are rejected.",
         destructive=True,
         error_status="failed",
     ),
     "view_image": ToolSpec(
         title="View image",
-        description="Return a workspace image as MCP image content.",
+        description="Use to visually inspect an image file from the workspace rather than reading its binary bytes.",
         read_only=True,
         idempotent=True,
         content_builder=_image_content,
         gated_by="enable_view_image",
     ),
 }
+
+# ChatGPT connector discovery currently surfaces at most 20 functions from
+# this MCP. Keep the public catalog intentionally bounded so useful tools are
+# never silently pushed out by lower-priority helpers. Implementations outside
+# this list remain available internally for compatibility and tests.
+PUBLIC_TOOL_NAMES = (
+    "server_info",
+    "check_exec_environment",
+    "get_default_cwd",
+    "set_default_cwd",
+    "read_file",
+    "list_dir",
+    "list_files",
+    "search_text",
+    "apply_patch",
+    "exec_command",
+    "write_stdin",
+    "kill_session",
+    "read_output",
+    "git_status",
+    "git_diff",
+    "git_log",
+    "git_show",
+    "git_blame",
+    "request_permissions",
+    "view_image",
+)
+
+
+def _validate_public_tool_catalog() -> None:
+    if len(PUBLIC_TOOL_NAMES) > 20:
+        raise RuntimeError("Public MCP tool catalog must not exceed the connector's 20-tool discovery budget.")
+    if len(set(PUBLIC_TOOL_NAMES)) != len(PUBLIC_TOOL_NAMES):
+        raise RuntimeError("Public MCP tool catalog contains duplicate names.")
+    for name in PUBLIC_TOOL_NAMES:
+        spec = TOOL_REGISTRY.get(name)
+        if spec is None:
+            raise RuntimeError(f"Public MCP tool is not registered: {name}")
+        if not spec.title.strip() or not spec.description.strip():
+            raise RuntimeError(f"Public MCP tool needs a concise title and description: {name}")
+        if len(spec.description) > 200:
+            raise RuntimeError(f"Public MCP tool description is too long (>200 chars): {name}")
+
+
+_validate_public_tool_catalog()
 
 LANDLOCK_CREATE_RULESET_VERSION = 1
 LANDLOCK_RULE_PATH_BENEATH = 1
@@ -1068,6 +1114,14 @@ def read_output_action(output_ref: str, *, offset: int = 0, limit: int | None = 
 _TOOL_PATHS: dict[str, str] = {}
 
 
+def configured_tool_path(name: str) -> str | None:
+    env_name = re.sub(r"[^A-Za-z0-9]+", "_", name).strip("_").upper()
+    raw = (os.environ.get(f"{ENV_PREFIX}_{env_name}_PATH") or "").strip()
+    if raw and Path(raw).is_file():
+        return raw
+    return None
+
+
 def cached_which(*names: str) -> str | None:
     """shutil.which with a success-only cache: absence keeps re-probing so a
     tool installed mid-session is still picked up."""
@@ -1075,7 +1129,7 @@ def cached_which(*names: str) -> str | None:
     if cached:
         return cached
     for name in names:
-        path = shutil.which(name)
+        path = configured_tool_path(name) or shutil.which(name)
         if path:
             _TOOL_PATHS[names[0]] = path
             return path
@@ -1351,6 +1405,7 @@ class Workspace:
         if str(self.root) in unsafe_roots:
             raise ToolFailure("INVALID_ARGUMENT", "Unsafe workspace root rejected.", category="security")
         self.git_path = shutil.which("git")
+        self._git_repo_cache: dict[Path, Path | None] = {}
 
     def _reject_unsafe_text(self, raw_path: str) -> PurePosixPath:
         if not isinstance(raw_path, str) or not raw_path:
@@ -1403,7 +1458,17 @@ class Workspace:
         try:
             resolved = candidate.resolve(strict=True)
         except FileNotFoundError as exc:
-            raise ToolFailure("NOT_FOUND", f"Path not found: {raw_path}", category="not_found") from exc
+            raise ToolFailure(
+                "NOT_FOUND",
+                f"Path not found: {raw_path}",
+                category="not_found",
+                details={
+                    "requested_path": raw_path,
+                    "base": normalize_rel_display(base, self.root),
+                    "attempted_path": normalize_rel_display(candidate, self.root),
+                    "recovery_hint": "Check get_default_cwd or use the path relative to the reported base.",
+                },
+            ) from exc
         if not is_relative_to(resolved, self.root):
             code = "SYMLINK_ESCAPE" if candidate.is_symlink() else "PATH_OUTSIDE_WORKSPACE"
             raise ToolFailure(code, "Path escapes the configured workspace.", category="security")
@@ -1488,26 +1553,77 @@ class Workspace:
             return False
         return is_relative_to(resolved, self.root)
 
+    def git_repository_for(self, path: Path) -> Path | None:
+        """Return the nearest Git worktree root inside this workspace.
+
+        The configured workspace may be an umbrella containing many unrelated
+        repositories. Cache directory ancestry so large searches do not spawn
+        failing ``git -C <umbrella>`` probes for every batch.
+        """
+
+        try:
+            resolved = path.resolve(strict=True)
+        except (FileNotFoundError, OSError):
+            resolved = path.parent.resolve(strict=True)
+        current = resolved if resolved.is_dir() else resolved.parent
+        if not is_relative_to(current, self.root):
+            return None
+        visited: list[Path] = []
+        repo: Path | None = None
+        while True:
+            if current in self._git_repo_cache:
+                repo = self._git_repo_cache[current]
+                break
+            visited.append(current)
+            if (current / ".git").exists():
+                repo = current
+                break
+            if current == self.root:
+                break
+            current = current.parent
+        for directory in visited:
+            self._git_repo_cache[directory] = repo
+        return repo
+
     def git_ignored_paths(self, rel_paths: list[str]) -> set[str]:
         if not rel_paths:
             return set()
         git = self.git_path
         if not git:
             return set()
-        try:
-            completed = subprocess.run(
-                [git, "-C", str(self.root), "check-ignore", "--stdin", "-z"],
-                input="\0".join(rel_paths) + "\0",
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                timeout=2,
+        groups: dict[Path, list[tuple[str, str]]] = {}
+        for workspace_rel in rel_paths:
+            absolute = self.root / Path(workspace_rel)
+            repo = self.git_repository_for(absolute)
+            if repo is None:
+                continue
+            try:
+                repo_rel = absolute.relative_to(repo).as_posix()
+            except ValueError:
+                continue
+            groups.setdefault(repo, []).append((workspace_rel, repo_rel))
+        ignored: set[str] = set()
+        for repo, items in groups.items():
+            reverse = {repo_rel: workspace_rel for workspace_rel, repo_rel in items}
+            try:
+                completed = subprocess.run(
+                    git_command(git, repo, "-C", str(repo), "check-ignore", "--stdin", "-z"),
+                    input="\0".join(reverse) + "\0",
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    timeout=2,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if completed.returncode not in {0, 1}:
+                continue
+            ignored.update(
+                reverse[repo_rel]
+                for repo_rel in completed.stdout.split("\0")
+                if repo_rel in reverse
             )
-        except (OSError, subprocess.SubprocessError):
-            return set()
-        if completed.returncode not in {0, 1}:
-            return set()
-        return {path for path in completed.stdout.split("\0") if path}
+        return ignored
 
 
 class ExecutionRegistry:
@@ -1517,10 +1633,13 @@ class ExecutionRegistry:
         self.sessions: dict[str, ExecSession] = {}
         self.output_sessions: dict[str, ExecSession] = {}
         self.sessions_lock = threading.Lock()
+        self.state_lock = threading.Lock()
+        self.owner_default_cwds: dict[tuple[str, str], Path] = {}
         self.starting_sessions = 0
         self.closed = False
         self.runtime_dir: Path | None = None
         self.fallback_runtime_dir: Path | None = None
+        self.http_session_stats_provider: Callable[[], dict[str, int | float]] | None = None
 
     def close(self) -> None:
         with self.sessions_lock:
@@ -1586,7 +1705,8 @@ class Runtime:
         self.enable_view_image = enable_view_image
         self._exposed_tool_names = [
             name
-            for name, spec in TOOL_REGISTRY.items()
+            for name in PUBLIC_TOOL_NAMES
+            for spec in (TOOL_REGISTRY[name],)
             if spec.gated_by is None or getattr(self, spec.gated_by)
         ]
         self._exposed_tool_name_set = frozenset(self._exposed_tool_names)
@@ -1634,6 +1754,7 @@ class Runtime:
             self._set_runtime_dir(self.execution_registry.runtime_dir)
             self.fallback_runtime_dir = self.execution_registry.fallback_runtime_dir
         self.default_cwd = self.workspace.root
+        self.state_owner: str | None = None
         self._closed = False
         self.http_session_id = secrets.token_urlsafe(24)
         self.protocol_version = PROTOCOL_VERSION
@@ -1786,13 +1907,27 @@ class Runtime:
         return self.oauth_config is not None
 
     def default_cwd_display(self) -> str:
-        return normalize_rel_display(self.default_cwd, self.workspace.root)
+        return normalize_rel_display(self.effective_default_cwd(), self.workspace.root)
+
+    def _owner_cwd_key(self) -> tuple[str, str] | None:
+        if self.state_owner is None:
+            return None
+        return self.state_owner, os.path.normcase(str(self.workspace.root))
+
+    def effective_default_cwd(self) -> Path:
+        key = self._owner_cwd_key()
+        if key is not None:
+            with self.execution_registry.state_lock:
+                shared = self.execution_registry.owner_default_cwds.get(key)
+            if shared is not None:
+                return shared
+        return self.default_cwd
 
     def resolve_existing(self, raw_path: str = ".") -> ResolvedPath:
-        return self.workspace.resolve_existing_at(self.default_cwd, raw_path)
+        return self.workspace.resolve_existing_at(self.effective_default_cwd(), raw_path)
 
     def resolve_for_write(self, raw_path: str) -> ResolvedPath:
-        return self.workspace.resolve_for_write_at(self.default_cwd, raw_path)
+        return self.workspace.resolve_for_write_at(self.effective_default_cwd(), raw_path)
 
     def git_path_filter(self, raw_path: str) -> str:
         if raw_path == ".":
@@ -1810,6 +1945,20 @@ class Runtime:
             "cache_dir": str(self.cache_dir),
         }
 
+    def _execution_session_summary(self) -> dict[str, Any]:
+        self._prune_sessions()
+        with self.sessions_lock:
+            running = len(self.sessions)
+            starting = self.starting_sessions
+            retained_output = len(self.output_sessions)
+        return {
+            "running": running,
+            "starting": starting,
+            "retained_output": retained_output,
+            "max_running": MAX_ACTIVE_EXEC_SESSIONS,
+            "available_slots": max(0, MAX_ACTIVE_EXEC_SESSIONS - running - starting),
+        }
+
     def _landlock_enforced(self, landlock: dict[str, Any]) -> bool:
         return bool(landlock.get("available")) and self.landlock_enabled()
 
@@ -1817,6 +1966,16 @@ class Runtime:
         tools = self.exposed_tool_names()
         landlock = landlock_status_payload()
         landlock["enabled"] = self._landlock_enforced(landlock)
+        http_session_stats = (
+            self.execution_registry.http_session_stats_provider()
+            if self.execution_registry.http_session_stats_provider is not None
+            else None
+        )
+        oauth_state_path = (
+            str(self.oauth_config.state_store.path)
+            if self.oauth_config is not None and self.oauth_config.state_store is not None
+            else None
+        )
         return {
             "server": SERVER_NAME,
             "title": SERVER_TITLE,
@@ -1828,7 +1987,19 @@ class Runtime:
                 for entry in workspace_catalog_from_env()
             ],
             "default_cwd": self.default_cwd_display(),
+            "default_cwd_scope": "oauth_owner_workspace" if self.state_owner else "mcp_session",
             "auth_enabled": self.auth_enabled(),
+            "oauth": {
+                "enabled": self.oauth_enabled(),
+                "persistent_state": oauth_state_path is not None,
+                "state_path": oauth_state_path,
+                "access_token_ttl_seconds": (
+                    self.oauth_config.token_ttl if self.oauth_config is not None else None
+                ),
+                "refresh_token_ttl_seconds": (
+                    self.oauth_config.refresh_token_ttl if self.oauth_config is not None else None
+                ),
+            },
             "dangerously_skip_all_permissions": self.dangerously_skip_all_permissions,
             "annotation_override": "fake_readonly" if self.fake_readonly_annotations else None,
             "landlock": landlock,
@@ -1838,6 +2009,7 @@ class Runtime:
                 "global_tmp_write": self.global_tmp_write_policy(),
                 "secret_env_filter": self.secret_env_filter_policy(),
             },
+            "permission_elicitation_supported": False,
             "shell_env_inherit": self.shell_env_policy.inherit,
             "shell_env_include_only": list(self.shell_env_policy.include_only),
             "shell_env_exclude": list(self.shell_env_policy.exclude),
@@ -1847,6 +2019,8 @@ class Runtime:
                 "nested_instruction_files": list(self.project_context.nested_files),
                 "warnings": list(self.project_context.warnings),
             },
+            "http_sessions": http_session_stats,
+            "execution": self._execution_session_summary(),
             "tools": tools,
             "tool_count": len(tools),
         }
@@ -1900,8 +2074,9 @@ class Runtime:
                 payload["permission_request"] = {
                     "tool_name": name,
                     "permission": permission or "unknown",
-                    "status": "required",
-                    "retryable": True,
+                    "status": "unsupported",
+                    "retryable": False,
+                    "elicitation_supported": False,
                 }
             if exc.code == "ELICITATION_UNSUPPORTED":
                 payload["status"] = "unsupported"
@@ -1938,15 +2113,19 @@ class Runtime:
             warnings.append(
                 "tools/list annotations are faked as read-only; apply_patch and exec_command still mutate and execute"
             )
+        requested = args.get("tools")
+        names = [str(item) for item in requested] if isinstance(requested, list) and requested else [
+            "rg", "fd", "git", "node", "dotnet", "pwsh", "powershell", "python", "adb"
+        ]
         return {
             "ok": True,
             **self._exec_environment_summary(),
+            "execution": self._execution_session_summary(),
             "landlock_enabled": self._landlock_enforced(landlock),
             "landlock_abi": landlock.get("abi_version"),
             "global_tmp_write": self.global_tmp_write_policy(),
-            "tool_discovery": self._discover_tools(
-                ["rg", "git", "node", "dotnet", "pwsh", "powershell", "python", "adb"]
-            ),
+            "tool_discovery": self._discover_tools(names),
+            "permission_elicitation_supported": False,
             "executable_allowlist": list(configured_executable_allowlist()),
             "warnings": warnings,
         }
@@ -1959,6 +2138,9 @@ class Runtime:
             if not name:
                 continue
             candidates = [name]
+            configured = configured_tool_path(name)
+            if configured:
+                candidates.insert(0, configured)
             if name.casefold() in {"pwsh", "powershell"} and configured_pwsh:
                 candidates.insert(0, configured_pwsh)
             resolved = next((path for path in candidates if Path(path).is_file() or shutil.which(path)), None)
@@ -1969,13 +2151,14 @@ class Runtime:
         requested = args.get("tools")
         names = [str(item) for item in requested] if isinstance(requested, list) else []
         if not names:
-            names = ["rg", "git", "node", "dotnet", "pwsh", "powershell", "python", "adb"]
+            names = ["rg", "fd", "git", "node", "dotnet", "pwsh", "powershell", "python", "adb"]
         return {"tools": self._discover_tools(names)}
 
     def get_default_cwd(self, args: dict[str, Any]) -> dict[str, Any]:
         return {
             "workspace": str(self.workspace.root),
             "default_cwd": self.default_cwd_display(),
+            "scope": "oauth_owner_workspace" if self.state_owner else "mcp_session",
         }
 
     def list_workspaces(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -2026,9 +2209,14 @@ class Runtime:
         if not resolved.path.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "Default cwd must be a directory.", category="validation")
         self.default_cwd = resolved.path
+        key = self._owner_cwd_key()
+        if key is not None:
+            with self.execution_registry.state_lock:
+                self.execution_registry.owner_default_cwds[key] = resolved.path
         return {
             "workspace": str(self.workspace.root),
             "default_cwd": resolved.display,
+            "scope": "oauth_owner_workspace" if self.state_owner else "mcp_session",
         }
 
     def emit_tool_trace(self, name: str, args: dict[str, Any], payload: dict[str, Any], started_at: float) -> None:
@@ -2069,8 +2257,7 @@ class Runtime:
         max_lines = args.get("max_lines")
         if end_line is not None and max_lines is not None:
             calculated_end_line = start_line + int(max_lines) - 1
-            if int(end_line) != calculated_end_line:
-                raise ToolFailure("INVALID_ARGUMENT", "end_line and max_lines select different ranges.", category="validation")
+            end_line = min(int(end_line), calculated_end_line)
         if end_line is None and max_lines is not None:
             end_line = start_line + int(max_lines) - 1
         encoding = args.get("encoding", "utf-8")
@@ -2769,12 +2956,19 @@ class Runtime:
             if len(self.sessions) + self.starting_sessions >= MAX_ACTIVE_EXEC_SESSIONS:
                 if landlock_fd is not None:
                     os.close(landlock_fd)
+                active = len(self.sessions)
+                starting = self.starting_sessions
                 raise ToolFailure(
                     "SESSION_LIMIT_REACHED",
-                    "Too many commands are already running or starting.",
+                    f"Execution session limit reached: {active} running, {starting} starting.",
                     category="runtime",
                     retryable=True,
-                    details={"max_active_sessions": MAX_ACTIVE_EXEC_SESSIONS},
+                    details={
+                        "active_sessions": active,
+                        "starting_sessions": starting,
+                        "max_active_sessions": MAX_ACTIVE_EXEC_SESSIONS,
+                        "recovery_hint": "Reuse or stop an existing running session, then retry the command.",
+                    },
                 )
             self.starting_sessions += 1
         process: subprocess.Popen[bytes] | None = None
@@ -3066,8 +3260,23 @@ class Runtime:
         env["HOME"] = str(self.command_home_dir())
         env["TMPDIR"] = str(tmp_dir)
         if os.name == "nt":
+            home_dir = self.command_home_dir()
+            appdata_dir = home_dir / "AppData" / "Roaming"
+            localappdata_dir = home_dir / "AppData" / "Local"
+            nuget_packages_dir = self.cache_dir / "nuget" / "packages"
+            for path in (appdata_dir, localappdata_dir, nuget_packages_dir):
+                path.mkdir(parents=True, mode=0o700, exist_ok=True)
             env["TEMP"] = str(tmp_dir)
             env["TMP"] = str(tmp_dir)
+            env["USERPROFILE"] = str(home_dir)
+            env["APPDATA"] = str(appdata_dir)
+            env["LOCALAPPDATA"] = str(localappdata_dir)
+            env["HOMEDRIVE"] = home_dir.drive
+            env["HOMEPATH"] = str(home_dir)[len(home_dir.drive) :] or "\\"
+            env["DOTNET_CLI_HOME"] = str(home_dir)
+            env["NUGET_PACKAGES"] = str(nuget_packages_dir)
+            env.setdefault("DOTNET_NOLOGO", "1")
+            env.setdefault("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
         if isinstance(extra, dict):
             for key, value in extra.items():
                 key_text = str(key)
@@ -3080,11 +3289,28 @@ class Runtime:
     def _git_env(self) -> dict[str, str]:
         return self._command_env({})
 
+    def _git_safe_directory(self, cmd: list[str]) -> Path:
+        command_cwd = self.default_cwd
+        for index, token in enumerate(cmd[:-1]):
+            if token != "-C":
+                continue
+            candidate = Path(cmd[index + 1])
+            if not candidate.is_absolute():
+                candidate = self.workspace.root / candidate
+            try:
+                command_cwd = candidate.resolve(strict=True)
+            except OSError:
+                command_cwd = candidate.parent.resolve(strict=True)
+            break
+        repo = self.workspace.git_repository_for(command_cwd)
+        return repo or self.workspace.root
+
     def _run_git_text(
         self, cmd: list[str], *, timeout: int | None = None, env: dict[str, str] | None = None
     ) -> subprocess.CompletedProcess[str]:
+        safe_cmd = git_command(cmd[0], self._git_safe_directory(cmd), *cmd[1:])
         return subprocess.run(
-            cmd,
+            safe_cmd,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -3095,8 +3321,9 @@ class Runtime:
     def _run_git_bytes(
         self, cmd: list[str], *, timeout: int | None = None, env: dict[str, str] | None = None
     ) -> subprocess.CompletedProcess[bytes]:
+        safe_cmd = git_command(cmd[0], self._git_safe_directory(cmd), *cmd[1:])
         return subprocess.run(
-            cmd,
+            safe_cmd,
             text=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -3128,6 +3355,40 @@ class Runtime:
         if isinstance(args.get("paths"), list):
             path_filters.extend(str(item) for item in args["paths"])
         return [self.git_path_filter(path) for path in path_filters]
+
+    def _git_repo_scope(self, args: dict[str, Any]) -> tuple[Path | None, list[str]]:
+        requested: list[str] = []
+        if isinstance(args.get("path"), str):
+            requested.append(str(args["path"]))
+        if isinstance(args.get("paths"), list):
+            requested.extend(str(item) for item in args["paths"])
+        if not requested:
+            requested = ["."]
+
+        repo: Path | None = None
+        filters: list[str] = []
+        for raw_path in requested:
+            resolved = self.resolve_for_write(raw_path)
+            probe = resolved.path if resolved.existed else resolved.path.parent
+            current_repo = self.workspace.git_repository_for(probe)
+            if current_repo is None:
+                return None, []
+            if repo is None:
+                repo = current_repo
+            elif repo != current_repo:
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    "A single Git tool call cannot span multiple repositories.",
+                    category="validation",
+                    details={"paths": requested},
+                )
+            try:
+                repo_rel = resolved.path.relative_to(current_repo).as_posix()
+            except ValueError:
+                return None, []
+            if repo_rel not in {"", "."}:
+                filters.append(repo_rel)
+        return repo, filters
 
     def _base_command_env(self) -> dict[str, str]:
         if self.shell_env_policy.inherit == "none":
@@ -3763,14 +4024,15 @@ class Runtime:
         unstaged = bool(args.get("unstaged", True))
         context = int(args.get("context_lines", 3))
         max_bytes = int(args.get("max_bytes", 262144))
-        path_filters = self._git_path_filters(args)
-        if not self._is_git_repo(self.workspace.root, env=git_env):
-            return self._fallback_diff(path_filters, max_bytes)
+        fallback_filters = self._git_path_filters(args)
+        repo, path_filters = self._git_repo_scope(args)
+        if repo is None:
+            return self._fallback_diff(fallback_filters, max_bytes)
         chunks: list[bytes] = []
         if unstaged:
-            chunks.append(self._run_git_diff(git, context, path_filters, cached=False, env=git_env))
+            chunks.append(self._run_git_diff(git, repo, context, path_filters, cached=False, env=git_env))
         if staged:
-            chunks.append(self._run_git_diff(git, context, path_filters, cached=True, env=git_env))
+            chunks.append(self._run_git_diff(git, repo, context, path_filters, cached=True, env=git_env))
         combined = b""
         for chunk in chunks:
             if combined and chunk and not combined.endswith(b"\n"):
@@ -3787,9 +4049,16 @@ class Runtime:
         }
 
     def _run_git_diff(
-        self, git: str, context: int, path_filters: list[str], *, cached: bool, env: dict[str, str] | None = None
+        self,
+        git: str,
+        repo: Path,
+        context: int,
+        path_filters: list[str],
+        *,
+        cached: bool,
+        env: dict[str, str] | None = None,
     ) -> bytes:
-        cmd = [git, "-C", str(self.workspace.root), "diff", f"--unified={context}"]
+        cmd = [git, "-C", str(repo), "diff", f"--unified={context}"]
         if cached:
             cmd.append("--cached")
         if path_filters:
@@ -3842,16 +4111,17 @@ class Runtime:
         git_env = self._git_env()
         requested_path = str(args.get("path", "."))
         resolved = self.resolve_existing(requested_path)
-        if not self._is_git_repo(resolved.path, env=git_env):
+        repo = self.workspace.git_repository_for(resolved.path)
+        if repo is None:
             return {"is_repo": False, "commits": [], "truncated": False, "warnings": []}
         ref = validate_git_ref(str(args.get("ref", "HEAD")))
         max_count = int(args.get("max_count", 20))
         skip = int(args.get("skip", 0))
-        path_filter = resolved.display
+        path_filter = resolved.path.relative_to(repo).as_posix()
         cmd = [
             git,
             "-C",
-            str(self.workspace.root),
+            str(repo),
             "log",
             f"--max-count={max_count + 1}",
             f"--skip={skip}",
@@ -3859,7 +4129,7 @@ class Runtime:
             "--pretty=format:%H%x1f%h%x1f%an%x1f%ae%x1f%ad%x1f%s%x1e",
             ref,
         ]
-        if path_filter != ".":
+        if path_filter not in {"", "."}:
             cmd.extend(["--", path_filter])
         completed = self._run_git_text(cmd, timeout=10, env=git_env)
         if completed.returncode != 0:
@@ -3883,7 +4153,7 @@ class Runtime:
         result = {
             "is_repo": True,
             "ref": ref,
-            "path": path_filter,
+            "path": resolved.display,
             "max_count": max_count,
             "skip": skip,
             "commits": commits[:max_count],
@@ -3905,17 +4175,17 @@ class Runtime:
     def git_show(self, args: dict[str, Any]) -> dict[str, Any]:
         git = require_git()
         git_env = self._git_env()
-        if not self._is_git_repo(self.workspace.root, env=git_env):
+        repo, normalized_filters = self._git_repo_scope(args)
+        if repo is None:
             return {"is_repo": False, "content": "", "files": [], "truncated": False, "warnings": []}
         rev = validate_git_ref(str(args.get("rev", "HEAD")))
         context = int(args.get("context_lines", 3))
         max_bytes = int(args.get("max_bytes", 262144))
         include_diff = bool(args.get("include_diff", True))
-        normalized_filters = self._git_path_filters(args)
         cmd = [
             git,
             "-C",
-            str(self.workspace.root),
+            str(repo),
             "show",
             "--no-ext-diff",
             "--format=fuller",
@@ -3948,7 +4218,8 @@ class Runtime:
         resolved = self.resolve_existing(requested_path)
         if resolved.path.is_dir():
             raise ToolFailure("IS_DIRECTORY", "Path is a directory.", category="validation")
-        if not self._is_git_repo(self.workspace.root, env=git_env):
+        repo = self.workspace.git_repository_for(resolved.path)
+        if repo is None:
             return {"is_repo": False, "path": resolved.display, "lines": [], "truncated": False, "warnings": []}
         ref_arg = args.get("rev")
         ref = validate_git_ref(str(ref_arg)) if isinstance(ref_arg, str) and ref_arg else None
@@ -3967,7 +4238,7 @@ class Runtime:
         cmd = [
             git,
             "-C",
-            str(self.workspace.root),
+            str(repo),
             "blame",
             "--line-porcelain",
             "-L",
@@ -3975,7 +4246,7 @@ class Runtime:
         ]
         if ref:
             cmd.append(ref)
-        cmd.extend(["--", resolved.display])
+        cmd.extend(["--", resolved.path.relative_to(repo).as_posix()])
         completed = self._run_git_text(cmd, timeout=10, env=git_env)
         if completed.returncode != 0:
             raise ToolFailure("GIT_ERROR", completed.stderr.strip() or "git blame failed", category="runtime")
@@ -4035,7 +4306,10 @@ class Runtime:
                 "message": "Permission elicitation is not available for this client.",
                 "category": "permission",
                 "retryable": False,
-                "details": {"requested": args},
+                "details": {
+                    "requested": args,
+                    "recovery_hint": "Do not retry the blocked command unchanged; use an allowed alternative or perform the privileged step outside this client.",
+                },
             },
         }
 
@@ -5220,7 +5494,9 @@ def input_schemas() -> dict[str, dict[str, Any]]:
     }
     return {
         "server_info": object_schema(),
-        "check_exec_environment": object_schema(),
+        "check_exec_environment": object_schema(
+            {"tools": {"type": "array", "items": {**string, "minLength": 1}, "maxItems": 64}}
+        ),
         "which_tools": object_schema(
             {"tools": {"type": "array", "items": {**string, "minLength": 1}, "maxItems": 64}},
         ),
@@ -5537,6 +5813,8 @@ def server_card_payload(runtime: Runtime, *, oauth_base_url: str | None = None) 
 
 class MCPHandler(http.server.BaseHTTPRequestHandler):
     server_version = f"CodingToolsMCP/{__version__}"
+    protocol_version = "HTTP/1.1"
+    timeout = 90
 
     @property
     def runtime(self) -> Runtime:
@@ -5606,6 +5884,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             return
         self.send_response(204)
         self.send_header("Allow", "GET, HEAD, POST, DELETE, OPTIONS")
+        self.send_header("Content-Length", "0")
         self.send_cors_headers()
         self.end_headers()
 
@@ -5718,6 +5997,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         method = request.get("method")
         session_id = self.headers.get("Mcp-Session-Id")
         created_session = False
+        leased_session_id: str | None = None
         if method == "initialize":
             if session_id:
                 self.send_rpc_error(
@@ -5737,9 +6017,12 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 )
                 return
             try:
-                binding = self.server.sessions.create(self.session_owner())  # type: ignore[attr-defined]
+                binding = self.server.sessions.create(  # type: ignore[attr-defined]
+                    self.session_owner(), acquire=True
+                )
                 self._runtime = binding.runtime
                 self._mcp_session_id = binding.session_id
+                leased_session_id = binding.session_id
             except SessionCapacityError as exc:
                 self.send_rpc_error(
                     -32000,
@@ -5755,7 +6038,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self._send_session_header = True
             created_session = True
         elif session_id:
-            binding = self.server.sessions.get(session_id)  # type: ignore[attr-defined]
+            binding = self.server.sessions.acquire(session_id)  # type: ignore[attr-defined]
             if binding is None:
                 self.send_rpc_error(
                     -32001, "Unknown MCP session", status=404, request_id=response_id(request)
@@ -5763,8 +6046,11 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 return
             self._runtime = binding.runtime
             self._mcp_session_id = binding.session_id
+            leased_session_id = binding.session_id
             self._send_session_header = True
             if protocol_version and protocol_version != self.runtime.protocol_version:
+                self.server.sessions.release(binding.session_id)  # type: ignore[attr-defined]
+                leased_session_id = None
                 self.send_rpc_error(
                     -32600,
                     "MCP-Protocol-Version does not match the initialized session",
@@ -5777,18 +6063,24 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_rpc_error(-32002, "Server not initialized", request_id=request.get("id"))
             return
-        response = self.handle_rpc(request)
-        if created_session and response is not None and "error" in response:
-            self.server.sessions.delete(self._mcp_session_id)  # type: ignore[attr-defined]
-            self._send_session_header = False
-        if response is None:
-            self.send_response(202)
-            if getattr(self, "_send_session_header", False):
-                self.send_header("Mcp-Session-Id", self._mcp_session_id)
-            self.send_cors_headers()
-            self.end_headers()
-            return
-        self.send_json(response)
+        try:
+            response = self.handle_rpc(request)
+            if created_session and response is not None and "error" in response:
+                self.server.sessions.delete(self._mcp_session_id)  # type: ignore[attr-defined]
+                self._send_session_header = False
+                leased_session_id = None
+            if response is None:
+                self.send_response(202)
+                if getattr(self, "_send_session_header", False):
+                    self.send_header("Mcp-Session-Id", self._mcp_session_id)
+                self.send_header("Content-Length", "0")
+                self.send_cors_headers()
+                self.end_headers()
+                return
+            self.send_json(response)
+        finally:
+            if leased_session_id is not None:
+                self.server.sessions.release(leased_session_id)  # type: ignore[attr-defined]
 
     def handle_rpc(self, request: dict[str, Any]) -> dict[str, Any] | None:
         try:
@@ -6304,6 +6596,7 @@ class MCPHealthHandler(http.server.BaseHTTPRequestHandler):
 
 class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
+    request_queue_size = 64
 
     def __init__(
         self,
@@ -6315,6 +6608,7 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
         super().__init__(address, handler)
         self.control_runtime = control_runtime
         self.sessions = HTTPSessionManager(runtime_factory)
+        self.control_runtime.execution_registry.http_session_stats_provider = self.sessions.stats
         self.rate_limiter = SlidingWindowRateLimiter()
         self.started_at = time.time()
         self.health_server: http.server.ThreadingHTTPServer | None = None

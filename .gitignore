@@ -27,3 +27,6 @@ elevated-requests/
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Local troubleshooting captures.
+boox-current.png

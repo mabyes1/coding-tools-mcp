@@ -21,7 +21,12 @@ from .errors import ToolFailure
 ELEVATED_QUEUE_ENV = "CODING_TOOLS_MCP_ELEVATED_QUEUE"
 DEFAULT_ELEVATED_QUEUE = Path(r"C:\ProgramData\WebGPTCodingToolsMCPService\elevated-requests")
 ELEVATED_PROTOCOL_VERSION = 1
-ELEVATED_ACTIONS = frozenset({"sync-installed-webroot"})
+ELEVATED_ACTIONS = frozenset({
+    "install-vibedeck-update",
+    "repair-vibedeck-autostart",
+    "sync-installed-webroot",
+    "update-private-mcp",
+})
 ELEVATED_REQUEST_TTL_SECONDS = 900
 
 
