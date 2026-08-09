@@ -151,7 +151,7 @@ try {
     $brokerPath = Join-Path $serviceRoot "elevated-broker.ps1"
     if (Test-Path -LiteralPath $webrootSourceScript -PathType Leaf) {
         $webrootHash = Get-Sha256Hex $webrootSourceScript
-        $brokerText = Get-Content -LiteralPath $brokerPath -Raw
+        $brokerText = [IO.File]::ReadAllText($brokerPath, [Text.UTF8Encoding]::new($false))
         $brokerText = [regex]::Replace($brokerText, '(ExpectedSha256\s*=\s*")[A-Fa-f0-9]{64}("?)', { param($match) $match.Groups[1].Value + $webrootHash + $match.Groups[2].Value })
         $brokerText = $brokerText.Replace("REPLACE_WITH_SYNC_WEBROOT_SHA256", $webrootHash)
         [IO.File]::WriteAllText($brokerPath, $brokerText, [Text.UTF8Encoding]::new($false))

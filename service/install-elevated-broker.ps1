@@ -33,7 +33,7 @@ $webrootSource = Join-Path $workspaceRoot "phoneMonitor\scripts\sync-installed-w
 $brokerPath = Join-Path $serviceRoot "elevated-broker.ps1"
 if (-not (Test-Path -LiteralPath $webrootSource -PathType Leaf)) { throw "Approved webroot script is missing: $webrootSource" }
 $hash = Get-Sha256Hex $webrootSource
-$brokerText = Get-Content -LiteralPath $brokerPath -Raw
+$brokerText = [IO.File]::ReadAllText($brokerPath, [Text.UTF8Encoding]::new($false))
 $brokerText = [regex]::Replace($brokerText, '(ExpectedSha256\s*=\s*")[A-Fa-f0-9]{64}("?)', { param($match) $match.Groups[1].Value + $hash + $match.Groups[2].Value })
 $brokerText = $brokerText.Replace("REPLACE_WITH_SYNC_WEBROOT_SHA256", $hash)
 [IO.File]::WriteAllText($brokerPath, $brokerText, [Text.UTF8Encoding]::new($false))

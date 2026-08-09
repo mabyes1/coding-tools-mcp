@@ -99,25 +99,27 @@ function Handle-PermissionRequest([string]$RequestId, $Request) {
 
     $argumentPreview = try { $Request.arguments | ConvertTo-Json -Compress -Depth 6 } catch { "<unavailable>" }
     if ($argumentPreview.Length -gt 1200) { $argumentPreview = $argumentPreview.Substring(0, 1200) + "..." }
-    $scopeText = if ($scope -eq "once") { "一次（限本次相同參數重試）" } else { "此工作階段（最長 $ttlSeconds 秒）" }
+    # Keep this broker source ASCII-only. Windows PowerShell 5.1 treats UTF-8
+    # without a BOM as ANSI when older installers read and rewrite the file.
+    $scopeText = if ($scope -eq "once") { "once (same arguments only)" } else { "session (up to $ttlSeconds seconds)" }
     $message = @"
-WebGPT MCP 正在要求額外權限。
+WebGPT MCP is requesting additional permission.
 
-工具：$toolName
-權限：$permission
-範圍：$scopeText
-理由：$([string]$Request.reason)
+Tool: $toolName
+Permission: $permission
+Scope: $scopeText
+Reason: $([string]$Request.reason)
 
-參數：
+Arguments:
 $argumentPreview
 
-要允許嗎？選擇「否」會拒絕，之後仍可重試。
+Allow this request? Choose No to deny it. A new request can be made later.
 "@
     try {
         Add-Type -AssemblyName System.Windows.Forms
         $choice = [System.Windows.Forms.MessageBox]::Show(
             $message,
-            "WebGPT MCP 權限請求",
+            "WebGPT MCP Permission Request",
             [System.Windows.Forms.MessageBoxButtons]::YesNo,
             [System.Windows.Forms.MessageBoxIcon]::Warning,
             [System.Windows.Forms.MessageBoxDefaultButton]::Button2

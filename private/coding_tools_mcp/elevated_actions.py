@@ -60,13 +60,30 @@ def _broker_is_alive(queue: Path) -> tuple[bool, int | None]:
         return False, None
     if pid <= 0:
         return False, pid
+    if os.name == "nt":
+        # os.kill(pid, 0) is not a portable existence probe on Windows and
+        # raises WinError 87 on current CPython builds. A synchronization
+        # handle can be queried without terminating or otherwise signaling the
+        # elevated broker. Access denied still proves that the PID exists.
+        import ctypes
+
+        synchronize = 0x00100000
+        wait_timeout = 0x00000102
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        kernel32.WaitForSingleObject.restype = ctypes.c_uint32
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = kernel32.OpenProcess(synchronize, False, pid)
+        if not handle:
+            return ctypes.get_last_error() == 5, pid
+        try:
+            return kernel32.WaitForSingleObject(handle, 0) == wait_timeout, pid
+        finally:
+            kernel32.CloseHandle(handle)
     try:
-        if os.name == "nt":
-            # A zero-signal probe is supported on Windows and may raise
-            # PermissionError for a live process owned by another identity.
-            os.kill(pid, 0)
-        else:
-            os.kill(pid, 0)
+        os.kill(pid, 0)
     except PermissionError:
         return True, pid
     except (ProcessLookupError, OSError):

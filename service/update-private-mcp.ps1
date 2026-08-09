@@ -136,13 +136,13 @@ function Install-BrokerFiles {
     $webrootSourceScript = Join-Path "D:\coding-tools-mcp" "phoneMonitor\scripts\sync-installed-webroot.ps1"
     if (Test-Path -LiteralPath $webrootSourceScript -PathType Leaf) {
         $webrootHash = Get-Sha256Hex $webrootSourceScript
-        $brokerText = Get-Content -LiteralPath $brokerPath -Raw
+        $brokerText = [IO.File]::ReadAllText($brokerPath, [Text.UTF8Encoding]::new($false))
         $brokerText = $brokerText.Replace("REPLACE_WITH_SYNC_WEBROOT_SHA256", $webrootHash)
         [IO.File]::WriteAllText($brokerPath, $brokerText, [Text.UTF8Encoding]::new($false))
     }
     $updateSourceScript = Join-Path $PSScriptRoot "update-private-mcp.ps1"
     $updateHash = Get-Sha256Hex $updateSourceScript
-    $brokerText = Get-Content -LiteralPath $brokerPath -Raw
+    $brokerText = [IO.File]::ReadAllText($brokerPath, [Text.UTF8Encoding]::new($false))
     $brokerText = $brokerText.Replace("REPLACE_WITH_UPDATE_PRIVATE_MCP_SHA256", $updateHash)
     [IO.File]::WriteAllText($brokerPath, $brokerText, [Text.UTF8Encoding]::new($false))
     & icacls.exe $elevatedQueueRoot /inheritance:r /grant:r `

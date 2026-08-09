@@ -19,6 +19,7 @@ def main() -> int:
     sys.path.insert(0, str(package_parent))
 
     from coding_tools_mcp import server
+    from coding_tools_mcp import elevated_actions
     from coding_tools_mcp.project_context import load_project_context
     from coding_tools_mcp.transport_http import (
         HTTP_IN_FLIGHT_TTL_SECONDS,
@@ -162,6 +163,13 @@ def main() -> int:
             primary.close()
 
     if os.name == "nt":
+        with tempfile.TemporaryDirectory(prefix="coding-tools-broker-check-") as temporary:
+            queue = Path(temporary)
+            (queue / "broker.pid").write_text(str(os.getpid()), encoding="ascii")
+            alive, reported_pid = elevated_actions._broker_is_alive(queue)
+            if not alive or reported_pid != os.getpid():
+                raise RuntimeError("Windows broker process liveness probe rejected a live PID")
+
         runtime = server.Runtime(workspace, enable_view_image=False, project_context=context)
         try:
             command_env = {key.upper(): value for key, value in runtime._command_env({}).items()}
