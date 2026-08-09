@@ -46,6 +46,13 @@ $allowedAction = [ordered]@{
         Wait = $true
         Arguments = @("-SkipTests")
     }
+    "repair-vibedeck-virtual-display" = @{
+        ScriptPath = "D:\coding-tools-mcp\phoneMonitor\scripts\repair-virtual-display-device.ps1"
+        ExpectedSha256 = "3EDF1E2A097B5E628FD33968B76AB68E11A21B1A0D55CD3DCB0ABFDE3BF2F7D6"
+        Description = "Restart only the VibeDeck virtual display PnP device and rescan Windows display targets"
+        Wait = $true
+        Arguments = @()
+    }
     "repair-vibedeck-autostart" = @{
         ExecutablePath = "C:\Program Files\VibeDeck\VibeDeck.Host.exe"
         Description = "Repair the signed-in user's VibeDeck Host autostart registration"

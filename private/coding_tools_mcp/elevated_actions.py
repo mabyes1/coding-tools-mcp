@@ -22,6 +22,7 @@ DEFAULT_ELEVATED_QUEUE = Path(r"C:\ProgramData\WebGPTCodingToolsMCPService\eleva
 ELEVATED_PROTOCOL_VERSION = 1
 ELEVATED_ACTIONS = frozenset({
     "install-vibedeck-update",
+    "repair-vibedeck-virtual-display",
     "repair-vibedeck-autostart",
     "sync-installed-webroot",
     "update-private-mcp",
