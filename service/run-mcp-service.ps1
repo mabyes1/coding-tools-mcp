@@ -6,6 +6,7 @@ $tokenSecretFile = Join-Path $serviceRoot "oauth-token-secret.machine.dpapi"
 $serverPython = Join-Path $serviceRoot "venv\Scripts\python.exe"
 $privateAppRoot = Join-Path $serviceRoot "app"
 $oauthStatePath = Join-Path $serviceRoot "data\oauth-state.sqlite"
+$permissionModePath = Join-Path $serviceRoot "permission-mode.txt"
 
 function Unprotect-MachineSecret([string]$Path) {
     $encryptedBytes = [Convert]::FromBase64String(
@@ -29,6 +30,13 @@ $env:CODING_TOOLS_MCP_OAUTH_TOKEN_TTL = "2592000"
 $env:CODING_TOOLS_MCP_OAUTH_REFRESH_TOKEN_TTL = "31536000"
 $env:CODING_TOOLS_MCP_OAUTH_ALLOW_DYNAMIC_REGISTRATION = "0"
 $env:CODING_TOOLS_MCP_TELEMETRY = "off"
+$permissionMode = "safe"
+if (Test-Path -LiteralPath $permissionModePath -PathType Leaf) {
+    $configuredMode = ([IO.File]::ReadAllText($permissionModePath, [Text.UTF8Encoding]::new($false))).Trim().ToLowerInvariant()
+    if ($configuredMode -in @("safe", "trusted", "dangerous")) { $permissionMode = $configuredMode }
+    else { throw "Invalid MCP permission mode in ${permissionModePath}: $configuredMode" }
+}
+$env:CODING_TOOLS_MCP_PERMISSION_MODE = $permissionMode
 $env:CODING_TOOLS_MCP_MAX_HTTP_SESSIONS = "256"
 $env:CODING_TOOLS_MCP_HTTP_SESSION_TTL_SECONDS = "300"
 $env:CODING_TOOLS_MCP_MAX_HTTP_SESSIONS_PER_OWNER = "64"

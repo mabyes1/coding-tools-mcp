@@ -85,6 +85,76 @@ def main() -> int:
                     raise RuntimeError("default cwd did not survive an owner reconnect")
                 if isolated.default_cwd_display() != ".":
                     raise RuntimeError("default cwd leaked across owners")
+
+                original_approval = server.request_permission_approval
+                server.request_permission_approval = lambda **_kwargs: {"ok": True, "granted": True}
+                try:
+                    blocked_arguments = {"cmd": "curl https://example.invalid"}
+                    once = primary.request_permissions(
+                        {
+                            "tool_name": "exec_command",
+                            "permission": "network",
+                            "reason": "permission self-check",
+                            "arguments": blocked_arguments,
+                            "scope": "once",
+                            "ttl_seconds": 60,
+                        }
+                    )
+                    if once.get("status") != "granted":
+                        raise RuntimeError("interactive approval did not create a permission grant")
+                    primary.request_context.tool_name = "exec_command"
+                    primary.request_context.arguments = blocked_arguments
+                    primary.request_context.claimed_permission_grants = set()
+                    primary._check_command_policy(blocked_arguments["cmd"], blocked_arguments)
+                    primary._finish_permission_grants()
+                    try:
+                        primary._check_command_policy(blocked_arguments["cmd"], blocked_arguments)
+                    except server.ToolFailure as exc:
+                        if exc.code != "PERMISSION_REQUIRED":
+                            raise
+                    else:
+                        raise RuntimeError("one-shot permission grant was not consumed")
+
+                    session = primary.request_permissions(
+                        {
+                            "tool_name": "exec_command",
+                            "permission": "network",
+                            "reason": "session permission self-check",
+                            "arguments": blocked_arguments,
+                            "scope": "session",
+                            "ttl_seconds": 60,
+                        }
+                    )
+                    if session.get("status") != "granted":
+                        raise RuntimeError("session approval did not create a permission grant")
+                    changed_arguments = {"cmd": "curl https://different.invalid"}
+                    reconnect.request_context.tool_name = "exec_command"
+                    reconnect.request_context.arguments = changed_arguments
+                    reconnect.request_context.claimed_permission_grants = set()
+                    reconnect._check_command_policy(changed_arguments["cmd"], changed_arguments)
+                finally:
+                    server.request_permission_approval = original_approval
+
+                dangerous = server.Runtime(
+                    cwd_workspace,
+                    enable_view_image=False,
+                    permission_mode="dangerous",
+                    project_context=primary.project_context,
+                    execution_registry=primary.execution_registry,
+                )
+                try:
+                    dangerous.state_owner = "dangerous-selfcheck-owner"
+                    dangerous.request_context.tool_name = "exec_command"
+                    dangerous.request_context.arguments = {"cmd": "curl https://yolo.invalid"}
+                    dangerous.request_context.claimed_permission_grants = set()
+                    dangerous._check_command_policy(
+                        "curl https://yolo.invalid",
+                        dangerous.request_context.arguments,
+                    )
+                    if not dangerous.dangerously_skip_all_permissions:
+                        raise RuntimeError("dangerous mode did not enable the YOLO permission policy")
+                finally:
+                    dangerous.close()
             finally:
                 isolated.close()
                 reconnect.close()

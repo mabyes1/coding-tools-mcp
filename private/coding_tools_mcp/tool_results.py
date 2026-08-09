@@ -385,6 +385,19 @@ def _render_image(payload: dict[str, Any]) -> str:
     return f"Image: {payload.get('path', '')} ({payload.get('mime_type', 'unknown')}{dimensions})"
 
 
+def _render_permission(payload: dict[str, Any]) -> str:
+    status = str(payload.get("status", "completed"))
+    if status == "granted":
+        constraints = payload.get("constraints") if isinstance(payload.get("constraints"), dict) else {}
+        return (
+            f"Permission granted ({constraints.get('scope', 'once')}) until {payload.get('expires_at', 'service restart')}. "
+            "Retry the blocked tool now with the same arguments."
+        )
+    if status == "denied":
+        return "Permission denied by the signed-in user; do not retry unchanged unless they ask again."
+    return f"Permission request: {status}."
+
+
 _RENDERERS = {
     "server_info": _render_server_info,
     "check_exec_environment": _render_exec_environment,
@@ -404,6 +417,6 @@ _RENDERERS = {
     "git_log": _render_git_log,
     "git_show": _render_git_show,
     "git_blame": _render_git_blame,
-    "request_permissions": lambda payload: f"Permission request: {payload.get('status', 'completed')}.",
+    "request_permissions": _render_permission,
     "view_image": _render_image,
 }

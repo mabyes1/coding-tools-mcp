@@ -36,7 +36,7 @@ from typing import Any, cast
 from . import __version__
 from .envutils import ENV_PREFIX, truthy_env
 from .errors import JsonRpcError, ToolFailure
-from .elevated_actions import ELEVATED_ACTIONS, request_elevated_action
+from .elevated_actions import ELEVATED_ACTIONS, request_elevated_action, request_permission_approval
 from .gitutils import git_command
 from .landlock_exec import libc_syscall
 from .oauth import (
@@ -911,8 +911,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "request_permissions": ToolSpec(
         title="Request permissions",
-        description="Use only after exec_command/apply_patch returns PERMISSION_REQUIRED. Request the exact reported permission and retry only if a grant is returned; unsupported clients cannot grant it.",
-        read_only=True,
+        description="After PERMISSION_REQUIRED, open a Windows approval dialog for the signed-in user. If granted, retry the same arguments; once/session grants are owner-scoped and expire.",
     ),
     "request_elevated_action": ToolSpec(
         title="Request elevated action",
@@ -1219,22 +1218,22 @@ def diagnostic(
 PERMISSION_FAILURE_DIAGNOSTICS: dict[str, dict[str, str]] = {
     "network": {
         "code": "NETWORK_PERMISSION_REQUIRED",
-        "suggested_fix": "Restart the server with --permission-mode trusted or --allow-network.",
+        "suggested_fix": "Call request_permissions for this exact operation, or switch the local service to trusted mode.",
         "suggested_server_flag": "--permission-mode trusted",
     },
     "shell_expansion": {
         "code": "SHELL_EXPANSION_PERMISSION_REQUIRED",
-        "suggested_fix": "Restart the server with --permission-mode trusted for local development shell expansion.",
+        "suggested_fix": "Call request_permissions for this exact operation, or switch the local service to trusted mode.",
         "suggested_server_flag": "--permission-mode trusted",
     },
     INLINE_SCRIPT_PERMISSION: {
         "code": "INLINE_SCRIPT_PERMISSION_REQUIRED",
-        "suggested_fix": "Restart the server with --permission-mode trusted for local development inline scripts.",
+        "suggested_fix": "Call request_permissions for this exact operation, or switch the local service to trusted mode.",
         "suggested_server_flag": "--permission-mode trusted",
     },
     "sensitive_env": {
         "code": "SECRET_ENV_REJECTED",
-        "suggested_fix": "Remove secret-looking or loader/startup environment variables from exec_command env.",
+        "suggested_fix": "Call request_permissions for this exact operation, or remove secret-looking environment variables.",
     },
 }
 
@@ -1642,6 +1641,18 @@ class Workspace:
         return ignored
 
 
+@dataclass(frozen=True)
+class PermissionGrant:
+    grant_id: str
+    owner: str
+    workspace: str
+    tool_name: str
+    permission: str
+    arguments_digest: str
+    scope: str
+    expires_at: float
+
+
 class ExecutionRegistry:
     """Process/output registry shared by reconnecting HTTP runtimes."""
 
@@ -1651,6 +1662,7 @@ class ExecutionRegistry:
         self.sessions_lock = threading.Lock()
         self.state_lock = threading.Lock()
         self.owner_default_cwds: dict[tuple[str, str], Path] = {}
+        self.permission_grants: dict[str, PermissionGrant] = {}
         self.starting_sessions = 0
         self.closed = False
         self.runtime_dir: Path | None = None
@@ -1930,6 +1942,60 @@ class Runtime:
             return None
         return self.state_owner, os.path.normcase(str(self.workspace.root))
 
+    def _permission_owner(self) -> str:
+        return self.state_owner or f"mcp-session:{self.http_session_id}"
+
+    @staticmethod
+    def _permission_arguments_digest(arguments: dict[str, Any]) -> str:
+        canonical = json.dumps(arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _permission_granted(self, permission: str) -> bool:
+        if self.dangerously_skip_all_permissions:
+            return True
+        claimed = getattr(self.request_context, "claimed_permission_grants", None)
+        if isinstance(claimed, set) and permission in claimed:
+            return True
+        tool_name = str(getattr(self.request_context, "tool_name", ""))
+        arguments = getattr(self.request_context, "arguments", {})
+        if not tool_name or not isinstance(arguments, dict):
+            return False
+        owner = self._permission_owner()
+        workspace = os.path.normcase(str(self.workspace.root))
+        digest = self._permission_arguments_digest(arguments)
+        now = time.time()
+        matched: PermissionGrant | None = None
+        matched_id: str | None = None
+        with self.execution_registry.state_lock:
+            expired = [grant_id for grant_id, grant in self.execution_registry.permission_grants.items() if grant.expires_at <= now]
+            for grant_id in expired:
+                self.execution_registry.permission_grants.pop(grant_id, None)
+            for grant_id, grant in self.execution_registry.permission_grants.items():
+                if (
+                    grant.owner == owner
+                    and grant.workspace == workspace
+                    and grant.tool_name == tool_name
+                    and grant.permission == permission
+                    and (grant.scope == "session" or grant.arguments_digest == digest)
+                ):
+                    matched = grant
+                    matched_id = grant_id
+                    break
+            if matched is not None and matched.scope == "once" and matched_id is not None:
+                self.execution_registry.permission_grants.pop(matched_id, None)
+        if matched is None:
+            return False
+        if matched.scope == "once":
+            claimed = getattr(self.request_context, "claimed_permission_grants", None)
+            if not isinstance(claimed, set):
+                claimed = set()
+                self.request_context.claimed_permission_grants = claimed
+            claimed.add(permission)
+        return True
+
+    def _finish_permission_grants(self) -> None:
+        self.request_context.claimed_permission_grants = set()
+
     def effective_default_cwd(self) -> Path:
         key = self._owner_cwd_key()
         if key is not None:
@@ -2025,7 +2091,8 @@ class Runtime:
                 "global_tmp_write": self.global_tmp_write_policy(),
                 "secret_env_filter": self.secret_env_filter_policy(),
             },
-            "permission_elicitation_supported": False,
+            "permission_elicitation_supported": True,
+            "permission_approval_transport": "local_windows_broker",
             "shell_env_inherit": self.shell_env_policy.inherit,
             "shell_env_include_only": list(self.shell_env_policy.include_only),
             "shell_env_exclude": list(self.shell_env_policy.exclude),
@@ -2057,13 +2124,19 @@ class Runtime:
         validate_arguments(name, args)
         try:
             self.request_context.request_id = request_id
+            self.request_context.tool_name = name
+            self.request_context.arguments = args
+            self.request_context.claimed_permission_grants = set()
             try:
                 payload = handler(args)
             finally:
+                self._finish_permission_grants()
                 if request_id is not None:
                     with self.request_sessions_lock:
                         self.request_sessions.pop(request_id, None)
                 self.request_context.request_id = None
+                self.request_context.tool_name = None
+                self.request_context.arguments = None
             payload.setdefault("ok", True)
             self.emit_tool_trace(name, args, payload, started_at)
             content = spec.content_builder(payload) if spec.content_builder else None
@@ -2090,9 +2163,10 @@ class Runtime:
                 payload["permission_request"] = {
                     "tool_name": name,
                     "permission": permission or "unknown",
-                    "status": "unsupported",
-                    "retryable": False,
-                    "elicitation_supported": False,
+                    "status": "approval_required",
+                    "retryable": True,
+                    "interactive_approval_supported": True,
+                    "next_action": "Call request_permissions with the blocked tool arguments; a Windows approval dialog will open for the signed-in user.",
                 }
             if exc.code == "ELICITATION_UNSUPPORTED":
                 payload["status"] = "unsupported"
@@ -2141,7 +2215,8 @@ class Runtime:
             "landlock_abi": landlock.get("abi_version"),
             "global_tmp_write": self.global_tmp_write_policy(),
             "tool_discovery": self._discover_tools(names),
-            "permission_elicitation_supported": False,
+            "permission_elicitation_supported": True,
+            "permission_approval_transport": "local_windows_broker",
             "executable_allowlist": list(configured_executable_allowlist()),
             "warnings": warnings,
         }
@@ -3123,14 +3198,14 @@ class Runtime:
         env = args.get("env", {})
         if isinstance(env, dict) and any(
             is_filtered_env_var(str(key), str(value)) for key, value in env.items()
-        ):
+        ) and not self._permission_granted("sensitive_env"):
             raise ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Sensitive or loader/startup environment variables require explicit permission.",
                 category="permission",
                 details={"permission": "sensitive_env", "env_keys": sorted(str(key) for key in env)},
             )
-        if not self.capabilities.inline_script:
+        if not self.capabilities.inline_script and not self._permission_granted(INLINE_SCRIPT_PERMISSION):
             inline_script = inline_script_command(cmd)
             if inline_script is not None:
                 raise ToolFailure(
@@ -3140,28 +3215,28 @@ class Runtime:
                     details={"permission": INLINE_SCRIPT_PERMISSION, **inline_script},
                 )
         compact = " ".join(cmd.split()).lower()
-        if not self.capabilities.shell_expansion and SHELL_EXPANSION_RE.search(cmd):
+        if not self.capabilities.shell_expansion and SHELL_EXPANSION_RE.search(cmd) and not self._permission_granted("shell_expansion"):
             raise ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Shell command substitution and parameter expansion require explicit permission.",
                 category="permission",
                 details={"permission": "shell_expansion", "command": compact},
             )
-        if re.search(r"(^|[;&|]\s*)rm\s+(-[^\s]*r[^\s]*f|-?[^\s]*f[^\s]*r)\s+/", compact):
+        if re.search(r"(^|[;&|]\s*)rm\s+(-[^\s]*r[^\s]*f|-?[^\s]*f[^\s]*r)\s+/", compact) and not self._permission_granted("destructive_command"):
             raise ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Destructive commands are blocked without explicit permission.",
                 category="permission",
                 details={"permission": "destructive_command", "command": compact},
             )
-        if DESTRUCTIVE_RE.search(cmd):
+        if DESTRUCTIVE_RE.search(cmd) and not self._permission_granted("destructive_command"):
             raise ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Destructive commands are blocked without explicit permission.",
                 category="permission",
                 details={"permission": "destructive_command", "command": compact},
             )
-        if not self.allow_network and NETWORK_RE.search(cmd) and not is_literal_network_reference_command(cmd):
+        if not self.allow_network and NETWORK_RE.search(cmd) and not is_literal_network_reference_command(cmd) and not self._permission_granted("network"):
             raise ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Network access is denied by default.",
@@ -3208,6 +3283,8 @@ class Runtime:
     def _check_command_path_candidate(self, candidate: str) -> None:
         candidate = candidate.strip()
         if not candidate or candidate in {"-", "--"}:
+            return
+        if self._permission_granted("filesystem_escape"):
             return
 
         def escape_failure() -> ToolFailure:
@@ -3284,6 +3361,8 @@ class Runtime:
         except OSError:
             return
         if stat.st_mode & 0o6000:
+            if self._permission_granted("privileged_executable"):
+                return
             raise ToolFailure(
                 "PERMISSION_REQUIRED",
                 "Setuid/setgid executables are denied because they can bypass runtime process guards.",
@@ -3293,7 +3372,8 @@ class Runtime:
 
     def _command_env(self, extra: Any) -> dict[str, str]:
         env = self._base_command_env()
-        if not self.dangerously_skip_all_permissions:
+        filter_sensitive = not self.dangerously_skip_all_permissions and not self._permission_granted("sensitive_env")
+        if filter_sensitive:
             env = {key: value for key, value in env.items() if not is_filtered_env_var(key, value)}
             env = {key: value for key, value in env.items() if key not in ECOSYSTEM_CACHE_ENV_NAMES}
         if self.shell_env_policy.exclude:
@@ -3335,7 +3415,7 @@ class Runtime:
             for key, value in extra.items():
                 key_text = str(key)
                 value_text = str(value)
-                if not self.dangerously_skip_all_permissions and is_filtered_env_var(key_text, value_text):
+                if filter_sensitive and is_filtered_env_var(key_text, value_text):
                     continue
                 env[key_text] = value_text
         return env
@@ -4350,21 +4430,65 @@ class Runtime:
                     "dangerously-skip-all-permissions is enabled; permission-gated operations are auto-granted"
                 ],
             }
-        return {
-            "ok": False,
-            "status": "unsupported",
-            "grant_id": None,
-            "expires_at": None,
-            "error": {
-                "code": "ELICITATION_UNSUPPORTED",
-                "message": "Permission elicitation is not available for this client.",
-                "category": "permission",
-                "retryable": False,
-                "details": {
-                    "requested": args,
-                    "recovery_hint": "Do not retry the blocked command unchanged; use an allowed alternative or perform the privileged step outside this client.",
+        tool_name = str(args.get("tool_name", ""))
+        permission = str(args.get("permission", ""))
+        reason = str(args.get("reason", ""))
+        requested_arguments = args.get("arguments")
+        if not isinstance(requested_arguments, dict):
+            raise ToolFailure("INVALID_ARGUMENT", "arguments must be an object.", category="validation")
+        scope = str(args.get("scope", "once"))
+        ttl_seconds = int(args.get("ttl_seconds", 300))
+        approval_timeout_seconds = int(args.get("approval_timeout_seconds", 75))
+        approval = request_permission_approval(
+            tool_name=tool_name,
+            permission=permission,
+            reason=reason,
+            arguments=requested_arguments,
+            scope=scope,
+            ttl_seconds=ttl_seconds,
+            timeout_seconds=approval_timeout_seconds,
+        )
+        if not bool(approval.get("granted")):
+            return {
+                "ok": False,
+                "status": "denied",
+                "grant_id": None,
+                "expires_at": None,
+                "error": {
+                    "code": "PERMISSION_DENIED",
+                    "message": "The signed-in user denied the permission request.",
+                    "category": "permission",
+                    "retryable": True,
+                    "details": {"tool_name": tool_name, "permission": permission},
                 },
+            }
+        grant_id = "grant_" + secrets.token_urlsafe(18)
+        expires_at = time.time() + ttl_seconds
+        grant = PermissionGrant(
+            grant_id=grant_id,
+            owner=self._permission_owner(),
+            workspace=os.path.normcase(str(self.workspace.root)),
+            tool_name=tool_name,
+            permission=permission,
+            arguments_digest=self._permission_arguments_digest(requested_arguments),
+            scope=scope,
+            expires_at=expires_at,
+        )
+        with self.execution_registry.state_lock:
+            self.execution_registry.permission_grants[grant_id] = grant
+        return {
+            "ok": True,
+            "status": "granted",
+            "grant_id": grant_id,
+            "expires_at": datetime.fromtimestamp(expires_at, tz=timezone.utc).isoformat(),
+            "constraints": {
+                "tool_name": tool_name,
+                "permission": permission,
+                "scope": scope,
+                "workspace": str(self.workspace.root),
+                "same_arguments_required": scope == "once",
             },
+            "warnings": (["Session grant applies to this OAuth owner until expiry."] if scope == "session" else []),
         }
 
     def request_elevated_action(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -5784,6 +5908,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                         "shell_expansion",
                         INLINE_SCRIPT_PERMISSION,
                         "privileged_executable",
+                        "filesystem_escape",
                         "write_generated_or_ignored",
                     ],
                 },
@@ -5791,6 +5916,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "arguments": {"type": "object", "additionalProperties": True},
                 "scope": {**string, "enum": ["once", "session"], "default": "once"},
                 "ttl_seconds": {**integer, "minimum": 1, "maximum": 3600, "default": 300},
+                "approval_timeout_seconds": {**integer, "minimum": 5, "maximum": 85, "default": 75},
             },
             ["tool_name", "permission", "reason", "arguments"],
         ),
@@ -6697,6 +6823,9 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
             "status": "ok",
             "version": __version__,
             "started_at": datetime.fromtimestamp(self.started_at, tz=timezone.utc).isoformat(),
+            "permission_mode": self.control_runtime.permission_mode,
+            "dangerously_skip_all_permissions": self.control_runtime.dangerously_skip_all_permissions,
+            "permission_approval_transport": "local_windows_broker",
             "workspace": str(self.control_runtime.workspace.root),
             "workspace_allowlist": [
                 {"name": entry.name, "path": str(entry.path)}

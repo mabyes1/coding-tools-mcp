@@ -76,7 +76,7 @@ switch ($Action) {
         # broker once at task launch. Requests are still restricted by action
         # allowlist + exact script path + SHA-256 before anything is executed.
         $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
-        Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $trigger -Principal $principal -Description "Elevated fixed-action broker for approved WebGPT MCP deployment actions." -Force | Out-Null
+        Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $trigger -Principal $principal -Description "Interactive permission and fixed-action broker for WebGPT MCP." -Force | Out-Null
         Enable-ScheduledTask -TaskName $taskName | Out-Null
         Write-Host "ELEVATED_BROKER_TASK_INSTALLED"
     }

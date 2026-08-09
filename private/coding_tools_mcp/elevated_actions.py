@@ -1,9 +1,8 @@
-"""Fixed-action bridge from the LocalService MCP process to a user broker.
+"""Interactive approval bridge from the LocalService MCP process to a user broker.
 
-The MCP process must never accept an arbitrary executable or argument list for
-elevation.  It writes a short-lived request containing only a registered action
-name; an interactive user-session broker validates that name and presents the
-UAC consent prompt before running the fixed script.
+Permission requests display a signed-in-user dialog and only create a scoped,
+short-lived in-memory grant. Elevated actions remain restricted to registered
+action names; the broker validates the fixed script path and hash before launch.
 """
 
 from __future__ import annotations
@@ -28,6 +27,17 @@ ELEVATED_ACTIONS = frozenset({
     "update-private-mcp",
 })
 ELEVATED_REQUEST_TTL_SECONDS = 900
+MCP_PERMISSION_NAMES = frozenset({
+    "network",
+    "destructive_command",
+    "long_timeout",
+    "sensitive_env",
+    "shell_expansion",
+    "inline_script",
+    "privileged_executable",
+    "filesystem_escape",
+    "write_generated_or_ignored",
+})
 
 
 def elevated_queue_path() -> Path:
@@ -170,4 +180,119 @@ def request_elevated_action(action: str, *, timeout_seconds: float = 300.0) -> d
             "timeout_seconds": timeout,
             "broker_pid": broker_pid,
         },
+    )
+
+
+def request_permission_approval(
+    *,
+    tool_name: str,
+    permission: str,
+    reason: str,
+    arguments: dict[str, Any],
+    scope: str,
+    ttl_seconds: int,
+    timeout_seconds: float = 75.0,
+) -> dict[str, Any]:
+    """Ask the signed-in user to approve one MCP permission in a desktop dialog."""
+    if tool_name not in {"exec_command", "apply_patch"}:
+        raise ToolFailure("INVALID_ARGUMENT", "Unsupported permission tool.", category="validation")
+    if permission not in MCP_PERMISSION_NAMES:
+        raise ToolFailure("INVALID_ARGUMENT", "Unsupported permission name.", category="validation")
+    if scope not in {"once", "session"}:
+        raise ToolFailure("INVALID_ARGUMENT", "Unsupported permission scope.", category="validation")
+    ttl = max(1, min(int(ttl_seconds), 3600))
+    timeout = max(5.0, min(float(timeout_seconds), 85.0))
+    queue = elevated_queue_path()
+    if not queue.is_dir():
+        raise ToolFailure(
+            "PERMISSION_BROKER_UNAVAILABLE",
+            "The interactive permission broker is not installed.",
+            category="runtime",
+            retryable=True,
+            details={"queue": str(queue)},
+        )
+    broker_alive, broker_pid = _broker_is_alive(queue)
+    if not broker_alive:
+        raise ToolFailure(
+            "PERMISSION_BROKER_UNAVAILABLE",
+            "The interactive permission broker is not running in the signed-in desktop session.",
+            category="runtime",
+            retryable=True,
+            details={"queue": str(queue), "broker_pid": broker_pid},
+        )
+
+    request_id = secrets.token_urlsafe(18)
+    request_path = queue / f"{request_id}.request"
+    response_path = queue / f"{request_id}.response"
+    payload = {
+        "protocol": ELEVATED_PROTOCOL_VERSION,
+        "request_id": request_id,
+        "kind": "mcp_permission",
+        "created_at": time.time(),
+        "requested_by": os.getpid(),
+        "tool_name": tool_name,
+        "permission": permission,
+        "reason": str(reason)[:1000],
+        "arguments": arguments,
+        "scope": scope,
+        "ttl_seconds": ttl,
+    }
+    try:
+        _write_json_atomically(request_path, payload)
+    except (OSError, TypeError, ValueError) as exc:
+        raise ToolFailure(
+            "PERMISSION_QUEUE_UNAVAILABLE",
+            "The interactive permission request could not be queued.",
+            category="runtime",
+            retryable=True,
+            details={"queue": str(queue), "reason": str(exc)},
+        ) from exc
+
+    deadline = time.monotonic() + timeout
+    try:
+        while time.monotonic() < deadline:
+            if response_path.exists():
+                try:
+                    response = json.loads(response_path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ToolFailure(
+                        "PERMISSION_RESPONSE_INVALID",
+                        "The permission broker returned an invalid response.",
+                        category="runtime",
+                        retryable=True,
+                        details={"request_id": request_id},
+                    ) from exc
+                try:
+                    response_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                if not isinstance(response, dict) or response.get("request_id") != request_id:
+                    raise ToolFailure(
+                        "PERMISSION_RESPONSE_INVALID",
+                        "The permission response did not match the request.",
+                        category="security",
+                        details={"request_id": request_id},
+                    )
+                if not bool(response.get("ok")):
+                    raise ToolFailure(
+                        str(response.get("error") or "PERMISSION_BROKER_ERROR"),
+                        str(response.get("message") or "Permission approval failed."),
+                        category="runtime",
+                        retryable=bool(response.get("retryable", False)),
+                        details={"request_id": request_id},
+                    )
+                return response
+            time.sleep(0.25)
+    finally:
+        try:
+            request_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    raise ToolFailure(
+        "PERMISSION_APPROVAL_TIMEOUT",
+        "Timed out waiting for the signed-in user to answer the permission dialog.",
+        category="permission",
+        retryable=True,
+        details={"request_id": request_id, "timeout_seconds": timeout, "broker_pid": broker_pid},
     )

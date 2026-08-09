@@ -81,6 +81,64 @@ function Complete-Request([string]$RequestId, [hashtable]$Response) {
     Write-AtomicJson (Join-Path $queueRoot "$RequestId.response") $Response
 }
 
+function Handle-PermissionRequest([string]$RequestId, $Request) {
+    $allowedTools = @("exec_command", "apply_patch")
+    $allowedPermissions = @(
+        "network", "destructive_command", "long_timeout", "sensitive_env",
+        "shell_expansion", "inline_script", "privileged_executable",
+        "filesystem_escape", "write_generated_or_ignored"
+    )
+    $toolName = [string]$Request.tool_name
+    $permission = [string]$Request.permission
+    $scope = [string]$Request.scope
+    $ttlSeconds = [int]$Request.ttl_seconds
+    if ($toolName -notin $allowedTools -or $permission -notin $allowedPermissions -or $scope -notin @("once", "session") -or $ttlSeconds -lt 1 -or $ttlSeconds -gt 3600) {
+        Complete-Request $RequestId @{ ok = $false; error = "PERMISSION_REQUEST_INVALID"; message = "Invalid MCP permission request."; retryable = $false }
+        return
+    }
+
+    $argumentPreview = try { $Request.arguments | ConvertTo-Json -Compress -Depth 6 } catch { "<unavailable>" }
+    if ($argumentPreview.Length -gt 1200) { $argumentPreview = $argumentPreview.Substring(0, 1200) + "..." }
+    $scopeText = if ($scope -eq "once") { "一次（限本次相同參數重試）" } else { "此工作階段（最長 $ttlSeconds 秒）" }
+    $message = @"
+WebGPT MCP 正在要求額外權限。
+
+工具：$toolName
+權限：$permission
+範圍：$scopeText
+理由：$([string]$Request.reason)
+
+參數：
+$argumentPreview
+
+要允許嗎？選擇「否」會拒絕，之後仍可重試。
+"@
+    try {
+        Add-Type -AssemblyName System.Windows.Forms
+        $choice = [System.Windows.Forms.MessageBox]::Show(
+            $message,
+            "WebGPT MCP 權限請求",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Warning,
+            [System.Windows.Forms.MessageBoxDefaultButton]::Button2
+        )
+        $granted = $choice -eq [System.Windows.Forms.DialogResult]::Yes
+        Complete-Request $RequestId @{
+            ok = $true
+            granted = $granted
+            permission = $permission
+            tool_name = $toolName
+            scope = $scope
+            ttl_seconds = $ttlSeconds
+            message = if ($granted) { "Permission approved by the signed-in user." } else { "Permission denied by the signed-in user." }
+            retryable = -not $granted
+        }
+    }
+    catch {
+        Complete-Request $RequestId @{ ok = $false; error = "PERMISSION_DIALOG_FAILED"; message = $_.Exception.Message; retryable = $true }
+    }
+}
+
 function Handle-Request([string]$ProcessingPath) {
     $requestId = [IO.Path]::GetFileNameWithoutExtension($ProcessingPath)
     try {
@@ -92,6 +150,10 @@ function Handle-Request([string]$ProcessingPath) {
         $age = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [double]$request.created_at
         if ($age -lt -30 -or $age -gt $requestTtlSeconds) {
             Complete-Request $requestId @{ ok = $false; error = "ELEVATION_REQUEST_EXPIRED"; message = "The elevation request expired before user approval."; retryable = $true }
+            return
+        }
+        if ([string]$request.kind -eq "mcp_permission") {
+            Handle-PermissionRequest $requestId $request
             return
         }
         $actionName = [string]$request.action

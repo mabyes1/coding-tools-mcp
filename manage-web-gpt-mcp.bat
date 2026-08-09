@@ -25,11 +25,16 @@ echo [6] Prune idle MCP sessions
 echo [7] Open local health page
 echo [8] Update private MCP code (manual)
 echo [9] Roll back private MCP code (manual)
+echo [P] Manage permissions / YOLO mode
 echo [0] Exit
 echo.
-choice /C 1234567890 /N /M "Choose: "
+choice /C 123456789P0 /N /M "Choose: "
 
-if errorlevel 10 exit /b
+if errorlevel 11 exit /b
+if errorlevel 10 (
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0service\manage-mcp-permissions.ps1" -Action Menu
+  goto menu
+)
 if errorlevel 9 (
   powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0service\update-private-mcp.ps1" -Rollback
   pause
