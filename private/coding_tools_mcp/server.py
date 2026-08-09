@@ -364,6 +364,12 @@ NETWORK_RE = re.compile(
     re.I,
 )
 SHELL_EXPANSION_RE = re.compile(r"(`|\$\(|\$\{)")
+LITERAL_DIRECTORY_CHANGE_RE = re.compile(
+    r"^\s*(?:cd|chdir|set-location|sl)\s+"
+    r"(?:(?:/d|-literalpath|-path)\s+)?"
+    r'''(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^;&|\r\n]+?))\s*$''',
+    re.I,
+)
 DESTRUCTIVE_RE = re.compile(
     r"(^|\s)(sudo|su|chmod\s+-R|chown\s+-R|mkfs|mount|umount|find\b[^;&|]*\s-delete\b|git\b[^;&|]*\breset\s+--hard\b|git\b[^;&|]*\bclean\s+-[^\s]*[fx][^\s]*|rm\s+-[^\s]*r[^\s]*f|rm\s+-[^\s]*f[^\s]*r)\b",
     re.I,
@@ -515,6 +521,16 @@ def _http_base_for_bind_host(host: str, port: int) -> str:
     if ":" in host and not host.startswith("["):
         host = f"[{host}]"
     return f"http://{host}:{port}"
+
+
+def _write_http_body_safely(handler: Any, body: bytes) -> bool:
+    """Treat a client disappearing mid-response as a normal disconnect."""
+    try:
+        handler.wfile.write(body)
+        return True
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+        handler.close_connection = True
+        return False
 
 
 def _first_header_value(value: str | None) -> str:
@@ -774,7 +790,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "set_default_cwd": ToolSpec(
         title="Set default cwd",
-        description="Use to change the default directory for later relative paths within the current owner/workspace.",
+        description="Use when entering a project. It persists across connector reconnects for this owner/workspace and controls later relative tool paths.",
         idempotent=True,
     ),
     "read_file": ToolSpec(
@@ -808,7 +824,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "exec_command": ToolSpec(
         title="Execute command",
-        description="Use for builds, tests, scripts, or commands without a dedicated tool. Fast commands exit one-shot; running commands retain a session. Never edit files with it; prefer git_* for Git inspection.",
+        description="Use for builds, tests, and scripts. Fresh shells start at the persistent default cwd; a directory-only cd/chdir/Set-Location updates it. Never edit files with this tool.",
         destructive=True,
         open_world=True,
         error_status="failed",
@@ -2208,16 +2224,39 @@ class Runtime:
         resolved = self.workspace.resolve_existing(str(args.get("path", ".")))
         if not resolved.path.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "Default cwd must be a directory.", category="validation")
-        self.default_cwd = resolved.path
+        return self._store_default_cwd(resolved.path)
+
+    def _store_default_cwd(self, path: Path) -> dict[str, Any]:
+        self.default_cwd = path
         key = self._owner_cwd_key()
         if key is not None:
             with self.execution_registry.state_lock:
-                self.execution_registry.owner_default_cwds[key] = resolved.path
+                self.execution_registry.owner_default_cwds[key] = path
         return {
             "workspace": str(self.workspace.root),
-            "default_cwd": resolved.display,
+            "default_cwd": normalize_rel_display(path, self.workspace.root),
             "scope": "oauth_owner_workspace" if self.state_owner else "mcp_session",
         }
+
+    def _literal_directory_change(self, cmd: str, base: Path) -> Path | None:
+        match = LITERAL_DIRECTORY_CHANGE_RE.fullmatch(cmd)
+        if match is None:
+            return None
+        target = next((group.strip() for group in match.groups() if group is not None), "")
+        # Expansion and wildcard semantics vary by shell. Only persist a path
+        # whose literal meaning is unambiguous; all other commands run normally.
+        if not target or any(marker in target for marker in ("$", "%", "`", "*", "?", "~")):
+            return None
+        candidate = Path(target)
+        if not candidate.is_absolute() and not re.match(r"^[A-Za-z]:[\\/]", target):
+            candidate = base / candidate
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            return None
+        if not resolved.is_dir() or not is_relative_to(resolved, self.workspace.root):
+            return None
+        return resolved
 
     def emit_tool_trace(self, name: str, args: dict[str, Any], payload: dict[str, Any], started_at: float) -> None:
         raw_error = payload.get("error")
@@ -2878,6 +2917,21 @@ class Runtime:
         workdir = self.resolve_existing(str(workdir_arg))
         if not workdir.path.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "workdir is not a directory.", category="validation")
+        directory_change = self._literal_directory_change(cmd, workdir.path)
+        if directory_change is not None:
+            cwd_state = self._store_default_cwd(directory_change)
+            display = str(cwd_state["default_cwd"])
+            return {
+                "status": "exited",
+                "exit_code": 0,
+                "elapsed_ms": 0,
+                "stdout": "",
+                "stderr": "",
+                "cwd": str(directory_change),
+                "default_cwd": display,
+                "cwd_persisted": True,
+                "summary": f"Default cwd changed to {display} and will persist across connector reconnects.",
+            }
         self._check_command_policy(cmd, args)
         timeout_ms = int(args.get("timeout_ms", 30000))
         yield_ms = int(args.get("yield_time_ms", 10000))
@@ -6192,7 +6246,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
-        self.wfile.write(data)
+        _write_http_body_safely(self, data)
 
     def _oauth_login_page(
         self,
@@ -6545,7 +6599,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.send_header(name, value)
         self.end_headers()
         if not head_only:
-            self.wfile.write(body)
+            _write_http_body_safely(self, body)
 
 
 class MCPHealthHandler(http.server.BaseHTTPRequestHandler):
@@ -6577,7 +6631,7 @@ class MCPHealthHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        _write_http_body_safely(self, body)
 
     def do_POST(self) -> None:
         if self.path.split("?", 1)[0] != "/prune":
@@ -6591,7 +6645,7 @@ class MCPHealthHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        _write_http_body_safely(self, body)
 
 
 class RuntimeHTTPServer(http.server.ThreadingHTTPServer):

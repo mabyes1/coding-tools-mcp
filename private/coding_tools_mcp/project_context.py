@@ -52,6 +52,7 @@ class ProjectContext:
         sections = [
             "Use these tools only for coding operations inside the configured workspace.",
             "Use apply_patch as the only direct file-modification tool; do not modify files through exec_command.",
+            "Relative paths use the persistent default cwd. Use set_default_cwd when entering a project; a directory-only cd/chdir/Set-Location exec is also persisted automatically.",
         ]
         for item in self.root_files:
             suffix = " [truncated]" if item.truncated else ""

@@ -2,6 +2,9 @@ tunnel: 18b544a3-7f65-4842-a5f9-e3aec9b534b4
 credentials-file: 'C:\ProgramData\WebGPTCodingToolsMCPService\18b544a3-7f65-4842-a5f9-e3aec9b534b4.json'
 metrics: 127.0.0.1:20242
 no-autoupdate: true
+# This host's UDP/QUIC path periodically drops all four tunnel connections at
+# once. TCP HTTP/2 trades a little latency for stable long-lived MCP requests.
+protocol: http2
 
 ingress:
   - hostname: mcp.kennyxizi.pp.ua

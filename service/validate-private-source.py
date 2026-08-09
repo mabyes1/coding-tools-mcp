@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -19,13 +20,17 @@ def main() -> int:
 
     from coding_tools_mcp import server
     from coding_tools_mcp.project_context import load_project_context
-    from coding_tools_mcp.transport_http import HTTP_IN_FLIGHT_TTL_SECONDS, HTTPSessionManager
+    from coding_tools_mcp.transport_http import (
+        HTTP_IN_FLIGHT_TTL_SECONDS,
+        HTTP_SESSION_TTL_SECONDS,
+        HTTPSessionManager,
+    )
 
     # Importing server already executes the public-catalog invariants. Keep a
     # few explicit assertions here so failures explain what contract broke.
     if len(server.PUBLIC_TOOL_NAMES) > 20:
         raise RuntimeError("public tool catalog exceeds 20-tool connector budget")
-    required_public_tools = {"get_default_cwd", "request_permissions"}
+    required_public_tools = {"get_default_cwd", "set_default_cwd", "request_permissions"}
     missing_public_tools = required_public_tools.difference(server.PUBLIC_TOOL_NAMES)
     if missing_public_tools:
         raise RuntimeError(
@@ -41,6 +46,50 @@ def main() -> int:
     scan_warnings = [warning for warning in context.warnings if "scan stopped" in warning.casefold()]
     if scan_warnings:
         raise RuntimeError("project-context discovery hit a scan limit: " + "; ".join(scan_warnings))
+
+    # A directory-only shell change is a common model/user expectation. Verify
+    # it becomes the shared owner cwd instead of disappearing with a one-shot
+    # child shell, and verify another owner cannot inherit it.
+    with tempfile.TemporaryDirectory(prefix="coding-tools-cwd-check-") as temporary:
+        cwd_workspace = Path(temporary)
+        project = cwd_workspace / "project"
+        project.mkdir()
+        primary = server.Runtime(cwd_workspace, enable_view_image=False)
+        try:
+            primary.state_owner = "selfcheck-owner"
+            changed = primary.exec_command({"cmd": "cd project"})
+            if not changed.get("cwd_persisted") or changed.get("default_cwd") != "project":
+                raise RuntimeError("directory-only exec did not persist the new default cwd")
+            parent = primary.exec_command({"cmd": "cd .."})
+            if parent.get("default_cwd") != ".":
+                raise RuntimeError("a safe parent-directory change did not return to the workspace root")
+            windows_style = primary.exec_command({"cmd": 'cd /d "project"'})
+            if windows_style.get("default_cwd") != "project":
+                raise RuntimeError("CMD-style cd /d did not persist the new default cwd")
+            reconnect = server.Runtime(
+                cwd_workspace,
+                enable_view_image=False,
+                project_context=primary.project_context,
+                execution_registry=primary.execution_registry,
+            )
+            isolated = server.Runtime(
+                cwd_workspace,
+                enable_view_image=False,
+                project_context=primary.project_context,
+                execution_registry=primary.execution_registry,
+            )
+            try:
+                reconnect.state_owner = "selfcheck-owner"
+                isolated.state_owner = "different-owner"
+                if reconnect.default_cwd_display() != "project":
+                    raise RuntimeError("default cwd did not survive an owner reconnect")
+                if isolated.default_cwd_display() != ".":
+                    raise RuntimeError("default cwd leaked across owners")
+            finally:
+                isolated.close()
+                reconnect.close()
+        finally:
+            primary.close()
 
     if os.name == "nt":
         runtime = server.Runtime(workspace, enable_view_image=False, project_context=context)
@@ -105,6 +154,21 @@ def main() -> int:
         raise RuntimeError("stale HTTP in-flight lease watchdog did not evict a stuck lease")
     if HTTP_IN_FLIGHT_TTL_SECONDS != 90:
         raise RuntimeError("HTTP in-flight lease TTL must not exceed the 90-second request lifetime")
+    if HTTP_SESSION_TTL_SECONDS != 300:
+        raise RuntimeError("idle HTTP sessions must survive normal five-minute tool gaps")
+
+    class DisconnectingWriter:
+        def write(self, _body: bytes) -> None:
+            raise ConnectionAbortedError("selfcheck disconnect")
+
+    class DisconnectingHandler:
+        def __init__(self) -> None:
+            self.wfile = DisconnectingWriter()
+            self.close_connection = False
+
+    disconnect = DisconnectingHandler()
+    if server._write_http_body_safely(disconnect, b"test") or not disconnect.close_connection:
+        raise RuntimeError("client disconnects are not handled as normal response termination")
 
     print(
         "PRIVATE_MCP_SOURCE_CHECK_OK "

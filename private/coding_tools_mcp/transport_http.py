@@ -13,7 +13,10 @@ from typing import Any
 # the process indefinitely.  They are configuration values so the single-user
 # service can be adjusted without another source edit.
 MAX_HTTP_SESSIONS = 256
-HTTP_SESSION_TTL_SECONDS = 90
+# Keep an idle MCP transport alive across normal thinking/tool gaps. In-flight
+# requests still have a shorter watchdog below, while owner/global caps evict
+# idle records before they can exhaust the process.
+HTTP_SESSION_TTL_SECONDS = 5 * 60
 HTTP_IN_FLIGHT_TTL_SECONDS = 90
 MAX_HTTP_SESSIONS_PER_OWNER = 64
 
