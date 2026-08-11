@@ -72,6 +72,19 @@ def _render_server_info(payload: dict[str, Any]) -> str:
     )
 
 
+def _render_human_help(payload: dict[str, Any]) -> str:
+    request = str(payload.get("request") or "").strip()
+    expected = str(payload.get("expected_result") or "").strip()
+    return_to_agent = str(payload.get("return_to_agent") or "").strip()
+    lines = ["HUMAN HELP NEEDED", request]
+    if expected:
+        lines.append(f"Expected: {expected}")
+    if return_to_agent:
+        lines.append(f"Return: {return_to_agent}")
+    lines.append("Pause retries on this blocker until the human responds.")
+    return "\n".join(lines)
+
+
 def _render_exec_environment(payload: dict[str, Any]) -> str:
     raw_landlock = payload.get("landlock")
     landlock: dict[str, Any] = raw_landlock if isinstance(raw_landlock, dict) else {}
@@ -403,6 +416,7 @@ def _render_permission(payload: dict[str, Any]) -> str:
 
 _RENDERERS = {
     "server_info": _render_server_info,
+    "human_help_me": _render_human_help,
     "check_exec_environment": _render_exec_environment,
     "get_default_cwd": _render_cwd,
     "set_default_cwd": _render_cwd,

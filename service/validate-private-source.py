@@ -33,13 +33,18 @@ def main() -> int:
     # few explicit assertions here so failures explain what contract broke.
     if len(server.PUBLIC_TOOL_NAMES) > 20:
         raise RuntimeError("public tool catalog exceeds 20-tool connector budget")
-    required_public_tools = {"get_default_cwd", "set_default_cwd", "request_permissions"}
+    required_public_tools = {
+        "get_default_cwd",
+        "set_default_cwd",
+        "request_permissions",
+        "human_help_me",
+    }
     missing_public_tools = required_public_tools.difference(server.PUBLIC_TOOL_NAMES)
     if missing_public_tools:
         raise RuntimeError(
             "required V9 public tools are missing: " + ", ".join(sorted(missing_public_tools))
         )
-    stale_public_tools = {"list_sessions", "request_elevated_action"}.intersection(server.PUBLIC_TOOL_NAMES)
+    stale_public_tools = {"list_sessions", "request_elevated_action", "git_blame"}.intersection(server.PUBLIC_TOOL_NAMES)
     if stale_public_tools:
         raise RuntimeError(
             "stale pre-V9 public tools remain exposed: " + ", ".join(sorted(stale_public_tools))
@@ -52,6 +57,38 @@ def main() -> int:
     permission_schema = server.input_schemas()["request_permissions"]["properties"]["permission"]
     if "interactive_session" not in permission_schema.get("enum", []):
         raise RuntimeError("interactive_session permission is missing from request_permissions schema")
+    human_schema = server.input_schemas()["human_help_me"]
+    if set(human_schema.get("required", [])) != {"reason", "request"}:
+        raise RuntimeError("human_help_me must require exactly reason and request")
+    human_reasons = human_schema.get("properties", {}).get("reason", {}).get("enum", [])
+    if "faster_by_human" not in human_reasons or "permission_blocked" not in human_reasons:
+        raise RuntimeError("human_help_me reason schema is missing core escalation reasons")
+
+    human_runtime = server.Runtime(workspace, enable_view_image=False)
+    try:
+        handoff_result = human_runtime.call_tool(
+            "human_help_me",
+            {
+                "reason": "faster_by_human",
+                "request": "Run one diagnostic command.",
+                "expected_result": "Command output is visible.",
+                "return_to_agent": "Paste the output.",
+            },
+        )
+        handoff = handoff_result.get("structuredContent", {})
+        if handoff.get("status") != "human_action_required":
+            raise RuntimeError("human_help_me did not produce a blocking handoff status")
+        if handoff.get("request") != "Run one diagnostic command.":
+            raise RuntimeError("human_help_me did not preserve the requested human action")
+        rendered = "\n".join(
+            str(item.get("text") or "")
+            for item in handoff_result.get("content", [])
+            if isinstance(item, dict) and item.get("type") == "text"
+        )
+        if "HUMAN HELP NEEDED" not in rendered or "Pause retries" not in rendered:
+            raise RuntimeError("human_help_me model-facing handoff text is incomplete")
+    finally:
+        human_runtime.close()
 
     context = load_project_context(workspace)
     scan_warnings = [warning for warning in context.warnings if "scan stopped" in warning.casefold()]

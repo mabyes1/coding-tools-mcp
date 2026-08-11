@@ -760,6 +760,11 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         read_only=True,
         idempotent=True,
     ),
+    "human_help_me": ToolSpec(
+        title="Human help me",
+        description="Escalate one small blocking step when the human can act faster, supply missing context, use GUI/physical access, or bypass an agent limit. Do not offload ordinary agent work.",
+        read_only=True,
+    ),
     "check_exec_environment": ToolSpec(
         title="Check exec environment",
         description="Use when command execution may fail: inspect sandbox/policy, available developer executables, and active execution-session pressure.",
@@ -936,6 +941,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
 # this list remain available internally for compatibility and tests.
 PUBLIC_TOOL_NAMES = (
     "server_info",
+    "human_help_me",
     "check_exec_environment",
     "get_default_cwd",
     "set_default_cwd",
@@ -952,7 +958,6 @@ PUBLIC_TOOL_NAMES = (
     "git_diff",
     "git_log",
     "git_show",
-    "git_blame",
     "request_permissions",
     "view_image",
 )
@@ -2192,6 +2197,30 @@ class Runtime:
 
     def server_info(self, args: dict[str, Any]) -> dict[str, Any]:
         return self.server_info_payload()
+
+    def human_help_me(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Escalate one deliberately small blocking step to the human operator.
+
+        This tool does not perform the action itself. Its job is to make a
+        human-in-the-loop handoff explicit and structured so an agent stops
+        burning retries on work that is cheaper or only possible for the user.
+        """
+
+        request = str(args.get("request") or "").strip()
+        expected_result = str(args.get("expected_result") or "").strip()
+        return_to_agent = str(args.get("return_to_agent") or "").strip()
+        return {
+            "ok": True,
+            "status": "human_action_required",
+            "reason": str(args.get("reason") or "other"),
+            "request": request,
+            "expected_result": expected_result,
+            "return_to_agent": return_to_agent,
+            "agent_guidance": (
+                "Pause retries on this blocker until the human responds. Keep the handoff scoped to this "
+                "single action/question, then resume from the returned result instead of redoing completed work."
+            ),
+        }
 
     def check_exec_environment(self, args: dict[str, Any]) -> dict[str, Any]:
         landlock = landlock_status_payload()
@@ -5887,6 +5916,26 @@ def input_schemas() -> dict[str, dict[str, Any]]:
     }
     return {
         "server_info": object_schema(),
+        "human_help_me": object_schema(
+            {
+                "reason": {
+                    **string,
+                    "enum": [
+                        "permission_blocked",
+                        "gui_required",
+                        "physical_action",
+                        "faster_by_human",
+                        "need_information",
+                        "need_decision",
+                        "other",
+                    ],
+                },
+                "request": {**string, "minLength": 1, "maxLength": 4000},
+                "expected_result": {**string, "maxLength": 4000},
+                "return_to_agent": {**string, "maxLength": 4000},
+            },
+            ["reason", "request"],
+        ),
         "check_exec_environment": object_schema(
             {"tools": {"type": "array", "items": {**string, "minLength": 1}, "maxItems": 64}}
         ),
