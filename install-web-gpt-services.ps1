@@ -32,6 +32,7 @@ $credentialName = "18b544a3-7f65-4842-a5f9-e3aec9b534b4.json"
 $credentialSource = Join-Path "C:\Users\ken\.cloudflared" $credentialName
 $workspaceRoot = "D:\coding-tools-mcp"
 $elevatedQueueRoot = Join-Path $serviceRoot "elevated-requests"
+$interactiveQueueRoot = Join-Path $serviceRoot "interactive-requests"
 $localServiceSid = "*S-1-5-19"
 $oauthStateBackup = Join-Path ([IO.Path]::GetTempPath()) ("web-gpt-oauth-state-" + [guid]::NewGuid().ToString("N") + ".sqlite")
 $hadOAuthStateBackup = $false
@@ -102,6 +103,7 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $serviceRoot "runtime") -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $serviceRoot "app") -Force | Out-Null
     New-Item -ItemType Directory -Path $elevatedQueueRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $interactiveQueueRoot -Force | Out-Null
     $currentAccount = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 
     # Recover cleanly if an earlier install was interrupted after ACL hardening.
@@ -145,6 +147,9 @@ try {
     Copy-Item -LiteralPath (Join-Path $templateRoot "WebGPTCodingToolsMCP.xml") -Destination $serviceRoot -Force
     Copy-Item -LiteralPath (Join-Path $templateRoot "WebGPTCloudflareTunnel.xml") -Destination $serviceRoot -Force
     foreach ($brokerFile in @("elevated-broker.ps1", "request-elevated-action.ps1", "manage-elevated-broker.ps1")) {
+        Copy-Item -LiteralPath (Join-Path $templateRoot $brokerFile) -Destination (Join-Path $serviceRoot $brokerFile) -Force
+    }
+    foreach ($brokerFile in @("interactive-broker.ps1", "manage-interactive-broker.ps1", "install-interactive-broker.ps1")) {
         Copy-Item -LiteralPath (Join-Path $templateRoot $brokerFile) -Destination (Join-Path $serviceRoot $brokerFile) -Force
     }
     $webrootSourceScript = Join-Path $workspaceRoot "phoneMonitor\scripts\sync-installed-webroot.ps1"
@@ -229,6 +234,11 @@ try {
         "*S-1-5-32-544:(OI)(CI)F" `
         "${currentAccount}:(OI)(CI)M" `
         "${localServiceSid}:(OI)(CI)M" /C | Out-Host
+    & icacls.exe $interactiveQueueRoot /inheritance:r /grant:r `
+        "*S-1-5-18:(OI)(CI)F" `
+        "*S-1-5-32-544:(OI)(CI)F" `
+        "${currentAccount}:(OI)(CI)M" `
+        "${localServiceSid}:(OI)(CI)M" /C | Out-Host
     & icacls.exe $workspaceRoot /grant `
         "${localServiceSid}:(OI)(CI)M" /T /C | Out-Host
     & icacls.exe $pythonRoot /grant `
@@ -241,6 +251,13 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Could not install the interactive elevated broker task." }
     & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $brokerManager -Action Start
     if ($LASTEXITCODE -ne 0) { throw "Could not start the interactive elevated broker." }
+
+    Write-Host "Installing the non-elevated signed-in desktop execution broker..."
+    $interactiveBrokerManager = Join-Path $serviceRoot "manage-interactive-broker.ps1"
+    & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $interactiveBrokerManager -Action Install
+    if ($LASTEXITCODE -ne 0) { throw "Could not install the non-elevated interactive broker task." }
+    & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $interactiveBrokerManager -Action Start
+    if ($LASTEXITCODE -ne 0) { throw "Could not start the non-elevated interactive broker." }
 
     Write-Host "Stopping and removing the old scheduled supervisors..."
     foreach ($taskName in @("WebGPT-CodingTools-MCP", "WebGPT-Cloudflare-Tunnel")) {

@@ -45,6 +45,14 @@ def main() -> int:
             "stale pre-V9 public tools remain exposed: " + ", ".join(sorted(stale_public_tools))
         )
 
+    exec_schema = server.input_schemas()["exec_command"]
+    execution_context = exec_schema.get("properties", {}).get("execution_context", {})
+    if execution_context.get("enum") != ["service", "active_user"]:
+        raise RuntimeError("exec_command execution_context schema drifted from service/active_user")
+    permission_schema = server.input_schemas()["request_permissions"]["properties"]["permission"]
+    if "interactive_session" not in permission_schema.get("enum", []):
+        raise RuntimeError("interactive_session permission is missing from request_permissions schema")
+
     context = load_project_context(workspace)
     scan_warnings = [warning for warning in context.warnings if "scan stopped" in warning.casefold()]
     if scan_warnings:

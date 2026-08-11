@@ -38,6 +38,7 @@ from .envutils import ENV_PREFIX, truthy_env
 from .errors import JsonRpcError, ToolFailure
 from .elevated_actions import ELEVATED_ACTIONS, request_elevated_action, request_permission_approval
 from .gitutils import git_command
+from .interactive_exec import interactive_broker_status, request_interactive_exec
 from .landlock_exec import libc_syscall
 from .oauth import (
     OAUTH_CODE_TTL_SECONDS,
@@ -824,7 +825,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "exec_command": ToolSpec(
         title="Execute command",
-        description="Use for builds, tests, and scripts. Fresh shells start at the persistent default cwd; a directory-only cd/chdir/Set-Location updates it. Never edit files with this tool.",
+        description="Use for builds, tests, and scripts. execution_context=service is managed Session 0; active_user is one-shot in the signed-in non-elevated desktop. Never edit files.",
         destructive=True,
         open_world=True,
         error_status="failed",
@@ -2211,6 +2212,20 @@ class Runtime:
             "ok": True,
             **self._exec_environment_summary(),
             "execution": self._execution_session_summary(),
+            "execution_contexts": {
+                "service": {
+                    "available": True,
+                    "managed_sessions": True,
+                    "interactive_desktop": False,
+                    "elevated": False,
+                },
+                "active_user": {
+                    **interactive_broker_status(),
+                    "managed_sessions": False,
+                    "one_shot": True,
+                    "interactive_desktop": True,
+                },
+            },
             "landlock_enabled": self._landlock_enforced(landlock),
             "landlock_abi": landlock.get("abi_version"),
             "global_tmp_write": self.global_tmp_write_policy(),
@@ -2991,6 +3006,13 @@ class Runtime:
         cmd = str(args.get("cmd", ""))
         if not cmd:
             raise ToolFailure("INVALID_ARGUMENT", "cmd is required.", category="validation")
+        execution_context = str(args.get("execution_context", "service") or "service").strip().lower()
+        if execution_context not in {"service", "active_user"}:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "execution_context must be one of: service, active_user.",
+                category="validation",
+            )
         workdir_arg = args.get("workdir", args.get("cwd", "."))
         if "workdir" in args and "cwd" in args and str(args["workdir"]) != str(args["cwd"]):
             raise ToolFailure("INVALID_ARGUMENT", "workdir and cwd refer to different directories.", category="validation")
@@ -3018,6 +3040,28 @@ class Runtime:
         max_output_bytes = int(args.get("max_output_bytes", 65536))
         tty = bool(args.get("tty", False))
         stdin_text = str(args.get("stdin", ""))
+        if execution_context == "active_user":
+            if tty:
+                raise ToolFailure(
+                    "INTERACTIVE_CONTEXT_ONE_SHOT",
+                    "active_user execution is one-shot in this version and does not support tty=true.",
+                    category="validation",
+                    details={"execution_context": execution_context, "managed_sessions": False},
+                )
+            if stdin_text:
+                raise ToolFailure(
+                    "INTERACTIVE_CONTEXT_ONE_SHOT",
+                    "active_user execution is one-shot in this version and does not support stdin.",
+                    category="validation",
+                    details={"execution_context": execution_context, "managed_sessions": False},
+                )
+            return self._exec_command_active_user(
+                cmd=cmd,
+                workdir=workdir.path,
+                args=args,
+                timeout_ms=timeout_ms,
+                max_output_bytes=max_output_bytes,
+            )
         env = self._command_env(args.get("env", {}))
         self._ensure_runtime_dirs()
         scratch_dir = self.tmp_dir / f"session-{secrets.token_urlsafe(12)}"
@@ -3197,6 +3241,22 @@ class Runtime:
             time.sleep(0.02)
 
     def _check_command_policy(self, cmd: str, args: dict[str, Any]) -> None:
+        execution_context = str(args.get("execution_context", "service") or "service").strip().lower()
+        if (
+            execution_context == "active_user"
+            and not self.dangerously_skip_all_permissions
+            and not self._permission_granted("interactive_session")
+        ):
+            raise ToolFailure(
+                "PERMISSION_REQUIRED",
+                "Running a command in the signed-in user's interactive desktop requires explicit permission.",
+                category="permission",
+                details={
+                    "permission": "interactive_session",
+                    "execution_context": "active_user",
+                    "os_privileges": "signed-in user, non-elevated",
+                },
+            )
         if self.dangerously_skip_all_permissions:
             return
         self._check_command_paths(cmd)
@@ -3424,6 +3484,141 @@ class Runtime:
                     continue
                 env[key_text] = value_text
         return env
+
+    def _interactive_command_env(self, extra: Any) -> tuple[dict[str, str], dict[str, Any]]:
+        """Return explicit overrides + filtering policy for the desktop broker.
+
+        The broker intentionally inherits the signed-in user's environment,
+        not LocalService's synthetic HOME/APPDATA.  The normal shell-env policy
+        is applied inside that broker before the child process starts.
+        """
+        filter_sensitive = not self.dangerously_skip_all_permissions and not self._permission_granted("sensitive_env")
+        overrides: dict[str, str] = {}
+        if isinstance(extra, dict):
+            for key, value in extra.items():
+                key_text = str(key)
+                value_text = str(value)
+                if filter_sensitive and is_filtered_env_var(key_text, value_text):
+                    continue
+                overrides[key_text] = value_text
+        interactive_core = WINDOWS_CORE_ENV_NAMES | {
+            "USERPROFILE",
+            "USERNAME",
+            "USERDOMAIN",
+            "USERDOMAIN_ROAMINGPROFILE",
+            "SESSIONNAME",
+            "COMPUTERNAME",
+            "LOGONSERVER",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "OS",
+            "PROCESSOR_ARCHITECTURE",
+            "NUMBER_OF_PROCESSORS",
+            "TEMP",
+            "TMP",
+        }
+        policy = {
+            "inherit": self.shell_env_policy.inherit,
+            "include_only": list(self.shell_env_policy.include_only),
+            "exclude": list(self.shell_env_policy.exclude),
+            "set": {str(key): str(value) for key, value in self.shell_env_policy.set.items()},
+            "core_names": sorted(interactive_core),
+        }
+        return overrides, policy
+
+    def _exec_command_active_user(
+        self,
+        *,
+        cmd: str,
+        workdir: Path,
+        args: dict[str, Any],
+        timeout_ms: int,
+        max_output_bytes: int,
+    ) -> dict[str, Any]:
+        started = time.time()
+        env_overrides, env_policy = self._interactive_command_env(args.get("env", {}))
+        result = request_interactive_exec(
+            cmd=cmd,
+            cwd=str(workdir),
+            env_overrides=env_overrides,
+            env_policy=env_policy,
+            timeout_seconds=timeout_ms / 1000.0,
+        )
+        stdout_raw = str(result.get("stdout") or "")
+        stderr_raw = str(result.get("stderr") or "")
+        stdout_view = truncate_output_bytes_tail(stdout_raw.encode("utf-8"), max_output_bytes)
+        stderr_view = truncate_output_bytes_tail(stderr_raw.encode("utf-8"), max_output_bytes)
+        broker_stdout_truncated = bool(result.get("stdout_truncated"))
+        broker_stderr_truncated = bool(result.get("stderr_truncated"))
+        stdout_truncated = broker_stdout_truncated or stdout_view.truncated
+        stderr_truncated = broker_stderr_truncated or stderr_view.truncated
+        stdout_total = int(result.get("stdout_total_bytes") or len(stdout_raw.encode("utf-8")))
+        stderr_total = int(result.get("stderr_total_bytes") or len(stderr_raw.encode("utf-8")))
+        stdout_bytes = len(stdout_view.content.encode("utf-8"))
+        stderr_bytes = len(stderr_view.content.encode("utf-8"))
+        payload: dict[str, Any] = {
+            "status": str(result.get("status") or "exited"),
+            "exit_code": result.get("exit_code"),
+            "timed_out": bool(result.get("timed_out")),
+            "elapsed_ms": int(result.get("elapsed_ms") or ((time.time() - started) * 1000)),
+            "stdout": stdout_view.content,
+            "stderr": stderr_view.content,
+            "stdout_total_bytes": stdout_total,
+            "stderr_total_bytes": stderr_total,
+            "stdout_output_bytes": stdout_bytes,
+            "stderr_output_bytes": stderr_bytes,
+            "stdout_output_lines": len(stdout_view.content.splitlines()),
+            "stderr_output_lines": len(stderr_view.content.splitlines()),
+            "stdout_omitted_bytes": max(0, stdout_total - stdout_bytes),
+            "stderr_omitted_bytes": max(0, stderr_total - stderr_bytes),
+            "stdout_truncated": stdout_truncated,
+            "stderr_truncated": stderr_truncated,
+            "stdout_truncated_by": "bytes" if stdout_truncated else None,
+            "stderr_truncated_by": "bytes" if stderr_truncated else None,
+            "truncated": stdout_truncated or stderr_truncated,
+            "execution_context": "active_user",
+            "execution_identity": result.get("execution_identity") or {},
+            "process_id": result.get("process_id"),
+            "managed_session": False,
+            "polling_supported": False,
+        }
+        self._add_exec_diagnostics(payload)
+        if payload["truncated"]:
+            payload.setdefault("warnings", []).append(
+                "active_user is one-shot; truncated output is not retained for read_output in this version"
+            )
+        verbosity = str(args.get("verbosity", "")).strip().lower()
+        if verbosity and verbosity not in {"summary", "preview", "full"}:
+            raise ToolFailure(
+                "INVALID_ARGUMENT",
+                "verbosity must be one of: summary, preview, full.",
+                category="validation",
+            )
+        retained = "\n".join(part for part in (stdout_view.content, stderr_view.content) if part)
+        tail = next((line.strip() for line in reversed(retained.splitlines()) if line.strip()), "")
+        if len(tail) > 120:
+            tail = tail[:117] + "..."
+        if verbosity:
+            status_text = (
+                f"exit {payload['exit_code']}" if payload.get("exit_code") is not None else str(payload["status"])
+            )
+            summary = [status_text, f"{payload['elapsed_ms'] / 1000.0:.1f}s", "active_user"]
+            if tail:
+                summary.append(f"tail: {tail!r}")
+            payload["summary"] = " | ".join(summary)
+        if verbosity == "summary":
+            payload.pop("stdout", None)
+            payload.pop("stderr", None)
+        elif verbosity == "preview":
+            preview_limit = int(args.get("preview_bytes", EXEC_PREVIEW_BYTES))
+            preview, preview_truncated = truncate_bytes(retained.encode("utf-8"), preview_limit)
+            payload["preview"] = preview
+            payload["preview_truncated"] = preview_truncated
+            payload.pop("stdout", None)
+            payload.pop("stderr", None)
+        return payload
 
     def _git_env(self) -> dict[str, str]:
         return self._command_env({})
@@ -5762,6 +5957,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "exec_command": object_schema(
             {
                 "cmd": {**string, "minLength": 1},
+                "execution_context": {**string, "enum": ["service", "active_user"], "default": "service"},
                 "workdir": {**string, "default": "."},
                 "cwd": {**string},
                 "timeout_ms": {**integer, "minimum": 1, "maximum": 600000, "default": 30000},
@@ -5923,6 +6119,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     "enum": [
                         "network",
                         "destructive_command",
+                        "interactive_session",
                         "long_timeout",
                         "sensitive_env",
                         "shell_expansion",

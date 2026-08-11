@@ -21,7 +21,15 @@ ELEVATED_QUEUE_ENV = "CODING_TOOLS_MCP_ELEVATED_QUEUE"
 DEFAULT_ELEVATED_QUEUE = Path(r"C:\ProgramData\WebGPTCodingToolsMCPService\elevated-requests")
 ELEVATED_PROTOCOL_VERSION = 1
 ELEVATED_ACTIONS = frozenset({
+    "extend-vibedeck-display",
+    "install-interactive-broker",
     "install-vibedeck-update",
+    "install-vibedeck-webcodecs-lab",
+    "install-vibedeck-virtual-display",
+    "remove-legacy-phonemonitor-vdd",
+    "remove-vibedeck-rescue-vdd",
+    "recover-vibedeck-stuck-setup",
+    "recreate-vibedeck-virtual-display",
     "repair-vibedeck-virtual-display",
     "repair-vibedeck-autostart",
     "sync-installed-webroot",
@@ -31,6 +39,7 @@ ELEVATED_REQUEST_TTL_SECONDS = 900
 MCP_PERMISSION_NAMES = frozenset({
     "network",
     "destructive_command",
+    "interactive_session",
     "long_timeout",
     "sensitive_env",
     "shell_expansion",
