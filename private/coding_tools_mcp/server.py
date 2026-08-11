@@ -38,7 +38,7 @@ from .envutils import ENV_PREFIX, truthy_env
 from .errors import JsonRpcError, ToolFailure
 from .elevated_actions import ELEVATED_ACTIONS, request_elevated_action, request_permission_approval
 from .gitutils import git_command
-from .interactive_exec import interactive_broker_status, request_interactive_exec
+from .interactive_exec import interactive_broker_status, request_human_help, request_interactive_exec
 from .landlock_exec import libc_syscall
 from .oauth import (
     OAUTH_CODE_TTL_SECONDS,
@@ -762,7 +762,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "human_help_me": ToolSpec(
         title="Human help me",
-        description="Escalate one small blocking step when the human can act faster, supply missing context, use GUI/physical access, or bypass an agent limit. Do not offload ordinary agent work.",
+        description="Escalate one small step to the human. Prefer the desktop QA prompt; if chat fallback is returned, surface it visibly. Never offload ordinary agent work.",
         read_only=True,
     ),
     "check_exec_environment": ToolSpec(
@@ -2209,16 +2209,73 @@ class Runtime:
         request = str(args.get("request") or "").strip()
         expected_result = str(args.get("expected_result") or "").strip()
         return_to_agent = str(args.get("return_to_agent") or "").strip()
+        reason = str(args.get("reason") or "other")
+        mode = str(args.get("mode") or "prefer_human")
+        fallback = str(args.get("fallback") or "continue_best_effort")
+        delivery = str(args.get("delivery") or "auto")
+        timeout_seconds = int(args.get("timeout_seconds") or 60)
+
+        if delivery != "chat_only":
+            try:
+                response = request_human_help(
+                    reason=reason,
+                    request=request,
+                    expected_result=expected_result,
+                    return_to_agent=return_to_agent,
+                    mode=mode,
+                    fallback=fallback,
+                    timeout_seconds=timeout_seconds,
+                )
+                outcome = str(response.get("outcome") or "unknown")
+                if outcome in {"submitted", "done"}:
+                    return {
+                        "ok": True,
+                        "status": "human_completed",
+                        "delivery": "desktop_qa",
+                        "reason": reason,
+                        "request": request,
+                        "answer": str(response.get("answer") or ""),
+                        "outcome": outcome,
+                        "agent_action": "resume_from_human_result",
+                    }
+                return {
+                    "ok": True,
+                    "status": "human_declined" if outcome == "skip" else "human_unavailable",
+                    "delivery": "desktop_qa",
+                    "reason": reason,
+                    "request": request,
+                    "answer": str(response.get("answer") or ""),
+                    "outcome": outcome,
+                    "agent_action": "continue_best_effort" if fallback == "continue_best_effort" else "wait_for_human",
+                    "agent_guidance": (
+                        "The human skipped or did not answer. Continue with the best safe agent path; do not repeat the same human request immediately."
+                        if fallback == "continue_best_effort"
+                        else "The human did not complete this blocking step. Stop this branch until they explicitly return to it."
+                    ),
+                }
+            except ToolFailure as exc:
+                # Desktop prompting is a convenience layer. If it is unavailable,
+                # fall back to a model-visible handoff instead of failing the tool.
+                desktop_error = {"code": exc.code, "message": exc.message}
+        else:
+            desktop_error = None
+
         return {
             "ok": True,
             "status": "human_action_required",
-            "reason": str(args.get("reason") or "other"),
+            "delivery": "chat",
+            "visibility": "must_surface_to_user",
+            "reason": reason,
+            "mode": mode,
+            "fallback": fallback,
             "request": request,
             "expected_result": expected_result,
             "return_to_agent": return_to_agent,
+            "desktop_error": desktop_error,
+            "agent_action": "ask_user_visibly",
             "agent_guidance": (
-                "Pause retries on this blocker until the human responds. Keep the handoff scoped to this "
-                "single action/question, then resume from the returned result instead of redoing completed work."
+                "Immediately show this exact small request in the assistant's visible reply; never assume MCP tool calls/results are visible to the human. "
+                "Tell them they may skip it and ask you to continue if fallback=continue_best_effort."
             ),
         }
 
@@ -5933,6 +5990,10 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "request": {**string, "minLength": 1, "maxLength": 4000},
                 "expected_result": {**string, "maxLength": 4000},
                 "return_to_agent": {**string, "maxLength": 4000},
+                "mode": {**string, "enum": ["prefer_human", "blocking"], "default": "prefer_human"},
+                "fallback": {**string, "enum": ["continue_best_effort", "wait_for_human"], "default": "continue_best_effort"},
+                "delivery": {**string, "enum": ["auto", "chat_only"], "default": "auto"},
+                "timeout_seconds": {**integer, "minimum": 5, "maximum": 300, "default": 60},
             },
             ["reason", "request"],
         ),

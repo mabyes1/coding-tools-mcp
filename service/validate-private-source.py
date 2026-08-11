@@ -73,10 +73,11 @@ def main() -> int:
                 "request": "Run one diagnostic command.",
                 "expected_result": "Command output is visible.",
                 "return_to_agent": "Paste the output.",
+                "delivery": "chat_only",
             },
         )
         handoff = handoff_result.get("structuredContent", {})
-        if handoff.get("status") != "human_action_required":
+        if handoff.get("status") != "human_action_required" or handoff.get("visibility") != "must_surface_to_user":
             raise RuntimeError("human_help_me did not produce a blocking handoff status")
         if handoff.get("request") != "Run one diagnostic command.":
             raise RuntimeError("human_help_me did not preserve the requested human action")
@@ -85,7 +86,7 @@ def main() -> int:
             for item in handoff_result.get("content", [])
             if isinstance(item, dict) and item.get("type") == "text"
         )
-        if "HUMAN HELP NEEDED" not in rendered or "Pause retries" not in rendered:
+        if "HUMAN HELP NEEDED" not in rendered or "surface it in your next visible reply" not in rendered:
             raise RuntimeError("human_help_me model-facing handoff text is incomplete")
     finally:
         human_runtime.close()

@@ -73,15 +73,25 @@ def _render_server_info(payload: dict[str, Any]) -> str:
 
 
 def _render_human_help(payload: dict[str, Any]) -> str:
+    status = str(payload.get("status") or "")
+    delivery = str(payload.get("delivery") or "")
+    if status == "human_completed":
+        answer = str(payload.get("answer") or "").strip()
+        return "Human completed the desktop QA request." + (f"\nAnswer: {answer}" if answer else "")
+    if status in {"human_declined", "human_unavailable"}:
+        action = str(payload.get("agent_action") or "continue_best_effort")
+        return f"Human-help desktop prompt ended with {payload.get('outcome', 'no response')}. Agent action: {action}."
     request = str(payload.get("request") or "").strip()
     expected = str(payload.get("expected_result") or "").strip()
     return_to_agent = str(payload.get("return_to_agent") or "").strip()
-    lines = ["HUMAN HELP NEEDED", request]
+    lines = ["HUMAN HELP NEEDED — SHOW THIS TO THE USER", request]
     if expected:
         lines.append(f"Expected: {expected}")
     if return_to_agent:
         lines.append(f"Return: {return_to_agent}")
-    lines.append("Pause retries on this blocker until the human responds.")
+    if str(payload.get("fallback") or "") == "continue_best_effort":
+        lines.append("Tell the user they can skip this and ask you to continue best-effort.")
+    lines.append("Do not assume this tool result is visible to the user; surface it in your next visible reply.")
     return "\n".join(lines)
 
 

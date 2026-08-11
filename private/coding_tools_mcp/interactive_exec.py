@@ -215,3 +215,114 @@ def request_interactive_exec(
             "broker": status,
         },
     )
+
+
+def request_human_help(
+    *,
+    reason: str,
+    request: str,
+    expected_result: str,
+    return_to_agent: str,
+    mode: str,
+    fallback: str,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    """Ask the signed-in human one focused question/action through the desktop broker."""
+    if os.name != "nt":
+        raise ToolFailure(
+            "INTERACTIVE_CONTEXT_UNSUPPORTED",
+            "Human-help desktop prompts are currently supported only on Windows.",
+            category="runtime",
+        )
+    try:
+        timeout = max(5.0, min(float(timeout_seconds), 300.0))
+    except (TypeError, ValueError):
+        timeout = 60.0
+
+    queue = interactive_queue_path()
+    status = interactive_broker_status()
+    if not queue.is_dir() or not status.get("available"):
+        raise ToolFailure(
+            "INTERACTIVE_BROKER_UNAVAILABLE",
+            "The signed-in desktop broker is unavailable for a human-help prompt.",
+            category="runtime",
+            retryable=True,
+            details=status,
+        )
+
+    request_id = secrets.token_urlsafe(18)
+    request_path = queue / f"{request_id}.request"
+    response_path = queue / f"{request_id}.response"
+    payload = {
+        "protocol": INTERACTIVE_PROTOCOL_VERSION,
+        "request_id": request_id,
+        "kind": "human_help",
+        "created_at": time.time(),
+        "requested_by": os.getpid(),
+        "reason": str(reason),
+        "request": str(request),
+        "expected_result": str(expected_result),
+        "return_to_agent": str(return_to_agent),
+        "mode": str(mode),
+        "fallback": str(fallback),
+        "timeout_seconds": int(timeout),
+    }
+    try:
+        _write_json_atomically(request_path, payload)
+    except (OSError, TypeError, ValueError) as exc:
+        raise ToolFailure(
+            "INTERACTIVE_QUEUE_UNAVAILABLE",
+            "The human-help request could not be queued.",
+            category="runtime",
+            retryable=True,
+            details={"queue": str(queue), "reason": str(exc)},
+        ) from exc
+
+    deadline = time.monotonic() + timeout + 10.0
+    try:
+        while time.monotonic() < deadline:
+            if response_path.exists():
+                try:
+                    response = json.loads(response_path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ToolFailure(
+                        "INTERACTIVE_RESPONSE_INVALID",
+                        "The desktop broker returned an invalid human-help response.",
+                        category="runtime",
+                        retryable=True,
+                        details={"request_id": request_id},
+                    ) from exc
+                try:
+                    response_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                if not isinstance(response, dict) or response.get("request_id") != request_id:
+                    raise ToolFailure(
+                        "INTERACTIVE_RESPONSE_INVALID",
+                        "The human-help response did not match the request.",
+                        category="security",
+                        details={"request_id": request_id},
+                    )
+                if not bool(response.get("ok")):
+                    raise ToolFailure(
+                        str(response.get("error") or "HUMAN_HELP_FAILED"),
+                        str(response.get("message") or "Human-help prompt failed."),
+                        category="runtime",
+                        retryable=bool(response.get("retryable", False)),
+                        details={"request_id": request_id, "broker": status},
+                    )
+                return response
+            time.sleep(0.1)
+    finally:
+        try:
+            request_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    raise ToolFailure(
+        "HUMAN_HELP_TIMEOUT",
+        "Timed out waiting for the desktop broker to return the human-help result.",
+        category="runtime",
+        retryable=True,
+        details={"request_id": request_id, "timeout_seconds": timeout, "broker": status},
+    )

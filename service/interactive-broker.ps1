@@ -199,6 +199,175 @@ function Handle-ExecRequest([string]$RequestId, $Request) {
     }
 }
 
+function Handle-HumanHelpRequest([string]$RequestId, $Request) {
+    $requestText = [string]$Request.request
+    $expectedResult = [string]$Request.expected_result
+    $returnToAgent = [string]$Request.return_to_agent
+    $reason = [string]$Request.reason
+    $mode = [string]$Request.mode
+    $fallback = [string]$Request.fallback
+    $timeoutSeconds = [Math]::Max(5, [Math]::Min([int]$Request.timeout_seconds, 300))
+    if ([string]::IsNullOrWhiteSpace($requestText) -or $requestText.Length -gt 4000) {
+        Complete-Request $RequestId @{ ok = $false; error = "HUMAN_HELP_REQUEST_INVALID"; message = "Human-help request is missing or too large."; retryable = $false }
+        return
+    }
+
+    try {
+        Write-BrokerLog "HUMAN_HELP_START id=$RequestId reason=$reason mode=$mode fallback=$fallback timeout=$timeoutSeconds"
+        Add-Type -AssemblyName System.Windows.Forms
+        Add-Type -AssemblyName System.Drawing
+
+        $state = @{ outcome = "closed"; timed_out = $false; remaining = $timeoutSeconds }
+        $form = New-Object System.Windows.Forms.Form
+        $form.Text = "Coding Tools needs your help"
+        $form.StartPosition = "CenterScreen"
+        $form.TopMost = $true
+        $form.Width = 720
+        $form.Height = 560
+        $form.MinimumSize = New-Object System.Drawing.Size(620, 480)
+        $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
+        $form.MaximizeBox = $false
+        $form.ShowInTaskbar = $true
+
+        $title = New-Object System.Windows.Forms.Label
+        $title.Text = "AI asks for one small human step"
+        $title.Font = New-Object System.Drawing.Font("Segoe UI", 14, [System.Drawing.FontStyle]::Bold)
+        $title.AutoSize = $true
+        $title.Left = 18
+        $title.Top = 16
+        $form.Controls.Add($title)
+
+        $meta = New-Object System.Windows.Forms.Label
+        $meta.Text = "Reason: $reason    Mode: $mode"
+        $meta.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+        $meta.AutoSize = $true
+        $meta.Left = 20
+        $meta.Top = 52
+        $form.Controls.Add($meta)
+
+        $requestBox = New-Object System.Windows.Forms.TextBox
+        $requestBox.Multiline = $true
+        $requestBox.ReadOnly = $true
+        $requestBox.ScrollBars = "Vertical"
+        $requestBox.Font = New-Object System.Drawing.Font("Consolas", 10)
+        $requestBox.Left = 20
+        $requestBox.Top = 82
+        $requestBox.Width = 660
+        $requestBox.Height = 145
+        $requestBox.Anchor = "Top,Left,Right"
+        $requestBox.Text = $requestText
+        $form.Controls.Add($requestBox)
+
+        $details = New-Object System.Windows.Forms.Label
+        $detailLines = @()
+        if (-not [string]::IsNullOrWhiteSpace($expectedResult)) { $detailLines += "Expected: $expectedResult" }
+        if (-not [string]::IsNullOrWhiteSpace($returnToAgent)) { $detailLines += "Return to AI: $returnToAgent" }
+        $details.Text = ($detailLines -join "`r`n")
+        $details.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+        $details.Left = 20
+        $details.Top = 238
+        $details.Width = 660
+        $details.Height = 46
+        $details.Anchor = "Top,Left,Right"
+        $form.Controls.Add($details)
+
+        $answerLabel = New-Object System.Windows.Forms.Label
+        $answerLabel.Text = "Optional answer / result for AI:"
+        $answerLabel.AutoSize = $true
+        $answerLabel.Left = 20
+        $answerLabel.Top = 292
+        $form.Controls.Add($answerLabel)
+
+        $answerBox = New-Object System.Windows.Forms.TextBox
+        $answerBox.Multiline = $true
+        $answerBox.ScrollBars = "Vertical"
+        $answerBox.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+        $answerBox.Left = 20
+        $answerBox.Top = 316
+        $answerBox.Width = 660
+        $answerBox.Height = 105
+        $answerBox.Anchor = "Top,Bottom,Left,Right"
+        $form.Controls.Add($answerBox)
+
+        $countdown = New-Object System.Windows.Forms.Label
+        $countdown.Text = "Auto fallback in $timeoutSeconds s"
+        $countdown.AutoSize = $true
+        $countdown.Left = 20
+        $countdown.Top = 446
+        $countdown.Anchor = "Bottom,Left"
+        $form.Controls.Add($countdown)
+
+        $submitButton = New-Object System.Windows.Forms.Button
+        $submitButton.Text = "Send / Done"
+        $submitButton.Width = 120
+        $submitButton.Height = 32
+        $submitButton.Left = 410
+        $submitButton.Top = 440
+        $submitButton.Anchor = "Bottom,Right"
+        $submitButton.Add_Click({
+            $state.outcome = if ([string]::IsNullOrWhiteSpace($answerBox.Text)) { "done" } else { "submitted" }
+            $form.Close()
+        })
+        $form.Controls.Add($submitButton)
+
+        $skipButton = New-Object System.Windows.Forms.Button
+        $skipButton.Text = if ($fallback -eq "continue_best_effort") { "Skip, AI continue" } else { "Can't help" }
+        $skipButton.Width = 140
+        $skipButton.Height = 32
+        $skipButton.Left = 540
+        $skipButton.Top = 440
+        $skipButton.Anchor = "Bottom,Right"
+        $skipButton.Add_Click({
+            $state.outcome = "skip"
+            $form.Close()
+        })
+        $form.Controls.Add($skipButton)
+
+        $timer = New-Object System.Windows.Forms.Timer
+        $timer.Interval = 1000
+        $timer.Add_Tick({
+            $state.remaining = [int]$state.remaining - 1
+            $countdown.Text = "Auto fallback in $($state.remaining) s"
+            if ([int]$state.remaining -le 0) {
+                $state.outcome = "timeout"
+                $state.timed_out = $true
+                $timer.Stop()
+                $form.Close()
+            }
+        })
+        $form.AcceptButton = $submitButton
+        $form.Add_Shown({
+            $form.BringToFront()
+            $form.Activate()
+            $answerBox.Focus()
+            $timer.Start()
+        })
+        [void]$form.ShowDialog()
+        $timer.Stop()
+        $answer = [string]$answerBox.Text
+        $timer.Dispose()
+        $form.Dispose()
+
+        Write-BrokerLog "HUMAN_HELP_END id=$RequestId outcome=$($state.outcome) timed_out=$($state.timed_out)"
+        Complete-Request $RequestId @{
+            ok = $true
+            status = "human_response"
+            outcome = [string]$state.outcome
+            answer = $answer
+            timed_out = [bool]$state.timed_out
+            mode = $mode
+            fallback = $fallback
+            execution_context = "active_user"
+            message = "Human-help desktop prompt completed."
+            retryable = $false
+        }
+    }
+    catch {
+        Write-BrokerLog "HUMAN_HELP_ERROR id=$RequestId error=$($_.Exception.Message)"
+        Complete-Request $RequestId @{ ok = $false; error = "HUMAN_HELP_UI_ERROR"; message = $_.Exception.Message; retryable = $true }
+    }
+}
+
 function Handle-Request([string]$ProcessingPath) {
     $requestId = [IO.Path]::GetFileNameWithoutExtension($ProcessingPath)
     try {
@@ -212,11 +381,13 @@ function Handle-Request([string]$ProcessingPath) {
             Complete-Request $requestId @{ ok = $false; error = "INTERACTIVE_REQUEST_EXPIRED"; message = "The interactive execution request expired."; retryable = $true }
             return
         }
-        if ([string]$request.kind -ne "exec") {
-            Complete-Request $requestId @{ ok = $false; error = "INTERACTIVE_REQUEST_INVALID"; message = "Unsupported interactive broker request kind."; retryable = $false }
-            return
+        switch ([string]$request.kind) {
+            "exec" { Handle-ExecRequest $requestId $request }
+            "human_help" { Handle-HumanHelpRequest $requestId $request }
+            default {
+                Complete-Request $requestId @{ ok = $false; error = "INTERACTIVE_REQUEST_INVALID"; message = "Unsupported interactive broker request kind."; retryable = $false }
+            }
         }
-        Handle-ExecRequest $requestId $request
     }
     catch {
         Complete-Request $requestId @{ ok = $false; error = "INTERACTIVE_BROKER_ERROR"; message = $_.Exception.Message; retryable = $true }
