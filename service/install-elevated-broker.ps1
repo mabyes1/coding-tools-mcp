@@ -29,6 +29,36 @@ foreach ($file in @("elevated-broker.ps1", "request-elevated-action.ps1", "manag
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Broker source is missing: $source" }
     Copy-Item -LiteralPath $source -Destination (Join-Path $serviceRoot $file) -Force
 }
+$launcherSource = Join-Path $sourceRoot "ElevatedBrokerLauncher.cs"
+if (-not (Test-Path -LiteralPath $launcherSource -PathType Leaf)) { throw "Broker launcher source is missing: $launcherSource" }
+$launcherExe = Join-Path $serviceRoot "elevated-broker-launcher.exe"
+$csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+$windowsPowerShellForBuild = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+$automationRef = (& $windowsPowerShellForBuild -NoLogo -NoProfile -NonInteractive -Command "[System.Management.Automation.PowerShell].Assembly.Location").Trim()
+
+# Reinstall/repair may run while the existing scheduled launcher is alive.
+# Shut it down first so csc can atomically replace the executable.
+$installedBrokerManager = Join-Path $serviceRoot "manage-elevated-broker.ps1"
+if (Test-Path -LiteralPath $installedBrokerManager -PathType Leaf) {
+    & $windowsPowerShellForBuild -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+        -File $installedBrokerManager -Action Stop 2>$null | Out-Null
+}
+Stop-ScheduledTask -TaskName "WebGPT-Elevated-Broker" -ErrorAction SilentlyContinue
+Get-Process -Name "elevated-broker-launcher" -ErrorAction SilentlyContinue |
+    Stop-Process -Force -ErrorAction SilentlyContinue
+$unlockDeadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
+while ((Get-Process -Name "elevated-broker-launcher" -ErrorAction SilentlyContinue) -and
+       [DateTimeOffset]::UtcNow -lt $unlockDeadline) {
+    Start-Sleep -Milliseconds 100
+}
+if (Get-Process -Name "elevated-broker-launcher" -ErrorAction SilentlyContinue) {
+    throw "Could not stop the existing elevated broker launcher before install."
+}
+
+& $csc /nologo /target:winexe /optimize+ /out:$launcherExe `
+    /reference:$automationRef `
+    $launcherSource
+if ($LASTEXITCODE -ne 0) { throw "Could not build the windowless elevated broker launcher." }
 $webrootSource = Join-Path $workspaceRoot "phoneMonitor\scripts\sync-installed-webroot.ps1"
 $brokerPath = Join-Path $serviceRoot "elevated-broker.ps1"
 if (-not (Test-Path -LiteralPath $webrootSource -PathType Leaf)) { throw "Approved webroot script is missing: $webrootSource" }

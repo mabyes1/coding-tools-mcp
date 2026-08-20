@@ -9,7 +9,7 @@ $taskName = "WebGPT-Elevated-Broker"
 $serviceRoot = "C:\ProgramData\WebGPTCodingToolsMCPService"
 $queueRoot = Join-Path $serviceRoot "elevated-requests"
 $broker = Join-Path $serviceRoot "elevated-broker.ps1"
-$pwsh = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+$launcher = Join-Path $serviceRoot "elevated-broker-launcher.exe"
 
 function Get-TaskSafe { Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue }
 function Get-BrokerPid {
@@ -68,9 +68,13 @@ switch ($Action) {
     "Install" {
         Assert-InteractiveCaller
         if (-not (Test-Path -LiteralPath $broker -PathType Leaf)) { throw "Broker script is missing: $broker" }
+        if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw "Windowless broker launcher is missing: $launcher" }
         Stop-BrokerInstance
         $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-        $taskAction = New-ScheduledTaskAction -Execute $pwsh -Argument "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$broker`""
+        # powershell.exe can still acquire a visible Windows Terminal console
+        # even with -WindowStyle Hidden.  Start it through a WinExe shim that
+        # creates the child with CREATE_NO_WINDOW semantics instead.
+        $taskAction = New-ScheduledTaskAction -Execute $launcher
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
         # Keep the broker in the signed-in user's session, but elevate the fixed
         # broker once at task launch. Requests are still restricted by action

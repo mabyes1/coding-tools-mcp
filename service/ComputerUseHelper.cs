@@ -1,0 +1,600 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Threading;
+using System.Web.Script.Serialization;
+using System.Windows;
+using System.Windows.Automation;
+using System.Windows.Forms;
+
+internal static class ComputerUseHelper
+{
+    private static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 };
+
+    private sealed class ElementEntry
+    {
+        public int Index;
+        public AutomationElement Element;
+        public Dictionary<string, object> Row;
+    }
+
+    private static int Main(string[] args)
+    {
+        string responseFile = null;
+        string errorFile = null;
+        try
+        {
+            string encoded = null;
+            for (int i = 0; i + 1 < args.Length; i++)
+            {
+                if (args[i] == "--request-base64") encoded = args[i + 1];
+                else if (args[i] == "--response-file") responseFile = args[i + 1];
+                else if (args[i] == "--error-file") errorFile = args[i + 1];
+            }
+            if (String.IsNullOrWhiteSpace(encoded)) throw new InvalidOperationException("--request-base64 is required.");
+            var requestJson = Encoding.UTF8.GetString(Convert.FromBase64String(encoded));
+            var request = Json.Deserialize<Dictionary<string, object>>(requestJson);
+            TouchComputerUseOverlay(request);
+            var response = Handle(request);
+            var serialized = Json.Serialize(response);
+            if (!String.IsNullOrWhiteSpace(responseFile))
+            {
+                var directory = Path.GetDirectoryName(responseFile);
+                if (!String.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
+                File.WriteAllText(responseFile, serialized, new UTF8Encoding(false));
+            }
+            else
+            {
+                Console.OutputEncoding = new UTF8Encoding(false);
+                Console.Write(serialized);
+            }
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            var message = ex.GetType().FullName + ": " + ex.Message;
+            if (!String.IsNullOrWhiteSpace(errorFile))
+            {
+                try
+                {
+                    var directory = Path.GetDirectoryName(errorFile);
+                    if (!String.IsNullOrWhiteSpace(directory)) Directory.CreateDirectory(directory);
+                    File.WriteAllText(errorFile, message, new UTF8Encoding(false));
+                }
+                catch { }
+            }
+            else
+            {
+                Console.Error.WriteLine(message);
+            }
+            return 2;
+        }
+    }
+
+    private static void TouchComputerUseOverlay(Dictionary<string, object> request)
+    {
+        // Keep the visual safety indicator at the lowest shared execution layer.
+        // This guarantees Browser Use / Computer Use still shows the mascot even
+        // when a caller has to invoke the helper directly instead of going through
+        // the interactive broker (for example while an MCP client has stale schemas).
+        try
+        {
+            var serviceRoot = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var queueRoot = Path.Combine(serviceRoot, "interactive-requests");
+            var overlayPath = Path.Combine(serviceRoot, "computer-use-overlay.exe");
+            var heartbeatPath = Path.Combine(queueRoot, "computer-use-overlay.heartbeat");
+            var stopPath = Path.Combine(queueRoot, "computer-use-overlay.stop");
+            var pidPath = Path.Combine(queueRoot, "computer-use-overlay.pid");
+            var mascotPath = Path.Combine(serviceRoot, "assets", "human-help-mascot.png");
+            var browserOnly = GetBool(request, "browser_only", false);
+            var mode = browserOnly ? "browser" : "computer";
+            var action = GetString(request, "action", "inspect").Trim().ToLowerInvariant();
+
+            Directory.CreateDirectory(queueRoot);
+            try { if (File.Exists(stopPath)) File.Delete(stopPath); } catch { }
+            File.WriteAllText(
+                heartbeatPath,
+                mode + "|" + action + "|" + DateTimeOffset.Now.ToString("o"),
+                new UTF8Encoding(false)
+            );
+            if (!File.Exists(overlayPath)) return;
+
+            if (File.Exists(pidPath))
+            {
+                int overlayPid;
+                if (Int32.TryParse(File.ReadAllText(pidPath).Trim(), out overlayPid) && overlayPid > 0)
+                {
+                    try
+                    {
+                        var existing = Process.GetProcessById(overlayPid);
+                        if (!existing.HasExited) return;
+                    }
+                    catch { }
+                }
+            }
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = overlayPath,
+                Arguments = "--heartbeat " + QuoteArgument(heartbeatPath)
+                    + " --stop " + QuoteArgument(stopPath)
+                    + " --pid " + QuoteArgument(pidPath)
+                    + " --mascot " + QuoteArgument(mascotPath),
+                WorkingDirectory = serviceRoot,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            Process.Start(startInfo);
+        }
+        catch
+        {
+            // The overlay is a user-visible indicator, never a reason to fail the
+            // underlying bounded UI action.
+        }
+    }
+
+    private static string QuoteArgument(string value)
+    {
+        return "\"" + (value ?? "").Replace("\"", "\\\"") + "\"";
+    }
+
+    private static Dictionary<string, object> Handle(Dictionary<string, object> request)
+    {
+        try
+        {
+            var action = GetString(request, "action", "inspect").Trim().ToLowerInvariant();
+            bool browserOnly = GetBool(request, "browser_only", false);
+            if (action == "list_windows")
+            {
+                return Ok(new Dictionary<string, object>
+                {
+                    { "action", action },
+                    { "windows", ListWindows(GetString(request, "process_name", ""), browserOnly) },
+                    { "message", "Window discovery completed." }
+                });
+            }
+
+            var window = ResolveWindow(request, browserOnly);
+            AssertAllowedWindow(window);
+            long windowId = Convert.ToInt64(window["id"]);
+
+            if (action == "inspect") ActivateWindow(windowId);
+            else if (action == "screenshot") { }
+            else if (action == "activate") ActivateWindow(windowId);
+            else if (action == "click")
+            {
+                ActivateWindow(windowId);
+                InvokeElement(ResolveElement(request, windowId));
+                Thread.Sleep(120);
+            }
+            else if (action == "right_click")
+            {
+                throw new InvalidOperationException("right_click is not supported by the UI Automation backend.");
+            }
+            else if (action == "type_text")
+            {
+                ActivateWindow(windowId);
+                var text = GetString(request, "text", "");
+                if (String.IsNullOrEmpty(text)) throw new InvalidOperationException("text is required for type_text.");
+                AutomationElement element;
+                if (request.ContainsKey("element_index") && request["element_index"] != null)
+                    element = ResolveElement(request, windowId);
+                else
+                    element = AutomationElement.FocusedElement;
+                if (element == null) throw new InvalidOperationException("No focused editable element was found.");
+                SetElementValue(element, text);
+                Thread.Sleep(80);
+            }
+            else if (action == "press_key")
+            {
+                ActivateWindow(windowId);
+                SendKey(GetString(request, "key", ""));
+                Thread.Sleep(80);
+            }
+            else if (action == "scroll")
+            {
+                ActivateWindow(windowId);
+                AutomationElement element;
+                if ((request.ContainsKey("element_index") && request["element_index"] != null) ||
+                    (request.ContainsKey("x") && request["x"] != null && request.ContainsKey("y") && request["y"] != null))
+                    element = ResolveElement(request, windowId);
+                else
+                    element = GetRoot(windowId);
+                ScrollElement(element, GetInt(request, "scroll_y", 0));
+                Thread.Sleep(120);
+            }
+            else if (action == "navigate")
+            {
+                if (!browserOnly) throw new InvalidOperationException("navigate is available only through browser_use.");
+                var url = GetString(request, "text", "");
+                if (String.IsNullOrWhiteSpace(url)) throw new InvalidOperationException("A URL is required for navigate.");
+                ActivateWindow(windowId);
+                var address = FindBrowserAddressElement(windowId);
+                SetElementValue(address, url);
+                address.SetFocus();
+                SendKey("ENTER");
+                Thread.Sleep(700);
+            }
+            else
+            {
+                throw new InvalidOperationException("Unsupported Computer Use action: " + action);
+            }
+
+            bool includeScreenshot = GetBool(request, "include_screenshot", true);
+            bool includeText = GetBool(request, "include_text", true);
+            if (action == "screenshot") { includeScreenshot = true; includeText = false; }
+
+            var payload = new Dictionary<string, object>
+            {
+                { "action", action },
+                { "window", window },
+                { "message", "Computer Use action completed. Re-observe after every state-changing action before reusing coordinates or element indexes." }
+            };
+            if (includeText) payload["elements"] = GetElementRows(windowId);
+            if (includeScreenshot)
+            {
+                var shot = Capture(windowId);
+                payload["screenshot"] = new Dictionary<string, object>
+                {
+                    { "mime_type", "image/jpeg" }, { "width", shot.Item2 }, { "height", shot.Item3 }
+                };
+                payload["screenshot_base64"] = Convert.ToBase64String(shot.Item1);
+            }
+            return Ok(payload);
+        }
+        catch (Exception ex)
+        {
+            return new Dictionary<string, object>
+            {
+                { "ok", false },
+                { "error", "COMPUTER_USE_FAILED" },
+                { "message", ex.Message },
+                { "retryable", true }
+            };
+        }
+    }
+
+    private static Dictionary<string, object> Ok(Dictionary<string, object> payload)
+    {
+        payload["ok"] = true;
+        payload["retryable"] = false;
+        return payload;
+    }
+
+    private static List<Dictionary<string, object>> ListWindows(string processFilter, bool browserOnly)
+    {
+        var result = new List<Dictionary<string, object>>();
+        var seen = new HashSet<long>();
+        var root = AutomationElement.RootElement;
+        var children = root.FindAll(TreeScope.Children, Condition.TrueCondition);
+        foreach (AutomationElement element in children)
+        {
+            try
+            {
+                long hwnd = element.Current.NativeWindowHandle;
+                int pid = element.Current.ProcessId;
+                if (hwnd == 0 || pid <= 0) continue;
+                var process = Process.GetProcessById(pid);
+                string name = process.ProcessName;
+                if (!ProcessMatches(name, processFilter, browserOnly)) continue;
+                seen.Add(hwnd);
+                result.Add(WindowRow(hwnd, element.Current.Name, pid, name, element.Current.ClassName));
+            }
+            catch { }
+        }
+        foreach (var process in Process.GetProcesses())
+        {
+            try
+            {
+                long hwnd = process.MainWindowHandle.ToInt64();
+                if (hwnd == 0 || seen.Contains(hwnd)) continue;
+                string name = process.ProcessName;
+                if (!ProcessMatches(name, processFilter, browserOnly)) continue;
+                seen.Add(hwnd);
+                result.Add(WindowRow(hwnd, process.MainWindowTitle, process.Id, name, ""));
+            }
+            catch { }
+        }
+        return result.OrderBy(r => Convert.ToInt64(r["id"])).ToList();
+    }
+
+    private static bool ProcessMatches(string name, string filter, bool browserOnly)
+    {
+        if (browserOnly && !name.Equals("chrome", StringComparison.OrdinalIgnoreCase) && !name.Equals("msedge", StringComparison.OrdinalIgnoreCase)) return false;
+        if (!String.IsNullOrWhiteSpace(filter) && !name.Equals(filter, StringComparison.OrdinalIgnoreCase)) return false;
+        return true;
+    }
+
+    private static Dictionary<string, object> WindowRow(long id, string title, int pid, string process, string className)
+    {
+        return new Dictionary<string, object>
+        {
+            { "id", id }, { "title", title ?? "" }, { "process_id", pid }, { "process_name", process ?? "" }, { "class_name", className ?? "" }
+        };
+    }
+
+    private static Dictionary<string, object> ResolveWindow(Dictionary<string, object> request, bool browserOnly)
+    {
+        var windows = ListWindows(GetString(request, "process_name", ""), browserOnly);
+        if (request.ContainsKey("window_id") && request["window_id"] != null)
+        {
+            long id = Convert.ToInt64(request["window_id"]);
+            windows = windows.Where(w => Convert.ToInt64(w["id"]) == id).ToList();
+        }
+        var title = GetString(request, "title", "");
+        if (!String.IsNullOrWhiteSpace(title))
+            windows = windows.Where(w => Convert.ToString(w["title"]).IndexOf(title, StringComparison.OrdinalIgnoreCase) >= 0).ToList();
+        if (windows.Count == 1) return windows[0];
+        if (windows.Count == 0) throw new InvalidOperationException("No target window matched the request.");
+        throw new InvalidOperationException("Target window is ambiguous; choose one returned window id first.");
+    }
+
+    private static void AssertAllowedWindow(Dictionary<string, object> window)
+    {
+        var blocked = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "powershell", "pwsh", "cmd", "conhost", "windowsterminal", "wt", "securityhealthsystray", "sechealthui", "chatgpt", "codex"
+        };
+        string name = Convert.ToString(window["process_name"]);
+        if (blocked.Contains(name)) throw new InvalidOperationException("Computer Use refuses to automate this protected application: " + name);
+    }
+
+    private static AutomationElement GetRoot(long windowId)
+    {
+        var root = AutomationElement.FromHandle(new IntPtr(windowId));
+        if (root == null) throw new InvalidOperationException("Could not bind UI Automation to the target window.");
+        return root;
+    }
+
+    private static List<ElementEntry> GetEntries(long windowId)
+    {
+        var root = GetRoot(windowId);
+        Rect rootRect = root.Current.BoundingRectangle;
+        var all = root.FindAll(TreeScope.Descendants, Condition.TrueCondition);
+        var entries = new List<ElementEntry>();
+        int index = 0;
+        foreach (AutomationElement element in all)
+        {
+            if (entries.Count >= 350) break;
+            try
+            {
+                string name = element.Current.Name ?? "";
+                string automationId = element.Current.AutomationId ?? "";
+                if (String.IsNullOrWhiteSpace(name) && String.IsNullOrWhiteSpace(automationId)) continue;
+                Rect r = element.Current.BoundingRectangle;
+                var row = new Dictionary<string, object>
+                {
+                    { "index", index },
+                    { "type", element.Current.ControlType.ProgrammaticName.Replace("ControlType.", "") },
+                    { "name", name }, { "automation_id", automationId },
+                    { "enabled", element.Current.IsEnabled }, { "offscreen", element.Current.IsOffscreen }
+                };
+                if (!r.IsEmpty && r.Width > 1 && r.Height > 1 && !rootRect.IsEmpty)
+                {
+                    row["x"] = (int)Math.Round(r.X - rootRect.X);
+                    row["y"] = (int)Math.Round(r.Y - rootRect.Y);
+                    row["width"] = (int)Math.Round(r.Width);
+                    row["height"] = (int)Math.Round(r.Height);
+                }
+                entries.Add(new ElementEntry { Index = index, Element = element, Row = row });
+                index++;
+            }
+            catch { }
+        }
+        return entries;
+    }
+
+    private static List<Dictionary<string, object>> GetElementRows(long windowId)
+    {
+        return GetEntries(windowId).Select(e => e.Row).ToList();
+    }
+
+    private static AutomationElement ResolveElement(Dictionary<string, object> request, long windowId)
+    {
+        if (request.ContainsKey("element_index") && request["element_index"] != null)
+        {
+            int index = Convert.ToInt32(request["element_index"]);
+            var match = GetEntries(windowId).Where(e => e.Index == index).ToList();
+            if (match.Count != 1) throw new InvalidOperationException("The requested element index is stale; inspect again.");
+            return match[0].Element;
+        }
+        if (!request.ContainsKey("x") || request["x"] == null || !request.ContainsKey("y") || request["y"] == null)
+            throw new InvalidOperationException("element_index or x/y is required for this action.");
+        var root = GetRoot(windowId);
+        Rect r = root.Current.BoundingRectangle;
+        if (r.IsEmpty) throw new InvalidOperationException("Target window has no usable screen bounds.");
+        var point = new System.Windows.Point(r.X + Convert.ToDouble(request["x"]), r.Y + Convert.ToDouble(request["y"]));
+        var element = AutomationElement.FromPoint(point);
+        if (element == null) throw new InvalidOperationException("No accessible element exists at the requested point.");
+        return element;
+    }
+
+    private static void ActivateWindow(long windowId)
+    {
+        var root = GetRoot(windowId);
+        object raw;
+        if (root.TryGetCurrentPattern(WindowPattern.Pattern, out raw))
+        {
+            try
+            {
+                var pattern = (WindowPattern)raw;
+                if (pattern.Current.WindowVisualState == WindowVisualState.Minimized)
+                {
+                    pattern.SetWindowVisualState(WindowVisualState.Normal);
+                    Thread.Sleep(120);
+                }
+            }
+            catch { }
+        }
+        try { root.SetFocus(); } catch { }
+        Thread.Sleep(80);
+    }
+
+    private static void InvokeElement(AutomationElement element)
+    {
+        object raw;
+        if (element.TryGetCurrentPattern(InvokePattern.Pattern, out raw)) { ((InvokePattern)raw).Invoke(); return; }
+        if (element.TryGetCurrentPattern(SelectionItemPattern.Pattern, out raw)) { ((SelectionItemPattern)raw).Select(); return; }
+        if (element.TryGetCurrentPattern(TogglePattern.Pattern, out raw)) { ((TogglePattern)raw).Toggle(); return; }
+        if (element.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out raw))
+        {
+            var pattern = (ExpandCollapsePattern)raw;
+            if (pattern.Current.ExpandCollapseState == ExpandCollapseState.Expanded) pattern.Collapse(); else pattern.Expand();
+            return;
+        }
+        try { element.SetFocus(); return; }
+        catch { throw new InvalidOperationException("The target element does not expose an invokable UI Automation pattern."); }
+    }
+
+    private static void SetElementValue(AutomationElement element, string value)
+    {
+        object raw;
+        if (!element.TryGetCurrentPattern(ValuePattern.Pattern, out raw)) throw new InvalidOperationException("The target element does not expose a writable ValuePattern.");
+        var pattern = (ValuePattern)raw;
+        if (pattern.Current.IsReadOnly) throw new InvalidOperationException("The target value control is read-only.");
+        pattern.SetValue(value);
+    }
+
+    private static void ScrollElement(AutomationElement element, int delta)
+    {
+        var current = element;
+        var walker = TreeWalker.ControlViewWalker;
+        for (int i = 0; i < 12 && current != null; i++)
+        {
+            object raw;
+            if (current.TryGetCurrentPattern(ScrollPattern.Pattern, out raw))
+            {
+                var pattern = (ScrollPattern)raw;
+                ScrollAmount amount;
+                if (Math.Abs(delta) >= 500) amount = delta > 0 ? ScrollAmount.LargeIncrement : ScrollAmount.LargeDecrement;
+                else amount = delta > 0 ? ScrollAmount.SmallIncrement : ScrollAmount.SmallDecrement;
+                pattern.ScrollVertical(amount);
+                return;
+            }
+            try { current = walker.GetParent(current); } catch { current = null; }
+        }
+        throw new InvalidOperationException("No scrollable UI Automation ancestor was found at the requested target.");
+    }
+
+    private static AutomationElement FindBrowserAddressElement(long windowId)
+    {
+        var candidates = GetEntries(windowId).Where(e =>
+            Convert.ToString(e.Row["type"]) == "Edit" &&
+            !(bool)e.Row["offscreen"] &&
+            e.Row.ContainsKey("width") && Convert.ToInt32(e.Row["width"]) >= 300 &&
+            e.Row.ContainsKey("y") && Convert.ToInt32(e.Row["y"]) <= 180)
+            .OrderBy(e => Convert.ToInt32(e.Row["y"]))
+            .ThenByDescending(e => Convert.ToInt32(e.Row["width"]))
+            .ToList();
+        if (candidates.Count < 1) throw new InvalidOperationException("Could not identify the browser address bar through UI Automation.");
+        return candidates[0].Element;
+    }
+
+    private static Tuple<byte[], int, int> Capture(long windowId)
+    {
+        ActivateWindow(windowId);
+        var root = GetRoot(windowId);
+        Rect rect = root.Current.BoundingRectangle;
+        if (rect.IsEmpty || rect.Width <= 1 || rect.Height <= 1) throw new InvalidOperationException("Could not read target window bounds.");
+        int width = (int)Math.Round(rect.Width);
+        int height = (int)Math.Round(rect.Height);
+        using (var bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb))
+        using (var graphics = Graphics.FromImage(bitmap))
+        {
+            graphics.CopyFromScreen((int)rect.X, (int)rect.Y, 0, 0, new System.Drawing.Size(width, height));
+            Bitmap output = bitmap;
+            Bitmap scaled = null;
+            double scale = Math.Min(1.0, Math.Min(1600.0 / width, 1000.0 / height));
+            if (scale < 1.0)
+            {
+                int outWidth = Math.Max(1, (int)Math.Round(width * scale));
+                int outHeight = Math.Max(1, (int)Math.Round(height * scale));
+                scaled = new Bitmap(outWidth, outHeight, PixelFormat.Format24bppRgb);
+                using (var sg = Graphics.FromImage(scaled))
+                {
+                    sg.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    sg.DrawImage(bitmap, 0, 0, outWidth, outHeight);
+                }
+                output = scaled;
+            }
+            try
+            {
+                using (var stream = new MemoryStream())
+                {
+                    var jpeg = ImageCodecInfo.GetImageEncoders().First(c => c.MimeType == "image/jpeg");
+                    using (var parameters = new EncoderParameters(1))
+                    {
+                        parameters.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 82L);
+                        output.Save(stream, jpeg, parameters);
+                    }
+                    return Tuple.Create(stream.ToArray(), output.Width, output.Height);
+                }
+            }
+            finally { if (scaled != null) scaled.Dispose(); }
+        }
+    }
+
+    private static void SendKey(string key)
+    {
+        SendKeys.SendWait(ToSendKeys(key));
+    }
+
+    private static string ToSendKeys(string key)
+    {
+        if (String.IsNullOrWhiteSpace(key)) throw new InvalidOperationException("key is required.");
+        string mods = "";
+        string basis = null;
+        foreach (var raw in key.Split('+'))
+        {
+            var part = raw.Trim().ToUpperInvariant();
+            if (part == "CTRL" || part == "CONTROL" || part == "CONTROL_L") mods += "^";
+            else if (part == "ALT" || part == "ALT_L") mods += "%";
+            else if (part == "SHIFT" || part == "SHIFT_L") mods += "+";
+            else if (part.Length > 0) basis = part;
+        }
+        if (basis == null) throw new InvalidOperationException("Unsupported key chord: " + key);
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "ENTER", "{ENTER}" }, { "RETURN", "{ENTER}" }, { "TAB", "{TAB}" }, { "ESC", "{ESC}" }, { "ESCAPE", "{ESC}" },
+            { "SPACE", " " }, { "BACKSPACE", "{BACKSPACE}" }, { "DELETE", "{DELETE}" },
+            { "LEFT", "{LEFT}" }, { "RIGHT", "{RIGHT}" }, { "UP", "{UP}" }, { "DOWN", "{DOWN}" },
+            { "HOME", "{HOME}" }, { "END", "{END}" }, { "PAGEUP", "{PGUP}" }, { "PAGEDOWN", "{PGDN}" },
+            { "F1", "{F1}" }, { "F2", "{F2}" }, { "F3", "{F3}" }, { "F4", "{F4}" }, { "F5", "{F5}" }, { "F6", "{F6}" },
+            { "F7", "{F7}" }, { "F8", "{F8}" }, { "F9", "{F9}" }, { "F10", "{F10}" }, { "F11", "{F11}" }, { "F12", "{F12}" }
+        };
+        string mapped;
+        if (!map.TryGetValue(basis, out mapped))
+        {
+            if (basis.Length != 1) throw new InvalidOperationException("Unsupported key: " + basis);
+            mapped = basis.ToLowerInvariant();
+        }
+        return mods + mapped;
+    }
+
+    private static string GetString(Dictionary<string, object> request, string key, string fallback)
+    {
+        object value;
+        if (!request.TryGetValue(key, out value) || value == null) return fallback;
+        return Convert.ToString(value);
+    }
+
+    private static bool GetBool(Dictionary<string, object> request, string key, bool fallback)
+    {
+        object value;
+        if (!request.TryGetValue(key, out value) || value == null) return fallback;
+        return Convert.ToBoolean(value);
+    }
+
+    private static int GetInt(Dictionary<string, object> request, string key, int fallback)
+    {
+        object value;
+        if (!request.TryGetValue(key, out value) || value == null) return fallback;
+        return Convert.ToInt32(value);
+    }
+}

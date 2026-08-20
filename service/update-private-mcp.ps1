@@ -4,7 +4,7 @@ param(
     [switch]$ValidateOnly,
     [switch]$SkipBrokerRefresh,
     [ValidateRange(0, 30)]
-    [int]$StartDelaySeconds = 0
+    [int]$StartDelaySeconds = 3
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,6 +30,7 @@ $appPath = Join-Path $serviceRoot "app"
 $runnerPath = Join-Path $serviceRoot "run-mcp-service.ps1"
 $releaseRoot = Join-Path $serviceRoot "releases"
 $elevatedQueueRoot = Join-Path $serviceRoot "elevated-requests"
+$interactiveQueueRoot = Join-Path $serviceRoot "interactive-requests"
 $localServiceSid = "*S-1-5-19"
 
 function Assert-Path([string]$Path, [string]$Description) {
@@ -132,6 +133,39 @@ function Install-BrokerFiles {
         Assert-Path $source "Elevated broker source"
         Copy-Item -LiteralPath $source -Destination (Join-Path $serviceRoot $brokerFile) -Force
     }
+    $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+    Assert-Path $csc "C# compiler"
+    $windowsPowerShellForBuild = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+    $automationRef = (& $windowsPowerShellForBuild -NoLogo -NoProfile -NonInteractive -Command "[System.Management.Automation.PowerShell].Assembly.Location").Trim()
+    Assert-Path $automationRef "Windows PowerShell automation assembly"
+    $brokerLauncherSource = Join-Path $PSScriptRoot "ElevatedBrokerLauncher.cs"
+    Assert-Path $brokerLauncherSource "Elevated broker launcher source"
+    $brokerLauncherExe = Join-Path $serviceRoot "elevated-broker-launcher.exe"
+
+    # The scheduled elevated broker runs from elevated-broker-launcher.exe.
+    # Stop both the broker and its launcher before recompiling in place; Windows
+    # otherwise keeps the executable locked and csc cannot replace it.
+    $installedBrokerManager = Join-Path $serviceRoot "manage-elevated-broker.ps1"
+    if (Test-Path -LiteralPath $installedBrokerManager -PathType Leaf) {
+        & $windowsPowerShellForBuild -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+            -File $installedBrokerManager -Action Stop 2>$null | Out-Null
+    }
+    Stop-ScheduledTask -TaskName "WebGPT-Elevated-Broker" -ErrorAction SilentlyContinue
+    Get-Process -Name "elevated-broker-launcher" -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    $unlockDeadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
+    while ((Get-Process -Name "elevated-broker-launcher" -ErrorAction SilentlyContinue) -and
+           [DateTimeOffset]::UtcNow -lt $unlockDeadline) {
+        Start-Sleep -Milliseconds 100
+    }
+    if (Get-Process -Name "elevated-broker-launcher" -ErrorAction SilentlyContinue) {
+        throw "Could not stop the existing elevated broker launcher before update."
+    }
+
+    & $csc /nologo /target:winexe /optimize+ /out:$brokerLauncherExe `
+        /reference:$automationRef `
+        $brokerLauncherSource
+    if ($LASTEXITCODE -ne 0) { throw "Could not build the windowless elevated broker launcher." }
     $brokerPath = Join-Path $serviceRoot "elevated-broker.ps1"
     $webrootSourceScript = Join-Path "D:\coding-tools-mcp" "phoneMonitor\scripts\sync-installed-webroot.ps1"
     if (Test-Path -LiteralPath $webrootSourceScript -PathType Leaf) {
@@ -163,6 +197,93 @@ function Install-BrokerFiles {
     if ($LASTEXITCODE -ne 0) { throw "Could not install the interactive elevated broker task." }
     & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $brokerManager -Action Start
     if ($LASTEXITCODE -ne 0) { throw "Could not start the interactive elevated broker." }
+
+    New-Item -ItemType Directory -Path $interactiveQueueRoot -Force | Out-Null
+    $activityLogViewerPidPath = Join-Path $interactiveQueueRoot "activity-log-viewer.pid"
+    if (Test-Path -LiteralPath $activityLogViewerPidPath -PathType Leaf) {
+        try {
+            $activityLogViewerPid = [int]([IO.File]::ReadAllText($activityLogViewerPidPath).Trim())
+            if ($activityLogViewerPid -gt 0) {
+                Stop-Process -Id $activityLogViewerPid -Force -ErrorAction SilentlyContinue
+                try { Wait-Process -Id $activityLogViewerPid -Timeout 5 -ErrorAction SilentlyContinue } catch { }
+            }
+        }
+        catch { }
+        Remove-Item -LiteralPath $activityLogViewerPidPath -Force -ErrorAction SilentlyContinue
+    }
+    foreach ($brokerFile in @("interactive-broker.ps1", "manage-interactive-broker.ps1", "install-interactive-broker.ps1")) {
+        $source = Join-Path $PSScriptRoot $brokerFile
+        Assert-Path $source "Interactive broker source"
+        Copy-Item -LiteralPath $source -Destination (Join-Path $serviceRoot $brokerFile) -Force
+    }
+    $interactiveBrokerManager = Join-Path $serviceRoot "manage-interactive-broker.ps1"
+    if (Test-Path -LiteralPath $interactiveBrokerManager -PathType Leaf) {
+        & $windowsPowerShell -NoLogo -NoProfile -ExecutionPolicy Bypass `
+            -File $interactiveBrokerManager -Action Stop 2>$null | Out-Null
+    }
+    Stop-ScheduledTask -TaskName "WebGPT-Interactive-Broker" -ErrorAction SilentlyContinue
+    Get-Process -Name "interactive-broker-launcher" -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    $interactiveUnlockDeadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
+    while ((Get-Process -Name "interactive-broker-launcher" -ErrorAction SilentlyContinue) -and
+           [DateTimeOffset]::UtcNow -lt $interactiveUnlockDeadline) {
+        Start-Sleep -Milliseconds 100
+    }
+    if (Get-Process -Name "interactive-broker-launcher" -ErrorAction SilentlyContinue) {
+        throw "Could not stop the existing interactive broker launcher before update."
+    }
+
+    $interactiveBrokerLauncherSource = Join-Path $PSScriptRoot "InteractiveBrokerLauncher.cs"
+    Assert-Path $interactiveBrokerLauncherSource "Interactive broker launcher source"
+    $interactiveBrokerLauncherExe = Join-Path $serviceRoot "interactive-broker-launcher.exe"
+    & $csc /nologo /target:winexe /optimize+ /out:$interactiveBrokerLauncherExe `
+        /reference:$automationRef `
+        $interactiveBrokerLauncherSource
+    if ($LASTEXITCODE -ne 0) { throw "Could not build the windowless interactive broker launcher." }
+    $computerUseSource = Join-Path $PSScriptRoot "ComputerUseHelper.cs"
+    Assert-Path $computerUseSource "Computer Use helper source"
+    $computerUseExe = Join-Path $serviceRoot "computer-use-helper.exe"
+    & $csc /nologo /target:exe /optimize+ /out:$computerUseExe `
+        /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\System.Web.Extensions.dll" `
+        /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationClient.dll" `
+        /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationTypes.dll" `
+        /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\WindowsBase.dll" `
+        /reference:System.Drawing.dll /reference:System.Windows.Forms.dll $computerUseSource
+    if ($LASTEXITCODE -ne 0) { throw "Could not build Computer Use helper." }
+    $computerUseOverlaySource = Join-Path $PSScriptRoot "ComputerUseOverlay.cs"
+    Assert-Path $computerUseOverlaySource "Computer Use overlay source"
+    $computerUseOverlayExe = Join-Path $serviceRoot "computer-use-overlay.exe"
+    $computerUseOverlayPidPath = Join-Path $interactiveQueueRoot "computer-use-overlay.pid"
+    if (Test-Path -LiteralPath $computerUseOverlayPidPath -PathType Leaf) {
+        try {
+            $computerUseOverlayPid = [int]([IO.File]::ReadAllText($computerUseOverlayPidPath).Trim())
+            if ($computerUseOverlayPid -gt 0) {
+                Stop-Process -Id $computerUseOverlayPid -Force -ErrorAction SilentlyContinue
+                try { Wait-Process -Id $computerUseOverlayPid -Timeout 5 -ErrorAction SilentlyContinue } catch { }
+            }
+        }
+        catch { }
+        Remove-Item -LiteralPath $computerUseOverlayPidPath -Force -ErrorAction SilentlyContinue
+    }
+    Get-Process -Name "computer-use-overlay" -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    & $csc /nologo /target:winexe /optimize+ /out:$computerUseOverlayExe `
+        /reference:System.Drawing.dll /reference:System.Windows.Forms.dll $computerUseOverlaySource
+    if ($LASTEXITCODE -ne 0) { throw "Could not build Computer Use overlay." }
+    $activityLogViewerSource = Join-Path $PSScriptRoot "ActivityLogViewer.cs"
+    Assert-Path $activityLogViewerSource "Activity Log viewer source"
+    $activityLogViewerExe = Join-Path $serviceRoot "activity-log-viewer.exe"
+    & $csc /nologo /target:winexe /optimize+ /out:$activityLogViewerExe `
+        /reference:System.Drawing.dll /reference:System.Windows.Forms.dll $activityLogViewerSource
+    if ($LASTEXITCODE -ne 0) { throw "Could not build Activity Log viewer." }
+    $mascotAssetSource = Join-Path $PSScriptRoot "assets"
+    if (Test-Path -LiteralPath $mascotAssetSource -PathType Container) {
+        Copy-Item -LiteralPath $mascotAssetSource -Destination (Join-Path $serviceRoot "assets") -Recurse -Force
+    }
+    & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $interactiveBrokerManager -Action Install
+    if ($LASTEXITCODE -ne 0) { throw "Could not install the non-elevated interactive broker task." }
+    & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $interactiveBrokerManager -Action Start
+    if ($LASTEXITCODE -ne 0) { throw "Could not start the non-elevated interactive broker." }
 }
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
@@ -174,7 +295,8 @@ if (-not $ValidateOnly -and -not $isAdmin) {
 
 Assert-Path $serverPython "Service Python"
 
-if ($StartDelaySeconds -gt 0) {
+if (-not $ValidateOnly -and $StartDelaySeconds -gt 0) {
+    Write-Host "Waiting $StartDelaySeconds second(s) before restarting MCP so pending connector responses can drain..."
     Start-Sleep -Seconds $StartDelaySeconds
 }
 
@@ -188,6 +310,41 @@ if ($ValidateOnly) {
         Copy-Item -LiteralPath $privateSource -Destination (Join-Path $stageApp "coding_tools_mcp") -Recurse -Force
         $version = Test-Package (Join-Path $stageApp "coding_tools_mcp")
         Test-SourceBehavior $stageApp
+        $validationCsc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+        Assert-Path $validationCsc "C# compiler"
+        $validationWindowsPowerShell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+        $validationAutomationRef = (& $validationWindowsPowerShell -NoLogo -NoProfile -NonInteractive -Command "[System.Management.Automation.PowerShell].Assembly.Location").Trim()
+        Assert-Path $validationAutomationRef "Windows PowerShell automation assembly"
+        $validationBrokerLauncher = Join-Path $validationRoot "elevated-broker-launcher.exe"
+        & $validationCsc /nologo /target:winexe /optimize+ /out:$validationBrokerLauncher `
+            /reference:$validationAutomationRef `
+            (Join-Path $PSScriptRoot "ElevatedBrokerLauncher.cs")
+        if ($LASTEXITCODE -ne 0) { throw "Elevated broker launcher validation build failed." }
+        & $validationBrokerLauncher --self-test
+        if ($LASTEXITCODE -ne 0) { throw "Elevated broker launcher runtime self-test failed." }
+        $validationInteractiveBrokerLauncher = Join-Path $validationRoot "interactive-broker-launcher.exe"
+        & $validationCsc /nologo /target:winexe /optimize+ /out:$validationInteractiveBrokerLauncher `
+            /reference:$validationAutomationRef `
+            (Join-Path $PSScriptRoot "InteractiveBrokerLauncher.cs")
+        if ($LASTEXITCODE -ne 0) { throw "Interactive broker launcher validation build failed." }
+        & $validationInteractiveBrokerLauncher --self-test
+        if ($LASTEXITCODE -ne 0) { throw "Interactive broker launcher runtime self-test failed." }
+        $validationComputerUse = Join-Path $validationRoot "computer-use-helper.exe"
+        & $validationCsc /nologo /target:exe /optimize+ /out:$validationComputerUse `
+            /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\System.Web.Extensions.dll" `
+            /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationClient.dll" `
+            /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationTypes.dll" `
+            /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\WindowsBase.dll" `
+            /reference:System.Drawing.dll /reference:System.Windows.Forms.dll (Join-Path $PSScriptRoot "ComputerUseHelper.cs")
+        if ($LASTEXITCODE -ne 0) { throw "Computer Use helper validation build failed." }
+        $validationOverlay = Join-Path $validationRoot "computer-use-overlay.exe"
+        & $validationCsc /nologo /target:winexe /optimize+ /out:$validationOverlay `
+            /reference:System.Drawing.dll /reference:System.Windows.Forms.dll (Join-Path $PSScriptRoot "ComputerUseOverlay.cs")
+        if ($LASTEXITCODE -ne 0) { throw "Computer Use overlay validation build failed." }
+        $validationActivityLogViewer = Join-Path $validationRoot "activity-log-viewer.exe"
+        & $validationCsc /nologo /target:winexe /optimize+ /out:$validationActivityLogViewer `
+            /reference:System.Drawing.dll /reference:System.Windows.Forms.dll (Join-Path $PSScriptRoot "ActivityLogViewer.cs")
+        if ($LASTEXITCODE -ne 0) { throw "Activity Log viewer validation build failed." }
         Write-Host "PRIVATE_MCP_VALIDATE_OK version=$version"
         exit 0
     }
@@ -243,13 +400,15 @@ try {
     Move-Item -LiteralPath $runnerPath -Destination $oldRunnerPath
     Move-Item -LiteralPath (Join-Path $stageRoot "app") -Destination $appPath
     Copy-Item -LiteralPath (Join-Path $stageRoot "run-mcp-service.ps1") -Destination $runnerPath -Force
+    # From this point onward the installed app has been replaced. Mark the
+    # swap before refreshing brokers so any broker-install/start failure rolls
+    # the app/runner back instead of leaving a half-updated service behind.
+    $swapped = $true
     if (-not $SkipBrokerRefresh) {
         Install-BrokerFiles
     }
     & icacls.exe $appPath /grant "${localServiceSid}:(OI)(CI)RX" /C | Out-Null
     & icacls.exe $runnerPath /grant "${localServiceSid}:RX" /C | Out-Null
-    $swapped = $true
-
     $health = Start-PrivateServices $expectedVersion
     Write-Host "PRIVATE_MCP_UPDATE_OK version=$($health.version) backup=$newBackup"
 }

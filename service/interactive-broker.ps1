@@ -14,6 +14,19 @@ $protocolVersion = 1
 $requestTtlSeconds = 900
 $maxCapturedBytes = 1048576
 
+try {
+    $earlyIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $earlySessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+    $earlyLine = "{0} EARLY_BOOT pid={1} session={2} user={3} userInteractive={4}`r`n" -f `
+        ([DateTimeOffset]::Now.ToString("o")),
+        ([Diagnostics.Process]::GetCurrentProcess().Id),
+        $earlySessionId,
+        $earlyIdentity.Name,
+        ([bool][Environment]::UserInteractive)
+    [IO.File]::AppendAllText($logPath, $earlyLine, [Text.UTF8Encoding]::new($false))
+}
+catch { }
+
 function Write-BrokerLog([string]$Message) {
     try {
         $timestamp = [DateTimeOffset]::Now.ToString("o")
@@ -32,6 +45,117 @@ function Complete-Request([string]$RequestId, [hashtable]$Response) {
     $Response.protocol = $protocolVersion
     $Response.request_id = $RequestId
     Write-AtomicJson (Join-Path $queueRoot "$RequestId.response") $Response
+}
+
+function Convert-UiText([string]$Base64) {
+    return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Base64))
+}
+
+$computerUseHelper = Join-Path $PSScriptRoot "computer-use-helper.exe"
+$activityLogViewer = Join-Path $PSScriptRoot "activity-log-viewer.exe"
+$activityLogPath = Join-Path $serviceRoot "logs\ai-activity.log"
+$activityLogViewerPid = Join-Path $queueRoot "activity-log-viewer.pid"
+$activityLogViewerDnd = Join-Path $queueRoot "activity-log-viewer.dnd"
+
+function Start-ActivityLogViewer {
+    if (-not (Test-Path -LiteralPath $activityLogViewer -PathType Leaf)) { return }
+    $running = $false
+    if (Test-Path -LiteralPath $activityLogViewerPid -PathType Leaf) {
+        try {
+            $viewerPid = [int]([IO.File]::ReadAllText($activityLogViewerPid).Trim())
+            if ($viewerPid -gt 0 -and (Get-Process -Id $viewerPid -ErrorAction SilentlyContinue)) { $running = $true }
+        }
+        catch { }
+    }
+    if ($running) { return }
+
+    try {
+        Start-Process -FilePath $activityLogViewer -ArgumentList @(
+            "--log", $activityLogPath,
+            "--pid", $activityLogViewerPid,
+            "--dnd", $activityLogViewerDnd
+        ) | Out-Null
+    }
+    catch {
+        Write-BrokerLog "ACTIVITY_LOG_VIEWER_FAILED $($_.Exception.Message)"
+    }
+}
+
+function Handle-ComputerUseRequest([string]$RequestId, $Request) {
+    if (-not (Test-Path -LiteralPath $computerUseHelper -PathType Leaf)) {
+        Complete-Request $RequestId @{ ok = $false; error = "COMPUTER_USE_UNAVAILABLE"; message = "Computer Use helper is not installed."; retryable = $true }
+        return
+    }
+    $scratchRoot = Join-Path $queueRoot ("computer-use-" + $RequestId)
+    $responsePath = Join-Path $scratchRoot "response.json"
+    $errorPath = Join-Path $scratchRoot "error.txt"
+    New-Item -ItemType Directory -Path $scratchRoot -Force | Out-Null
+    try {
+        $requestJson = $Request | ConvertTo-Json -Compress -Depth 12
+        $requestBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($requestJson))
+        $startInfo = [Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = $computerUseHelper
+        $startInfo.Arguments = "--request-base64 $requestBase64 --response-file `"$responsePath`" --error-file `"$errorPath`""
+        $startInfo.WorkingDirectory = $PSScriptRoot
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $process = [Diagnostics.Process]::new()
+        $process.StartInfo = $startInfo
+        if (-not $process.Start()) {
+            throw "Computer Use helper could not be started."
+        }
+        $deadline = [DateTimeOffset]::UtcNow.AddSeconds(60)
+        while (-not $process.HasExited -and [DateTimeOffset]::UtcNow -lt $deadline) {
+            Start-Sleep -Milliseconds 50
+            $process.Refresh()
+        }
+        if (-not $process.HasExited) {
+            Stop-ProcessTree $process.Id
+            Complete-Request $RequestId @{ ok = $false; error = "COMPUTER_USE_TIMEOUT"; message = "Computer Use helper timed out."; retryable = $true }
+            return
+        }
+        $process.WaitForExit()
+        $exitCode = $process.ExitCode
+        $process.Dispose()
+        $process = $null
+        $stdout = if (Test-Path -LiteralPath $responsePath -PathType Leaf) {
+            [IO.File]::ReadAllText($responsePath, [Text.UTF8Encoding]::new($false))
+        } else { "" }
+        $stderr = if (Test-Path -LiteralPath $errorPath -PathType Leaf) {
+            [IO.File]::ReadAllText($errorPath, [Text.UTF8Encoding]::new($false))
+        } else { "" }
+        if ($exitCode -ne 0) {
+            Write-BrokerLog "COMPUTER_USE_HELPER_FAILED id=$RequestId exit=$exitCode stderr=$($stderr.Trim())"
+            Complete-Request $RequestId @{ ok = $false; error = "COMPUTER_USE_HELPER_FAILED"; message = ($stderr.Trim() | Select-Object -First 1); retryable = $true }
+            return
+        }
+        $decoded = $stdout | ConvertFrom-Json -ErrorAction Stop
+        $payload = @{}
+        if ($null -eq $decoded) {
+            throw "Computer Use helper returned an empty JSON payload."
+        }
+        foreach ($property in @($decoded.PSObject.Properties)) {
+            if ($null -eq $property) { continue }
+            $name = [string]$property.Name
+            if ([string]::IsNullOrWhiteSpace($name)) { continue }
+            $payload[$name] = $property.Value
+        }
+        Write-BrokerLog "COMPUTER_USE_HELPER_OK id=$RequestId exit=$exitCode stdout_chars=$($stdout.Length) keys=$([string]::Join(',', @($payload.Keys)))"
+        if ($payload.Count -eq 0) {
+            throw "Computer Use helper JSON parsed successfully but exposed no properties."
+        }
+        Complete-Request $RequestId $payload
+    }
+    catch {
+        Write-BrokerLog "COMPUTER_USE_BROKER_ERROR id=$RequestId type=$($_.Exception.GetType().FullName) message=$($_.Exception.Message)"
+        Complete-Request $RequestId @{ ok = $false; error = "COMPUTER_USE_BROKER_ERROR"; message = $_.Exception.Message; retryable = $true }
+    }
+    finally {
+        if ($process) {
+            try { $process.Dispose() } catch { }
+        }
+        Remove-Item -LiteralPath $scratchRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Test-PatternMatch([string]$Name, $Patterns) {
@@ -217,117 +341,291 @@ function Handle-HumanHelpRequest([string]$RequestId, $Request) {
         Add-Type -AssemblyName System.Windows.Forms
         Add-Type -AssemblyName System.Drawing
 
-        $state = @{ outcome = "closed"; timed_out = $false; remaining = $timeoutSeconds }
+        # Layout deliberately follows the human-help reference: 836 x 709, a dark
+        # desktop surface, hero area, request card, reply box, and paired actions.
+        $state = @{
+            outcome = "closed"
+            timed_out = $false
+            remaining = $timeoutSeconds
+            last_input_at = $null
+        }
+        $typingGraceSeconds = 4
+        $cornerRadius = 18
+        $uiFontName = "Microsoft JhengHei UI"
+        $ink = [System.Drawing.Color]::FromArgb(235, 240, 248)
+        $muted = [System.Drawing.Color]::FromArgb(166, 177, 195)
         $form = New-Object System.Windows.Forms.Form
-        $form.Text = "Coding Tools needs your help"
-        $form.StartPosition = "CenterScreen"
-        $form.TopMost = $true
-        $form.Width = 720
-        $form.Height = 560
-        $form.MinimumSize = New-Object System.Drawing.Size(620, 480)
-        $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
-        $form.MaximizeBox = $false
-        $form.ShowInTaskbar = $true
+        $form.Text = Convert-UiText "5Yqp44GR44Gm44GP44Gg44GV44GE44CB44Kx44Oz5qeY"
+        $form.StartPosition = "CenterScreen"; $form.TopMost = $true
+        $form.Width = 836; $form.Height = 709
+        $form.MinimumSize = New-Object System.Drawing.Size(836, 709)
+        $form.MaximumSize = New-Object System.Drawing.Size(836, 709)
+        $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::None
+        $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+        $form.MaximizeBox = $false; $form.ShowInTaskbar = $true
+        $form.BackColor = [System.Drawing.Color]::FromArgb(12, 18, 25)
+        $form.ForeColor = $ink
+
+        $applyRoundedRegion = {
+            $width = $form.ClientSize.Width
+            $height = $form.ClientSize.Height
+            if ($width -le ($cornerRadius * 2) -or $height -le ($cornerRadius * 2)) { return }
+            $diameter = $cornerRadius * 2
+            $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+            $path.AddArc(0, 0, $diameter, $diameter, 180, 90)
+            $path.AddArc($width - $diameter - 1, 0, $diameter, $diameter, 270, 90)
+            $path.AddArc($width - $diameter - 1, $height - $diameter - 1, $diameter, $diameter, 0, 90)
+            $path.AddArc(0, $height - $diameter - 1, $diameter, $diameter, 90, 90)
+            $path.CloseFigure()
+            $oldRegion = $form.Region
+            $form.Region = New-Object System.Drawing.Region($path)
+            if ($oldRegion) { $oldRegion.Dispose() }
+            $path.Dispose()
+        }
+        $form.Add_SizeChanged({ & $applyRoundedRegion })
+
+        $setRoundedRegion = {
+            param($control, [int]$radius)
+            $width = $control.ClientSize.Width
+            $height = $control.ClientSize.Height
+            if ($width -le ($radius * 2) -or $height -le ($radius * 2)) { return }
+            $diameter = $radius * 2
+            $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+            $path.AddArc(0, 0, $diameter, $diameter, 180, 90)
+            $path.AddArc($width - $diameter - 1, 0, $diameter, $diameter, 270, 90)
+            $path.AddArc($width - $diameter - 1, $height - $diameter - 1, $diameter, $diameter, 0, 90)
+            $path.AddArc(0, $height - $diameter - 1, $diameter, $diameter, 90, 90)
+            $path.CloseFigure()
+            $oldRegion = $control.Region
+            $control.Region = New-Object System.Drawing.Region($path)
+            if ($oldRegion) { $oldRegion.Dispose() }
+            $path.Dispose()
+        }
+
+        $header = New-Object System.Windows.Forms.Panel
+        $header.BackColor = [System.Drawing.Color]::FromArgb(15, 22, 31)
+        $header.BorderStyle = [System.Windows.Forms.BorderStyle]::None
+        $header.Left = 0; $header.Top = 0; $header.Width = 836; $header.Height = 53; $header.Anchor = "Top,Left,Right"
+        $form.Controls.Add($header)
+
+        $headerDivider = New-Object System.Windows.Forms.Panel
+        $headerDivider.BackColor = [System.Drawing.Color]::FromArgb(37, 48, 62)
+        $headerDivider.Left = 18; $headerDivider.Top = 52; $headerDivider.Width = 800; $headerDivider.Height = 1
+        $header.Controls.Add($headerDivider)
+
+        $windowTitle = New-Object System.Windows.Forms.Label
+        $windowTitle.Text = Convert-UiText "5Yqp44GR44Gm44GP44Gg44GV44GE44CB44Kx44Oz5qeY"; $windowTitle.AutoSize = $true
+        $windowTitle.Font = New-Object System.Drawing.Font($uiFontName, 11); $windowTitle.ForeColor = $ink; $windowTitle.Left = 18; $windowTitle.Top = 16
+        $header.Controls.Add($windowTitle)
+        $minimizeButton = New-Object System.Windows.Forms.Button
+        $minimizeButton.Text = Convert-UiText "4oiS"; $minimizeButton.Font = New-Object System.Drawing.Font($uiFontName, 12)
+        $minimizeButton.FlatStyle = "Flat"; $minimizeButton.FlatAppearance.BorderSize = 0; $minimizeButton.BackColor = $header.BackColor; $minimizeButton.ForeColor = $muted
+        $minimizeButton.Left = 714; $minimizeButton.Top = 4; $minimizeButton.Width = 48; $minimizeButton.Height = 44; $minimizeButton.Anchor = "Top,Right"
+        $minimizeButton.Add_Click({ $form.WindowState = "Minimized" }); $header.Controls.Add($minimizeButton)
+        $closeButton = New-Object System.Windows.Forms.Button
+        $closeButton.Text = Convert-UiText "w5c="; $closeButton.Font = New-Object System.Drawing.Font($uiFontName, 14)
+        $closeButton.FlatStyle = "Flat"; $closeButton.FlatAppearance.BorderSize = 0; $closeButton.BackColor = $header.BackColor; $closeButton.ForeColor = $muted
+        $closeButton.Left = 770; $closeButton.Top = 4; $closeButton.Width = 48; $closeButton.Height = 44; $closeButton.Anchor = "Top,Right"
+        $closeButton.Add_Click({ $form.Close() }); $header.Controls.Add($closeButton)
+
+        $dragState = @{ active = $false; cursor = $null; location = $null }
+        $startWindowDrag = {
+            param($sender, $eventArgs)
+            if ($eventArgs.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
+            $dragState.active = $true
+            $dragState.cursor = [System.Windows.Forms.Cursor]::Position
+            $dragState.location = $form.Location
+            $sender.Capture = $true
+        }
+        $moveWindowDrag = {
+            param($sender, $eventArgs)
+            if (-not $dragState.active -or [System.Windows.Forms.Control]::MouseButtons -ne [System.Windows.Forms.MouseButtons]::Left) { return }
+            $cursor = [System.Windows.Forms.Cursor]::Position
+            $newX = ([int]$dragState.location.X) + ([int]$cursor.X) - ([int]$dragState.cursor.X)
+            $newY = ([int]$dragState.location.Y) + ([int]$cursor.Y) - ([int]$dragState.cursor.Y)
+            $form.Location = [System.Drawing.Point]::new($newX, $newY)
+        }
+        $stopWindowDrag = {
+            param($sender, $eventArgs)
+            $dragState.active = $false
+            $sender.Capture = $false
+        }
+        foreach ($dragSurface in @($header, $windowTitle)) {
+            $dragSurface.Add_MouseDown($startWindowDrag)
+            $dragSurface.Add_MouseMove($moveWindowDrag)
+            $dragSurface.Add_MouseUp($stopWindowDrag)
+        }
 
         $title = New-Object System.Windows.Forms.Label
-        $title.Text = "AI asks for one small human step"
-        $title.Font = New-Object System.Drawing.Font("Segoe UI", 14, [System.Drawing.FontStyle]::Bold)
-        $title.AutoSize = $true
-        $title.Left = 18
-        $title.Top = 16
+        $title.Text = Convert-UiText "5Yqp44GR44Gm44GP44Gg44GV44GE44CB44Kx44Oz5qeY"; $title.AutoSize = $true
+        $title.Font = New-Object System.Drawing.Font($uiFontName, 23, [System.Drawing.FontStyle]::Bold)
+        $title.ForeColor = $ink; $title.Left = 36; $title.Top = 76
         $form.Controls.Add($title)
 
         $meta = New-Object System.Windows.Forms.Label
-        $meta.Text = "Reason: $reason    Mode: $mode"
-        $meta.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-        $meta.AutoSize = $true
-        $meta.Left = 20
-        $meta.Top = 52
+        $meta.Text = if ($mode -eq "blocking") { Convert-UiText "6YCZ5LiA5q2l55yf55qE6ZyA6KaB5L2g55qE5Y2U5Yqp77yM5oiR5YWI5Y6a6JGX6IeJ55qu5rGC5pWR5LiA5LiL44CC" } else { Convert-UiText "6YCZ5LiA5q2l5L2g5YGa5pyD5b+r5b6I5aSa77yM5oiR5YWI5Y6a6JGX6IeJ55qu5rGC5pWR5LiA5LiL44CC" }
+        $meta.Font = New-Object System.Drawing.Font($uiFontName, 11)
+        $meta.ForeColor = $muted; $meta.AutoSize = $true; $meta.Left = 38; $meta.Top = 125
         $form.Controls.Add($meta)
 
-        $requestBox = New-Object System.Windows.Forms.TextBox
-        $requestBox.Multiline = $true
-        $requestBox.ReadOnly = $true
-        $requestBox.ScrollBars = "Vertical"
-        $requestBox.Font = New-Object System.Drawing.Font("Consolas", 10)
-        $requestBox.Left = 20
-        $requestBox.Top = 82
-        $requestBox.Width = 660
-        $requestBox.Height = 145
-        $requestBox.Anchor = "Top,Left,Right"
-        $requestBox.Text = $requestText
-        $form.Controls.Add($requestBox)
+        $mascotAsset = Join-Path $PSScriptRoot "assets\human-help-mascot.png"
+        $mascot = New-Object System.Windows.Forms.PictureBox
+        $mascot.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+        $mascot.BackColor = [System.Drawing.Color]::Transparent
+        if (Test-Path -LiteralPath $mascotAsset -PathType Leaf) {
+            $mascot.Image = [System.Drawing.Image]::FromFile($mascotAsset)
+        }
+        $mascot.Left = 658; $mascot.Top = 57; $mascot.Width = 134; $mascot.Height = 118; $mascot.Anchor = "Top,Right"
+        $form.Controls.Add($mascot)
+
+        $requestPanel = New-Object System.Windows.Forms.Panel
+        $requestPanel.BackColor = [System.Drawing.Color]::FromArgb(20, 28, 38)
+        $requestPanel.BorderStyle = [System.Windows.Forms.BorderStyle]::None
+        $requestPanel.Left = 36; $requestPanel.Top = 174; $requestPanel.Width = 756; $requestPanel.Height = 248
+        $form.Controls.Add($requestPanel)
+        & $setRoundedRegion $requestPanel 16
+
+        $requestHeading = New-Object System.Windows.Forms.Label
+        $requestHeading.Text = Convert-UiText "6KuL5ZyoIFBvd2VyU2hlbGwg5Z+36KGM6YCZ5qKd5oyH5Luk77yM5a6M5oiQ5b6M5oqK6Ly45Ye66LK85Zue5L6G44CC"; $requestHeading.AutoSize = $true
+        $requestHeading.Font = New-Object System.Drawing.Font($uiFontName, 12, [System.Drawing.FontStyle]::Bold)
+        $requestHeading.ForeColor = $ink; $requestHeading.Left = 22; $requestHeading.Top = 18
+        $requestPanel.Controls.Add($requestHeading)
+
+        $requestBoxPanel = New-Object System.Windows.Forms.Panel
+        $requestBoxPanel.BackColor = [System.Drawing.Color]::FromArgb(10, 16, 23)
+        $requestBoxPanel.Left = 22; $requestBoxPanel.Top = 52; $requestBoxPanel.Width = 712; $requestBoxPanel.Height = 88
+        $requestPanel.Controls.Add($requestBoxPanel)
+        & $setRoundedRegion $requestBoxPanel 11
+
+        $requestBox = New-Object System.Windows.Forms.RichTextBox
+        $requestBox.ReadOnly = $true; $requestBox.ScrollBars = [System.Windows.Forms.RichTextBoxScrollBars]::None
+        $requestBox.WordWrap = $true; $requestBox.DetectUrls = $false
+        $requestBox.Font = New-Object System.Drawing.Font($uiFontName, 10)
+        $requestBox.BorderStyle = [System.Windows.Forms.BorderStyle]::None
+        $requestBox.BackColor = [System.Drawing.Color]::FromArgb(10, 16, 23); $requestBox.ForeColor = [System.Drawing.Color]::FromArgb(213, 224, 238)
+        $requestBox.Left = 12; $requestBox.Top = 10; $requestBox.Width = 688; $requestBox.Height = 68; $requestBox.Text = $requestText
+        $requestBoxPanel.Controls.Add($requestBox)
+
+        $separator = New-Object System.Windows.Forms.Panel
+        $separator.BackColor = [System.Drawing.Color]::FromArgb(42, 54, 69); $separator.Left = 22; $separator.Top = 153; $separator.Width = 712; $separator.Height = 1
+        $requestPanel.Controls.Add($separator)
 
         $details = New-Object System.Windows.Forms.Label
         $detailLines = @()
-        if (-not [string]::IsNullOrWhiteSpace($expectedResult)) { $detailLines += "Expected: $expectedResult" }
-        if (-not [string]::IsNullOrWhiteSpace($returnToAgent)) { $detailLines += "Return to AI: $returnToAgent" }
+        if (-not [string]::IsNullOrWhiteSpace($expectedResult)) { $detailLines += ((Convert-UiText "5oiR5pyf5b6F55yL5Yiw77ya") + $expectedResult) }
+        if (-not [string]::IsNullOrWhiteSpace($returnToAgent)) { $detailLines += (Convert-UiText "5ou/5Yiw57WQ5p6c5b6M77yM5oiR5pyD57m857qM5LiL5LiA5q2l44CC") }
+        if ($detailLines.Count -eq 0) { $detailLines += (Convert-UiText "5LiN55So5a+r5b6X5b6I5a6M5pW077yM6LK85LiK5L2g55yL5Yiw55qE5YWn5a655bCx5aW944CC") }
         $details.Text = ($detailLines -join "`r`n")
-        $details.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-        $details.Left = 20
-        $details.Top = 238
-        $details.Width = 660
-        $details.Height = 46
-        $details.Anchor = "Top,Left,Right"
-        $form.Controls.Add($details)
+        $details.Font = New-Object System.Drawing.Font($uiFontName, 9)
+        $details.ForeColor = $muted; $details.Left = 22; $details.Top = 169; $details.Width = 712; $details.Height = 62
+        $requestPanel.Controls.Add($details)
 
         $answerLabel = New-Object System.Windows.Forms.Label
-        $answerLabel.Text = "Optional answer / result for AI:"
-        $answerLabel.AutoSize = $true
-        $answerLabel.Left = 20
-        $answerLabel.Top = 292
+        $answerLabel.Text = Convert-UiText "5aaC5p6c5pa55L6/77yM6KuL5oqK57WQ5p6c5oiW5LiA5Y+l6Kmx55WZ57Wm5oiR77ya"; $answerLabel.AutoSize = $true
+        $answerLabel.Font = New-Object System.Drawing.Font($uiFontName, 11); $answerLabel.ForeColor = $ink; $answerLabel.Left = 38; $answerLabel.Top = 443
         $form.Controls.Add($answerLabel)
 
-        $answerBox = New-Object System.Windows.Forms.TextBox
-        $answerBox.Multiline = $true
-        $answerBox.ScrollBars = "Vertical"
-        $answerBox.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-        $answerBox.Left = 20
-        $answerBox.Top = 316
-        $answerBox.Width = 660
-        $answerBox.Height = 105
-        $answerBox.Anchor = "Top,Bottom,Left,Right"
-        $form.Controls.Add($answerBox)
+        $answerBoxPanel = New-Object System.Windows.Forms.Panel
+        $answerBoxPanel.BackColor = [System.Drawing.Color]::FromArgb(17, 25, 34)
+        $answerBoxPanel.Left = 36; $answerBoxPanel.Top = 474; $answerBoxPanel.Width = 756; $answerBoxPanel.Height = 112
+        $form.Controls.Add($answerBoxPanel)
+        & $setRoundedRegion $answerBoxPanel 14
+
+        $answerBox = New-Object System.Windows.Forms.RichTextBox
+        $answerBox.ScrollBars = [System.Windows.Forms.RichTextBoxScrollBars]::None
+        $answerBox.WordWrap = $true; $answerBox.DetectUrls = $false; $answerBox.AcceptsTab = $false
+        $answerBox.Font = New-Object System.Drawing.Font($uiFontName, 10)
+        $answerBox.BorderStyle = [System.Windows.Forms.BorderStyle]::None; $answerBox.BackColor = $answerBoxPanel.BackColor; $answerBox.ForeColor = $ink
+        $answerBox.Left = 14; $answerBox.Top = 13; $answerBox.Width = 728; $answerBox.Height = 86
+        $answerBoxPanel.Controls.Add($answerBox)
+
+        $placeholder = New-Object System.Windows.Forms.Label
+        $placeholder.Text = Convert-UiText "5Zyo6YCZ6KOh6Ly45YWl77ybRW50ZXIg6YCB5Ye677yMQ3RybCArIEVudGVyIOaPm+ihjA=="; $placeholder.AutoSize = $true
+        $placeholder.Font = New-Object System.Drawing.Font($uiFontName, 10); $placeholder.ForeColor = [System.Drawing.Color]::FromArgb(110, 122, 141)
+        $placeholder.Left = 15; $placeholder.Top = 14; $placeholder.BackColor = $answerBox.BackColor; $placeholder.Cursor = [System.Windows.Forms.Cursors]::IBeam
+        $placeholder.Add_Click({ $answerBox.Focus() })
+        $answerBox.Add_TextChanged({
+            $placeholder.Visible = [string]::IsNullOrWhiteSpace($answerBox.Text)
+            $state.last_input_at = [DateTime]::UtcNow
+            $state.remaining = $timeoutSeconds
+        })
+        $answerBox.Add_KeyDown({
+            param($sender, $eventArgs)
+            $state.last_input_at = [DateTime]::UtcNow
+            $state.remaining = $timeoutSeconds
+            if ($eventArgs.Control -and $eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
+                $answerBox.SelectedText = [Environment]::NewLine
+                $eventArgs.SuppressKeyPress = $true
+                $eventArgs.Handled = $true
+            }
+            elseif (-not $eventArgs.Control -and -not $eventArgs.Shift -and $eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
+                $submitButton.PerformClick()
+                $eventArgs.SuppressKeyPress = $true
+                $eventArgs.Handled = $true
+            }
+        })
+        $answerBoxPanel.Controls.Add($placeholder)
 
         $countdown = New-Object System.Windows.Forms.Label
-        $countdown.Text = "Auto fallback in $timeoutSeconds s"
-        $countdown.AutoSize = $true
-        $countdown.Left = 20
-        $countdown.Top = 446
-        $countdown.Anchor = "Bottom,Left"
+        $countdownTemplate = Convert-UiText "5L2g5LiN55CG5oiR5Lmf5rKS6Zec5L+C77yb5aaC5p6c5q2j5Zyo6Ly45YWl77yM5oiR5pyD562J5L2g44CCDQrmiJHmnIPlnKgge259IOenkuW+jOe5vOe6jOaDs+i+puazleOAgg=="
+        $countdown.Text = $countdownTemplate.Replace("{n}", [string]$timeoutSeconds)
+        $countdown.Font = New-Object System.Drawing.Font($uiFontName, 9); $countdown.ForeColor = $muted; $countdown.AutoSize = $false
+        $countdown.Left = 38; $countdown.Top = 611; $countdown.Width = 360; $countdown.Height = 58
         $form.Controls.Add($countdown)
 
         $submitButton = New-Object System.Windows.Forms.Button
-        $submitButton.Text = "Send / Done"
-        $submitButton.Width = 120
-        $submitButton.Height = 32
-        $submitButton.Left = 410
-        $submitButton.Top = 440
-        $submitButton.Anchor = "Bottom,Right"
+        $submitButton.Text = Convert-UiText "5Lqk57Wm5L2g5LqG"; $submitButton.Font = New-Object System.Drawing.Font($uiFontName, 10, [System.Drawing.FontStyle]::Bold)
+        $submitButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat; $submitButton.FlatAppearance.BorderSize = 0
+        $submitButton.UseVisualStyleBackColor = $false
+        $submitButton.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(61, 135, 231)
+        $submitButton.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(39, 102, 190)
+        $submitButton.BackColor = [System.Drawing.Color]::FromArgb(47, 117, 213); $submitButton.ForeColor = [System.Drawing.Color]::White
+        $submitButton.Width = 164; $submitButton.Height = 48; $submitButton.Left = 628; $submitButton.Top = 620
         $submitButton.Add_Click({
             $state.outcome = if ([string]::IsNullOrWhiteSpace($answerBox.Text)) { "done" } else { "submitted" }
             $form.Close()
         })
+        $submitButton.Add_MouseEnter({ $submitButton.BackColor = [System.Drawing.Color]::FromArgb(61, 135, 231) })
+        $submitButton.Add_MouseLeave({ $submitButton.BackColor = [System.Drawing.Color]::FromArgb(47, 117, 213) })
+        & $setRoundedRegion $submitButton 14
         $form.Controls.Add($submitButton)
 
         $skipButton = New-Object System.Windows.Forms.Button
-        $skipButton.Text = if ($fallback -eq "continue_best_effort") { "Skip, AI continue" } else { "Can't help" }
-        $skipButton.Width = 140
-        $skipButton.Height = 32
-        $skipButton.Left = 540
-        $skipButton.Top = 440
-        $skipButton.Anchor = "Bottom,Right"
+        $skipButton.Text = if ($fallback -eq "continue_best_effort") {
+            Convert-UiText "5L2g6Ieq5bex5oOz6L6m5rOV"
+        } else {
+            Convert-UiText "54++5Zyo5bmr5LiN5LqG"
+        }
+        $skipButton.Font = New-Object System.Drawing.Font($uiFontName, 10)
+        $skipButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+        $skipButton.FlatAppearance.BorderSize = 0
+        $skipButton.BackColor = [System.Drawing.Color]::FromArgb(24, 33, 44)
+        $skipButton.ForeColor = $ink
+        $skipButton.Width = 164
+        $skipButton.Height = 48
+        $skipButton.Left = 444
+        $skipButton.Top = 620
         $skipButton.Add_Click({
             $state.outcome = "skip"
             $form.Close()
         })
+        $skipButton.Add_MouseEnter({ $skipButton.BackColor = [System.Drawing.Color]::FromArgb(34, 46, 60) })
+        $skipButton.Add_MouseLeave({ $skipButton.BackColor = [System.Drawing.Color]::FromArgb(24, 33, 44) })
+        & $setRoundedRegion $skipButton 14
         $form.Controls.Add($skipButton)
 
         $timer = New-Object System.Windows.Forms.Timer
         $timer.Interval = 1000
         $timer.Add_Tick({
+            if ($null -ne $state.last_input_at) {
+                $typingIdleSeconds = ([DateTime]::UtcNow - [DateTime]$state.last_input_at).TotalSeconds
+                if ($typingIdleSeconds -lt $typingGraceSeconds) {
+                    $countdown.Text = Convert-UiText "5YG15ris5Yiw5L2g5q2j5Zyo6Ly45YWl77yM5YCS5pW45bey6YeN5paw6ZaL5aeL44CC"
+                    return
+                }
+            }
             $state.remaining = [int]$state.remaining - 1
-            $countdown.Text = "Auto fallback in $($state.remaining) s"
+            $countdown.Text = $countdownTemplate.Replace("{n}", [string]$state.remaining)
             if ([int]$state.remaining -le 0) {
                 $state.outcome = "timeout"
                 $state.timed_out = $true
@@ -335,8 +633,8 @@ function Handle-HumanHelpRequest([string]$RequestId, $Request) {
                 $form.Close()
             }
         })
-        $form.AcceptButton = $submitButton
         $form.Add_Shown({
+            & $applyRoundedRegion
             $form.BringToFront()
             $form.Activate()
             $answerBox.Focus()
@@ -346,6 +644,7 @@ function Handle-HumanHelpRequest([string]$RequestId, $Request) {
         $timer.Stop()
         $answer = [string]$answerBox.Text
         $timer.Dispose()
+        if ($mascot.Image) { $mascot.Image.Dispose() }
         $form.Dispose()
 
         Write-BrokerLog "HUMAN_HELP_END id=$RequestId outcome=$($state.outcome) timed_out=$($state.timed_out)"
@@ -371,6 +670,7 @@ function Handle-HumanHelpRequest([string]$RequestId, $Request) {
 function Handle-Request([string]$ProcessingPath) {
     $requestId = [IO.Path]::GetFileNameWithoutExtension($ProcessingPath)
     try {
+        Start-ActivityLogViewer
         $request = [IO.File]::ReadAllText($ProcessingPath, [Text.UTF8Encoding]::new($false)) | ConvertFrom-Json
         if ($request.protocol -ne $protocolVersion -or $request.request_id -ne $requestId) {
             Complete-Request $requestId @{ ok = $false; error = "INTERACTIVE_REQUEST_INVALID"; message = "Invalid interactive broker request envelope."; retryable = $false }
@@ -384,6 +684,14 @@ function Handle-Request([string]$ProcessingPath) {
         switch ([string]$request.kind) {
             "exec" { Handle-ExecRequest $requestId $request }
             "human_help" { Handle-HumanHelpRequest $requestId $request }
+            "computer_use" {
+                if (Get-Command Handle-ComputerUseRequest -ErrorAction SilentlyContinue) {
+                    Handle-ComputerUseRequest $requestId $request
+                }
+                else {
+                    Complete-Request $requestId @{ ok = $false; error = "COMPUTER_USE_UNAVAILABLE"; message = "Computer Use helper is not installed."; retryable = $true }
+                }
+            }
             default {
                 Complete-Request $requestId @{ ok = $false; error = "INTERACTIVE_REQUEST_INVALID"; message = "Unsupported interactive broker request kind."; retryable = $false }
             }
@@ -397,29 +705,42 @@ function Handle-Request([string]$ProcessingPath) {
     }
 }
 
-if (-not (Test-Path -LiteralPath $queueRoot -PathType Container)) {
-    throw "Interactive broker queue is missing: $queueRoot"
-}
-$brokerIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
-$brokerPrincipal = [Security.Principal.WindowsPrincipal]::new($brokerIdentity)
-$brokerSessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
-if ($brokerIdentity.User.Value -eq "S-1-5-19" -or $brokerSessionId -le 0) {
-    throw "The interactive broker must run as the signed-in user in an interactive session, not LocalService or Session 0."
-}
-if ($brokerPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw "The interactive broker must use RunLevel Limited. Generic active_user commands are never allowed to inherit Administrator rights."
-}
+try {
+    Write-BrokerLog "BOOT pid=$([Diagnostics.Process]::GetCurrentProcess().Id) queue_exists=$(Test-Path -LiteralPath $queueRoot -PathType Container)"
+    if (-not (Test-Path -LiteralPath $queueRoot -PathType Container)) {
+        throw "Interactive broker queue is missing: $queueRoot"
+    }
+    $brokerIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $brokerPrincipal = [Security.Principal.WindowsPrincipal]::new($brokerIdentity)
+    $brokerSessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
+    $brokerIsAdministrator = $brokerPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    Write-BrokerLog "BOOT_IDENTITY user=$($brokerIdentity.Name) sid=$($brokerIdentity.User.Value) session=$brokerSessionId admin=$brokerIsAdministrator userinteractive=$([Environment]::UserInteractive)"
+    if ($brokerIdentity.User.Value -eq "S-1-5-19" -or $brokerSessionId -le 0) {
+        throw "The interactive broker must run as the signed-in user in an interactive session, not LocalService or Session 0."
+    }
+    if ($brokerIsAdministrator) {
+        throw "The interactive broker must use RunLevel Limited. Generic active_user commands are never allowed to inherit Administrator rights."
+    }
 
-Set-Content -LiteralPath $pidPath -Value ([Diagnostics.Process]::GetCurrentProcess().Id) -Encoding ASCII
-Write-AtomicJson $statusPath @{
-    username = $brokerIdentity.Name
-    session_id = $brokerSessionId
-    elevated = $false
-    run_level = "limited"
-    pid = [Diagnostics.Process]::GetCurrentProcess().Id
-    started_at = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    Set-Content -LiteralPath $pidPath -Value ([Diagnostics.Process]::GetCurrentProcess().Id) -Encoding ASCII
+    Write-BrokerLog "BOOT_PID_WRITTEN path=$pidPath"
+    Write-AtomicJson $statusPath @{
+        username = $brokerIdentity.Name
+        session_id = $brokerSessionId
+        user_interactive = [bool][Environment]::UserInteractive
+        elevated = $false
+        run_level = "limited"
+        pid = [Diagnostics.Process]::GetCurrentProcess().Id
+        started_at = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    }
+    Write-BrokerLog "BOOT_STATUS_WRITTEN path=$statusPath"
+    Start-ActivityLogViewer
+    Write-BrokerLog "START pid=$([Diagnostics.Process]::GetCurrentProcess().Id) session=$brokerSessionId user=$($brokerIdentity.Name) runlevel=limited"
 }
-Write-BrokerLog "START pid=$([Diagnostics.Process]::GetCurrentProcess().Id) session=$brokerSessionId user=$($brokerIdentity.Name) runlevel=limited"
+catch {
+    Write-BrokerLog "BOOT_FATAL $($_.Exception.GetType().FullName): $($_.Exception.Message)"
+    throw
+}
 try {
     while ($true) {
         if (Test-Path -LiteralPath $stopPath) { break }

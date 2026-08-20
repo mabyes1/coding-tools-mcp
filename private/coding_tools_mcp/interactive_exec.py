@@ -283,7 +283,7 @@ def request_human_help(
         while time.monotonic() < deadline:
             if response_path.exists():
                 try:
-                    response = json.loads(response_path.read_text(encoding="utf-8"))
+                    response = json.loads(response_path.read_text(encoding="utf-8-sig"))
                 except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
                     raise ToolFailure(
                         "INTERACTIVE_RESPONSE_INVALID",
@@ -322,6 +322,131 @@ def request_human_help(
     raise ToolFailure(
         "HUMAN_HELP_TIMEOUT",
         "Timed out waiting for the desktop broker to return the human-help result.",
+        category="runtime",
+        retryable=True,
+        details={"request_id": request_id, "timeout_seconds": timeout, "broker": status},
+    )
+
+
+def request_computer_use(
+    *,
+    action: str,
+    window_id: int | None = None,
+    title: str = "",
+    process_name: str = "",
+    x: int | None = None,
+    y: int | None = None,
+    element_index: int | None = None,
+    text: str = "",
+    key: str = "",
+    scroll_y: int = 0,
+    include_screenshot: bool = True,
+    include_text: bool = True,
+    browser_only: bool = False,
+    timeout_seconds: float = 30.0,
+) -> dict[str, Any]:
+    """Perform one bounded UI action through the signed-in desktop broker."""
+    if os.name != "nt":
+        raise ToolFailure(
+            "COMPUTER_USE_UNSUPPORTED",
+            "Computer Use is currently supported only on Windows.",
+            category="runtime",
+        )
+    try:
+        timeout = max(2.0, min(float(timeout_seconds), 60.0))
+    except (TypeError, ValueError):
+        timeout = 30.0
+
+    queue = interactive_queue_path()
+    status = interactive_broker_status()
+    if not queue.is_dir() or not status.get("available"):
+        raise ToolFailure(
+            "INTERACTIVE_BROKER_UNAVAILABLE",
+            "The signed-in desktop broker is unavailable for Computer Use.",
+            category="runtime",
+            retryable=True,
+            details=status,
+        )
+
+    request_id = secrets.token_urlsafe(18)
+    request_path = queue / f"{request_id}.request"
+    response_path = queue / f"{request_id}.response"
+    payload: dict[str, Any] = {
+        "protocol": INTERACTIVE_PROTOCOL_VERSION,
+        "request_id": request_id,
+        "kind": "computer_use",
+        "created_at": time.time(),
+        "requested_by": os.getpid(),
+        "action": str(action),
+        "window_id": window_id,
+        "title": str(title),
+        "process_name": str(process_name),
+        "x": x,
+        "y": y,
+        "element_index": element_index,
+        "text": str(text),
+        "key": str(key),
+        "scroll_y": int(scroll_y),
+        "include_screenshot": bool(include_screenshot),
+        "include_text": bool(include_text),
+        "browser_only": bool(browser_only),
+        "timeout_seconds": int(timeout),
+    }
+    try:
+        _write_json_atomically(request_path, payload)
+    except (OSError, TypeError, ValueError) as exc:
+        raise ToolFailure(
+            "INTERACTIVE_QUEUE_UNAVAILABLE",
+            "The Computer Use request could not be queued.",
+            category="runtime",
+            retryable=True,
+            details={"queue": str(queue), "reason": str(exc)},
+        ) from exc
+
+    deadline = time.monotonic() + timeout + 5.0
+    try:
+        while time.monotonic() < deadline:
+            if response_path.exists():
+                try:
+                    response = json.loads(response_path.read_text(encoding="utf-8-sig"))
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise ToolFailure(
+                        "COMPUTER_USE_RESPONSE_INVALID",
+                        "The desktop broker returned an invalid Computer Use response.",
+                        category="runtime",
+                        retryable=True,
+                        details={"request_id": request_id},
+                    ) from exc
+                try:
+                    response_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                if not isinstance(response, dict) or response.get("request_id") != request_id:
+                    raise ToolFailure(
+                        "COMPUTER_USE_RESPONSE_INVALID",
+                        "The Computer Use response did not match the request.",
+                        category="security",
+                        details={"request_id": request_id},
+                    )
+                if not bool(response.get("ok")):
+                    raise ToolFailure(
+                        str(response.get("error") or "COMPUTER_USE_FAILED"),
+                        str(response.get("message") or "Computer Use failed."),
+                        category="runtime",
+                        retryable=bool(response.get("retryable", False)),
+                        details={"request_id": request_id, "broker": status},
+                    )
+                return response
+            time.sleep(0.05)
+    finally:
+        try:
+            request_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    raise ToolFailure(
+        "COMPUTER_USE_TIMEOUT",
+        "Timed out waiting for the desktop broker to return the Computer Use result.",
         category="runtime",
         retryable=True,
         details={"request_id": request_id, "timeout_seconds": timeout, "broker": status},

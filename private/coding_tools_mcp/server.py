@@ -38,7 +38,13 @@ from .envutils import ENV_PREFIX, truthy_env
 from .errors import JsonRpcError, ToolFailure
 from .elevated_actions import ELEVATED_ACTIONS, request_elevated_action, request_permission_approval
 from .gitutils import git_command
-from .interactive_exec import interactive_broker_status, request_human_help, request_interactive_exec
+from .interactive_exec import (
+    interactive_broker_status,
+    interactive_queue_path,
+    request_computer_use,
+    request_human_help,
+    request_interactive_exec,
+)
 from .landlock_exec import libc_syscall
 from .oauth import (
     OAUTH_CODE_TTL_SECONDS,
@@ -116,6 +122,25 @@ IMAGE_RESIZE_MAX_DIMENSION = 2000
 SENSITIVE_ENV_RE = re.compile(r"(token|secret|credential|api[_-]?key|password|passwd|private)", re.I)
 SENSITIVE_VALUE_RE = re.compile(
     r"(COMPLIANCE_SHOULD_NOT_LEAK|-----BEGIN [A-Z ]*PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9_]+|sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16})"
+)
+ACTIVITY_INLINE_SECRET_RE = re.compile(
+    r"(?i)(\b(?:password|passwd|token|secret|api[_-]?key|authorization|cookie|key\s+content)\b\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|\S+)"
+)
+ACTIVITY_BEARER_RE = re.compile(r"(?i)\bBearer\s+\S+")
+ACTIVITY_LONG_VALUE_RE = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{96,}={0,2}(?![A-Za-z0-9+/])")
+ACTIVITY_REQUEST_BASE64_RE = re.compile(r"(?i)(--request-base64\s+)\S+")
+ACTIVITY_LOG_MAX_BYTES = 2 * 1024 * 1024
+ACTIVITY_LOG_KEEP_BYTES = 1024 * 1024
+ACTIVITY_LOG_LOCK = threading.Lock()
+ACTIVITY_LOG_PATH = (
+    Path(
+        os.environ.get(
+            f"{ENV_PREFIX}_ACTIVITY_LOG",
+            r"C:\ProgramData\WebGPTCodingToolsMCPService\logs\ai-activity.log",
+        )
+    )
+    if os.name == "nt"
+    else None
 )
 RISKY_ENV_NAMES = {
     "BASH_ENV",
@@ -351,6 +376,7 @@ WINDOWS_CORE_ENV_NAMES = {
     "PATH",
     "PATHEXT",
     "COMSPEC",
+    "SYSTEMDRIVE",
     "SYSTEMROOT",
     "WINDIR",
     # Common Windows developer tools resolve SDK/config roots through these
@@ -359,6 +385,8 @@ WINDOWS_CORE_ENV_NAMES = {
     "PROGRAMFILES",
     "PROGRAMFILES(X86)",
     "PROGRAMW6432",
+    "PROGRAMDATA",
+    "ALLUSERSPROFILE",
 }
 NETWORK_RE = re.compile(
     r"(https?://|urllib\.request|urllib3|requests\.|http\.client|\bHTTPConnection\b|\bHTTPSConnection\b|socket\.|aiohttp|httpx|\bcurl\b|\bwget\b|\bnc\b|\bnetcat\b|\bssh\b|\bscp\b|\bftp\b)",
@@ -753,6 +781,20 @@ def _image_content(payload: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _computer_use_content(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    encoded = str(payload.pop("screenshot_base64", ""))
+    if not encoded:
+        return []
+    screenshot = payload.get("screenshot") if isinstance(payload.get("screenshot"), dict) else {}
+    return [
+        {
+            "type": "image",
+            "data": encoded,
+            "mimeType": str(screenshot.get("mime_type") or "image/png"),
+        }
+    ]
+
+
 TOOL_REGISTRY: dict[str, ToolSpec] = {
     "server_info": ToolSpec(
         title="Server info",
@@ -764,6 +806,22 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         title="Human help me",
         description="Escalate one small step to the human. Prefer the desktop QA prompt; if chat fallback is returned, surface it visibly. Never offload ordinary agent work.",
         read_only=True,
+    ),
+    "computer_use": ToolSpec(
+        title="Computer use",
+        description="Control Windows apps through the signed-in desktop. Read coding-tools-mcp/skills/computer-use/SKILL.md before first use; re-observe after UI changes.",
+        destructive=True,
+        open_world=True,
+        error_status="failed",
+        content_builder=_computer_use_content,
+    ),
+    "browser_use": ToolSpec(
+        title="Browser use",
+        description="Inspect and control Chrome/Edge using signed-in browser state. Read coding-tools-mcp/skills/control-chrome/SKILL.md before first use.",
+        destructive=True,
+        open_world=True,
+        error_status="failed",
+        content_builder=_computer_use_content,
     ),
     "check_exec_environment": ToolSpec(
         title="Check exec environment",
@@ -942,11 +1000,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
 PUBLIC_TOOL_NAMES = (
     "server_info",
     "human_help_me",
+    "computer_use",
+    "browser_use",
     "check_exec_environment",
     "get_default_cwd",
     "set_default_cwd",
     "read_file",
-    "list_dir",
     "list_files",
     "search_text",
     "apply_patch",
@@ -957,7 +1016,6 @@ PUBLIC_TOOL_NAMES = (
     "git_status",
     "git_diff",
     "git_log",
-    "git_show",
     "request_permissions",
     "view_image",
 )
@@ -2050,6 +2108,49 @@ class Runtime:
     def _landlock_enforced(self, landlock: dict[str, Any]) -> bool:
         return bool(landlock.get("available")) and self.landlock_enabled()
 
+    def _skill_catalog(self) -> list[dict[str, str]]:
+        """Discover workspace-bundled SKILL.md files without executing them."""
+        roots = [
+            self.workspace.root / "coding-tools-mcp" / "skills",
+            self.workspace.root / "skills",
+        ]
+        items: list[dict[str, str]] = []
+        seen: set[str] = set()
+        skill_files: list[Path] = []
+        for root in roots:
+            if root.is_dir():
+                skill_files.extend(sorted(root.glob("*/SKILL.md")))
+        for skill_file in skill_files:
+            try:
+                text = skill_file.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            name = skill_file.parent.name
+            description = ""
+            if text.startswith("---"):
+                header_end = text.find("\n---", 3)
+                if header_end >= 0:
+                    header = text[3:header_end]
+                    for line in header.splitlines():
+                        key, sep, value = line.partition(":")
+                        if not sep:
+                            continue
+                        if key.strip() == "name" and value.strip():
+                            name = value.strip().strip('"\'')
+                        elif key.strip() == "description" and value.strip():
+                            description = value.strip().strip('"\'')
+            if name in seen:
+                continue
+            seen.add(name)
+            items.append(
+                {
+                    "name": name,
+                    "description": description,
+                    "path": skill_file.relative_to(self.workspace.root).as_posix(),
+                }
+            )
+        return items
+
     def server_info_payload(self) -> dict[str, Any]:
         tools = self.exposed_tool_names()
         landlock = landlock_status_payload()
@@ -2108,6 +2209,7 @@ class Runtime:
                 "nested_instruction_files": list(self.project_context.nested_files),
                 "warnings": list(self.project_context.warnings),
             },
+            "skills": self._skill_catalog(),
             "http_sessions": http_session_stats,
             "execution": self._execution_session_summary(),
             "tools": tools,
@@ -2128,7 +2230,18 @@ class Runtime:
             raise JsonRpcError(-32602, f"Unknown tool: {name}", {"reason": "unknown_tool"})
         spec = TOOL_REGISTRY[name]
         validate_arguments(name, args)
+        if name not in {"browser_use", "computer_use"} and os.name == "nt":
+            try:
+                queue = interactive_queue_path()
+                queue.mkdir(parents=True, exist_ok=True)
+                (queue / "computer-use-overlay.stop").write_text(
+                    datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
         try:
+            append_activity_start(name, args)
             self.request_context.request_id = request_id
             self.request_context.tool_name = name
             self.request_context.arguments = args
@@ -2278,6 +2391,41 @@ class Runtime:
                 "Tell them they may skip it and ask you to continue if fallback=continue_best_effort."
             ),
         }
+
+    def _desktop_ui_action(self, args: dict[str, Any], *, browser_only: bool) -> dict[str, Any]:
+        action = str(args.get("action") or "inspect").strip().lower()
+        text = str(args.get("text") or "")
+        if browser_only and action == "navigate":
+            text = str(args.get("url") or "").strip()
+        response = request_computer_use(
+            action=action,
+            window_id=(int(args["window_id"]) if args.get("window_id") is not None else None),
+            title=str(args.get("title") or ""),
+            process_name=str(args.get("process_name") or ""),
+            x=(int(args["x"]) if args.get("x") is not None else None),
+            y=(int(args["y"]) if args.get("y") is not None else None),
+            element_index=(int(args["element_index"]) if args.get("element_index") is not None else None),
+            text=text,
+            key=str(args.get("key") or ""),
+            scroll_y=int(args.get("scroll_y") or 0),
+            include_screenshot=bool(args.get("include_screenshot", True)),
+            include_text=bool(args.get("include_text", True)),
+            browser_only=browser_only,
+            timeout_seconds=float(args.get("timeout_seconds") or 30),
+        )
+        response["surface"] = "browser" if browser_only else "windows"
+        response["skill"] = (
+            "coding-tools-mcp/skills/control-chrome/SKILL.md"
+            if browser_only
+            else "coding-tools-mcp/skills/computer-use/SKILL.md"
+        )
+        return response
+
+    def computer_use(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._desktop_ui_action(args, browser_only=False)
+
+    def browser_use(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self._desktop_ui_action(args, browser_only=True)
 
     def check_exec_environment(self, args: dict[str, Any]) -> dict[str, Any]:
         landlock = landlock_status_payload()
@@ -2445,6 +2593,7 @@ class Runtime:
             duration_ms=duration_ms,
             truncated=bool(payload.get("truncated")),
         )
+        append_activity_log(name, args, payload, duration_ms)
         if os.environ.get(f"{ENV_PREFIX}_TRACE") != "1":
             return
         event = {
@@ -5430,6 +5579,193 @@ def redact_for_trace(value: Any) -> Any:
     return value
 
 
+def sanitize_activity_text(value: Any, *, max_chars: int = 1200) -> str:
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = SENSITIVE_VALUE_RE.sub("[REDACTED]", text)
+    text = ACTIVITY_INLINE_SECRET_RE.sub(lambda match: match.group(1) + "[REDACTED]", text)
+    text = ACTIVITY_BEARER_RE.sub("Bearer [REDACTED]", text)
+    text = ACTIVITY_REQUEST_BASE64_RE.sub(lambda match: match.group(1) + "[REDACTED]", text)
+    text = ACTIVITY_LONG_VALUE_RE.sub("[LONG_VALUE_REDACTED]", text)
+    if len(text) > max_chars:
+        return text[: max(0, max_chars - 14)] + "...[truncated]"
+    return text
+
+
+def _activity_tail(value: Any, *, max_lines: int = 10, max_chars: int = 1800) -> list[str]:
+    text = sanitize_activity_text(value, max_chars=max_chars * 2)
+    lines = [line.rstrip() for line in text.splitlines() if line.strip()]
+    if len(lines) > max_lines:
+        lines = ["... output truncated ...", *lines[-max_lines:]]
+    result: list[str] = []
+    used = 0
+    for line in lines:
+        clipped = line if len(line) <= 260 else line[:257] + "..."
+        if used + len(clipped) > max_chars:
+            result.append("... output truncated ...")
+            break
+        result.append(clipped)
+        used += len(clipped)
+    return result
+
+
+def _activity_log_lines(
+    name: str,
+    args: dict[str, Any],
+    payload: dict[str, Any],
+    duration_ms: int,
+) -> list[str]:
+    stamp = datetime.now().astimezone().strftime("%H:%M:%S")
+    ok = bool(payload.get("ok", False))
+    marker = "✓" if ok else "✗"
+    lines: list[str] = []
+
+    if name == "exec_command":
+        context = str(args.get("execution_context") or "service")
+        exit_code = payload.get("exit_code")
+        status = f"exit {exit_code}" if exit_code is not None else str(payload.get("status") or "done")
+        lines.append(f"[{stamp}] {marker} exec_command · {context} · {status} · {duration_ms} ms")
+        stdout = payload.get("stdout")
+        stderr = payload.get("stderr")
+        if stdout:
+            lines.extend("  " + item for item in _activity_tail(stdout))
+        if stderr:
+            lines.append("  [stderr]")
+            lines.extend("  " + item for item in _activity_tail(stderr))
+        if not stdout and not stderr and payload.get("preview"):
+            lines.extend("  " + item for item in _activity_tail(payload.get("preview")))
+        return lines
+
+    if name == "apply_patch":
+        lines.append(
+            f"[{stamp}] {marker} apply_patch · {payload.get('additions', 0)} additions · {payload.get('removals', 0)} removals · {duration_ms} ms"
+        )
+        affected = payload.get("affected_files")
+        if isinstance(affected, list):
+            for item in affected[:12]:
+                if not isinstance(item, dict):
+                    continue
+                operation = sanitize_activity_text(item.get("operation", "update"), max_chars=32)
+                path = sanitize_activity_text(item.get("path", ""), max_chars=300)
+                lines.append(f"  {operation}: {path}")
+        return lines
+
+    if name in {"browser_use", "computer_use"}:
+        action = sanitize_activity_text(args.get("action", "inspect"), max_chars=80)
+        surface = "Browser Use" if name == "browser_use" else "Computer Use"
+        lines.append(f"[{stamp}] {marker} {surface} · {action} · {duration_ms} ms")
+        window = payload.get("window")
+        if isinstance(window, dict):
+            title = sanitize_activity_text(window.get("title", ""), max_chars=300)
+            if title:
+                lines.append("  " + title)
+        return lines
+
+    if name == "read_file":
+        path = sanitize_activity_text(args.get("path", ""), max_chars=360)
+        lines.append(
+            f"[{stamp}] {marker} read_file · {path} · lines {payload.get('start_line', '?')}-{payload.get('end_line', '?')} · {duration_ms} ms"
+        )
+        return lines
+
+    if name == "search_text":
+        query = sanitize_activity_text(args.get("query", ""), max_chars=240)
+        path = sanitize_activity_text(args.get("path", "."), max_chars=280)
+        lines.append(f"[{stamp}] {marker} search_text · {path} · {payload.get('total_matches', 0)} matches · {duration_ms} ms")
+        if not ok:
+            lines.append(f"  query: {query}")
+        return lines
+
+    if name in {"list_files", "list_dir"}:
+        path = sanitize_activity_text(args.get("path", "."), max_chars=320)
+        count = len(payload.get("files") or payload.get("entries") or [])
+        lines.append(f"[{stamp}] {marker} {name} · {path} · {count} items · {duration_ms} ms")
+        return lines
+
+    if name.startswith("git_"):
+        path = sanitize_activity_text(args.get("path", "."), max_chars=320)
+        lines.append(f"[{stamp}] {marker} {name} · {path} · {duration_ms} ms")
+        return lines
+
+    if name == "human_help_me":
+        reason = sanitize_activity_text(args.get("reason", ""), max_chars=120)
+        lines.append(
+            f"[{stamp}] {marker} HUMAN HELP · {reason} · {payload.get('status') or payload.get('outcome') or 'done'} · {duration_ms} ms"
+        )
+        return lines
+
+    status = payload.get("status") or ("ok" if ok else "failed")
+    lines.append(f"[{stamp}] {marker} {name} · {sanitize_activity_text(status, max_chars=120)} · {duration_ms} ms")
+    return lines
+
+
+def _activity_start_lines(name: str, args: dict[str, Any]) -> list[str]:
+    stamp = datetime.now().astimezone().strftime("%H:%M:%S")
+    if name == "exec_command":
+        context = sanitize_activity_text(args.get("execution_context") or "service", max_chars=40)
+        return [
+            f"[{stamp}] ▶ exec_command · {context}",
+            "> " + sanitize_activity_text(args.get("cmd", ""), max_chars=700),
+        ]
+    if name == "apply_patch":
+        return [f"[{stamp}] ▶ apply_patch"]
+    if name in {"browser_use", "computer_use"}:
+        surface = "Browser Use" if name == "browser_use" else "Computer Use"
+        action = sanitize_activity_text(args.get("action", "inspect"), max_chars=80)
+        return [f"[{stamp}] ▶ {surface} · {action}"]
+    if name == "read_file":
+        return [f"[{stamp}] ▶ read_file · {sanitize_activity_text(args.get('path', ''), max_chars=360)}"]
+    if name == "search_text":
+        return [
+            f"[{stamp}] ▶ search_text · {sanitize_activity_text(args.get('path', '.'), max_chars=280)}",
+            "> " + sanitize_activity_text(args.get("query", ""), max_chars=240),
+        ]
+    if name in {"list_files", "list_dir"} or name.startswith("git_"):
+        return [f"[{stamp}] ▶ {name} · {sanitize_activity_text(args.get('path', '.'), max_chars=320)}"]
+    if name == "human_help_me":
+        return [f"[{stamp}] ▶ HUMAN HELP · {sanitize_activity_text(args.get('reason', ''), max_chars=120)}"]
+    return [f"[{stamp}] ▶ {name}"]
+
+
+def append_activity_start(name: str, args: dict[str, Any]) -> None:
+    if ACTIVITY_LOG_PATH is None:
+        return
+    try:
+        block = "\n".join(_activity_start_lines(name, args)) + "\n"
+        with ACTIVITY_LOG_LOCK:
+            ACTIVITY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with ACTIVITY_LOG_PATH.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(block)
+    except Exception:
+        return
+
+
+def append_activity_log(
+    name: str,
+    args: dict[str, Any],
+    payload: dict[str, Any],
+    duration_ms: int,
+) -> None:
+    if ACTIVITY_LOG_PATH is None:
+        return
+    try:
+        lines = _activity_log_lines(name, args, payload, duration_ms)
+        block = "\n".join(lines) + "\n\n"
+        with ACTIVITY_LOG_LOCK:
+            ACTIVITY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            if ACTIVITY_LOG_PATH.exists() and ACTIVITY_LOG_PATH.stat().st_size > ACTIVITY_LOG_MAX_BYTES:
+                raw = ACTIVITY_LOG_PATH.read_bytes()
+                tail = raw[-ACTIVITY_LOG_KEEP_BYTES:].decode("utf-8", errors="replace")
+                ACTIVITY_LOG_PATH.write_text(
+                    "[activity log rotated]\n" + tail,
+                    encoding="utf-8",
+                )
+            with ACTIVITY_LOG_PATH.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(block)
+    except Exception:
+        # Activity logging must never break a real MCP operation.
+        return
+
+
 class LandlockRulesetAttr(ctypes.Structure):
     _fields_ = [("handled_access_fs", ctypes.c_uint64)]
 
@@ -5996,6 +6332,70 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "timeout_seconds": {**integer, "minimum": 5, "maximum": 300, "default": 60},
             },
             ["reason", "request"],
+        ),
+        "computer_use": object_schema(
+            {
+                "action": {
+                    **string,
+                    "enum": [
+                        "list_windows",
+                        "inspect",
+                        "screenshot",
+                        "activate",
+                        "click",
+                        "right_click",
+                        "type_text",
+                        "press_key",
+                        "scroll",
+                    ],
+                    "default": "inspect",
+                },
+                "window_id": integer,
+                "title": string,
+                "process_name": string,
+                "x": integer,
+                "y": integer,
+                "element_index": {**integer, "minimum": 0},
+                "text": string,
+                "key": string,
+                "scroll_y": integer,
+                "include_screenshot": {**boolean, "default": True},
+                "include_text": {**boolean, "default": True},
+                "timeout_seconds": {**integer, "minimum": 2, "maximum": 60, "default": 30},
+            }
+        ),
+        "browser_use": object_schema(
+            {
+                "action": {
+                    **string,
+                    "enum": [
+                        "list_windows",
+                        "inspect",
+                        "screenshot",
+                        "activate",
+                        "click",
+                        "right_click",
+                        "type_text",
+                        "press_key",
+                        "scroll",
+                        "navigate",
+                    ],
+                    "default": "inspect",
+                },
+                "window_id": integer,
+                "title": string,
+                "process_name": {**string, "enum": ["chrome", "msedge"]},
+                "x": integer,
+                "y": integer,
+                "element_index": {**integer, "minimum": 0},
+                "text": string,
+                "url": string,
+                "key": string,
+                "scroll_y": integer,
+                "include_screenshot": {**boolean, "default": True},
+                "include_text": {**boolean, "default": True},
+                "timeout_seconds": {**integer, "minimum": 2, "maximum": 60, "default": 30},
+            }
         ),
         "check_exec_environment": object_schema(
             {"tools": {"type": "array", "items": {**string, "minLength": 1}, "maxItems": 64}}

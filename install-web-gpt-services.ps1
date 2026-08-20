@@ -152,6 +152,76 @@ try {
     foreach ($brokerFile in @("interactive-broker.ps1", "manage-interactive-broker.ps1", "install-interactive-broker.ps1")) {
         Copy-Item -LiteralPath (Join-Path $templateRoot $brokerFile) -Destination (Join-Path $serviceRoot $brokerFile) -Force
     }
+    $computerUseSource = Join-Path $templateRoot "ComputerUseHelper.cs"
+    $computerUseExe = Join-Path $serviceRoot "computer-use-helper.exe"
+    $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+    $windowsPowerShellForBuild = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+    $automationRef = (& $windowsPowerShellForBuild -NoLogo -NoProfile -NonInteractive -Command "[System.Management.Automation.PowerShell].Assembly.Location").Trim()
+    $brokerLauncherSource = Join-Path $templateRoot "ElevatedBrokerLauncher.cs"
+    $brokerLauncherExe = Join-Path $serviceRoot "elevated-broker-launcher.exe"
+
+    # A repair/reinstall can encounter the existing scheduled launcher still
+    # running from this exact path. Stop it before recompiling the WinExe.
+    $installedBrokerManager = Join-Path $serviceRoot "manage-elevated-broker.ps1"
+    if (Test-Path -LiteralPath $installedBrokerManager -PathType Leaf) {
+        & $windowsPowerShellForBuild -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+            -File $installedBrokerManager -Action Stop 2>$null | Out-Null
+    }
+    Stop-ScheduledTask -TaskName "WebGPT-Elevated-Broker" -ErrorAction SilentlyContinue
+    Get-Process -Name "elevated-broker-launcher" -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    $unlockDeadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
+    while ((Get-Process -Name "elevated-broker-launcher" -ErrorAction SilentlyContinue) -and
+           [DateTimeOffset]::UtcNow -lt $unlockDeadline) {
+        Start-Sleep -Milliseconds 100
+    }
+    if (Get-Process -Name "elevated-broker-launcher" -ErrorAction SilentlyContinue) {
+        throw "Could not stop the existing elevated broker launcher before service install."
+    }
+
+    & $csc /nologo /target:winexe /optimize+ /out:$brokerLauncherExe `
+        /reference:$automationRef `
+        $brokerLauncherSource
+    if ($LASTEXITCODE -ne 0) { throw "Could not build the windowless elevated broker launcher." }
+    $interactiveBrokerLauncherSource = Join-Path $templateRoot "InteractiveBrokerLauncher.cs"
+    $interactiveBrokerLauncherExe = Join-Path $serviceRoot "interactive-broker-launcher.exe"
+    $installedInteractiveBrokerManager = Join-Path $serviceRoot "manage-interactive-broker.ps1"
+    if (Test-Path -LiteralPath $installedInteractiveBrokerManager -PathType Leaf) {
+        & $windowsPowerShellForBuild -NoLogo -NoProfile -ExecutionPolicy Bypass `
+            -File $installedInteractiveBrokerManager -Action Stop 2>$null | Out-Null
+    }
+    Stop-ScheduledTask -TaskName "WebGPT-Interactive-Broker" -ErrorAction SilentlyContinue
+    Get-Process -Name "interactive-broker-launcher" -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    & $csc /nologo /target:winexe /optimize+ /out:$interactiveBrokerLauncherExe `
+        /reference:$automationRef `
+        $interactiveBrokerLauncherSource
+    if ($LASTEXITCODE -ne 0) { throw "Could not build the windowless interactive broker launcher." }
+    & $csc /nologo /target:exe /optimize+ /out:$computerUseExe `
+        /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\System.Web.Extensions.dll" `
+        /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationClient.dll" `
+        /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationTypes.dll" `
+        /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\WindowsBase.dll" `
+        /reference:System.Drawing.dll /reference:System.Windows.Forms.dll $computerUseSource
+    if ($LASTEXITCODE -ne 0) { throw "Could not build Computer Use helper." }
+    $computerUseOverlaySource = Join-Path $templateRoot "ComputerUseOverlay.cs"
+    $computerUseOverlayExe = Join-Path $serviceRoot "computer-use-overlay.exe"
+    Get-Process -Name "computer-use-overlay" -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    & $csc /nologo /target:winexe /optimize+ /out:$computerUseOverlayExe `
+        /reference:System.Drawing.dll /reference:System.Windows.Forms.dll $computerUseOverlaySource
+    if ($LASTEXITCODE -ne 0) { throw "Could not build Computer Use overlay." }
+    $activityLogViewerSource = Join-Path $templateRoot "ActivityLogViewer.cs"
+    $activityLogViewerExe = Join-Path $serviceRoot "activity-log-viewer.exe"
+    Get-Process -Name "activity-log-viewer" -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+    & $csc /nologo /target:winexe /optimize+ /out:$activityLogViewerExe `
+        /reference:System.Drawing.dll /reference:System.Windows.Forms.dll $activityLogViewerSource
+    if ($LASTEXITCODE -ne 0) { throw "Could not build Activity Log viewer." }
+    $mascotAssetSource = Join-Path $templateRoot "assets"
+    if (Test-Path -LiteralPath $mascotAssetSource -PathType Container) {
+        Copy-Item -LiteralPath $mascotAssetSource -Destination (Join-Path $serviceRoot "assets") -Recurse -Force
+    }
     $webrootSourceScript = Join-Path $workspaceRoot "phoneMonitor\scripts\sync-installed-webroot.ps1"
     $brokerPath = Join-Path $serviceRoot "elevated-broker.ps1"
     if (Test-Path -LiteralPath $webrootSourceScript -PathType Leaf) {

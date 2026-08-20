@@ -9,7 +9,7 @@ $taskName = "WebGPT-Interactive-Broker"
 $serviceRoot = "C:\ProgramData\WebGPTCodingToolsMCPService"
 $queueRoot = Join-Path $serviceRoot "interactive-requests"
 $broker = Join-Path $serviceRoot "interactive-broker.ps1"
-$pwsh = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+$launcher = Join-Path $serviceRoot "interactive-broker-launcher.exe"
 
 function Get-TaskSafe { Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue }
 function Get-BrokerPid {
@@ -66,15 +66,31 @@ switch ($Action) {
     "Install" {
         Assert-InteractiveCaller
         if (-not (Test-Path -LiteralPath $broker -PathType Leaf)) { throw "Interactive broker script is missing: $broker" }
+        if (-not (Test-Path -LiteralPath $launcher -PathType Leaf)) { throw "Interactive broker launcher is missing: $launcher" }
         New-Item -ItemType Directory -Path $queueRoot -Force | Out-Null
         Stop-BrokerInstance
         $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-        $taskAction = New-ScheduledTaskAction -Execute $pwsh -Argument "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$broker`""
+        # Run the PowerShell broker in-process inside a WinExe launcher. Using
+        # powershell.exe directly can cause Windows 11 Terminal delegation to
+        # create a visible terminal even with -WindowStyle Hidden.
+        $taskAction = New-ScheduledTaskAction -Execute $launcher
         $trigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+        # This is a long-lived desktop broker.  Task Scheduler's defaults are
+        # optimized for short jobs and can leave the MCP with a stale broker.pid
+        # after an unexpected termination.  Keep the broker alive indefinitely
+        # and let Task Scheduler heal it when the process dies.
+        $settings = New-ScheduledTaskSettingsSet `
+            -MultipleInstances IgnoreNew `
+            -RestartCount 999 `
+            -RestartInterval (New-TimeSpan -Minutes 1) `
+            -ExecutionTimeLimit ([TimeSpan]::Zero) `
+            -StartWhenAvailable `
+            -AllowStartIfOnBatteries `
+            -DontStopIfGoingOnBatteries
         # Deliberately Limited: this broker may execute generic commands, so it
         # must never inherit the elevated fixed-action broker's token.
         $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
-        Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $trigger -Principal $principal -Description "Non-elevated signed-in desktop execution broker for WebGPT MCP." -Force | Out-Null
+        Register-ScheduledTask -TaskName $taskName -Action $taskAction -Trigger $trigger -Principal $principal -Settings $settings -Description "Non-elevated signed-in desktop execution broker for WebGPT MCP." -Force | Out-Null
         Enable-ScheduledTask -TaskName $taskName | Out-Null
         Write-Host "INTERACTIVE_BROKER_TASK_INSTALLED"
     }
@@ -92,7 +108,14 @@ switch ($Action) {
             Write-Host "INTERACTIVE_BROKER_ALREADY_RUNNING PID=$($existing.Id) SESSION=$($existing.SessionId)"
             break
         }
-        if ($existing) { Stop-BrokerInstance }
+        if ($existing) {
+            Stop-BrokerInstance
+        }
+        else {
+            # A hard-killed broker cannot run its finally block, so stale
+            # identity files may survive even though the process is gone.
+            Remove-Item -LiteralPath (Join-Path $queueRoot "broker.pid"),(Join-Path $queueRoot "broker.status.json") -Force -ErrorAction SilentlyContinue
+        }
         $task = Get-TaskSafe
         if (-not $task) { throw "The interactive broker task is not installed." }
         Start-ScheduledTask -TaskName $taskName

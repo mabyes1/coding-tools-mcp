@@ -38,11 +38,13 @@ def main() -> int:
         "set_default_cwd",
         "request_permissions",
         "human_help_me",
+        "computer_use",
+        "browser_use",
     }
     missing_public_tools = required_public_tools.difference(server.PUBLIC_TOOL_NAMES)
     if missing_public_tools:
         raise RuntimeError(
-            "required V9 public tools are missing: " + ", ".join(sorted(missing_public_tools))
+            "required V10 public tools are missing: " + ", ".join(sorted(missing_public_tools))
         )
     stale_public_tools = {"list_sessions", "request_elevated_action", "git_blame"}.intersection(server.PUBLIC_TOOL_NAMES)
     if stale_public_tools:
@@ -63,6 +65,171 @@ def main() -> int:
     human_reasons = human_schema.get("properties", {}).get("reason", {}).get("enum", [])
     if "faster_by_human" not in human_reasons or "permission_blocked" not in human_reasons:
         raise RuntimeError("human_help_me reason schema is missing core escalation reasons")
+
+    computer_actions = server.input_schemas()["computer_use"]["properties"]["action"].get("enum", [])
+    if "inspect" not in computer_actions or "click" not in computer_actions or "type_text" not in computer_actions:
+        raise RuntimeError("computer_use schema is missing core UI actions")
+    browser_actions = server.input_schemas()["browser_use"]["properties"]["action"].get("enum", [])
+    if "navigate" not in browser_actions or "inspect" not in browser_actions:
+        raise RuntimeError("browser_use schema is missing core browser actions")
+
+    if os.name == "nt":
+        windows_root = Path(os.environ.get("WINDIR", r"C:\Windows"))
+        csc = windows_root / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "csc.exe"
+        automation_candidates = list(
+            (windows_root / "Microsoft.Net" / "assembly" / "GAC_MSIL" / "System.Management.Automation").glob(
+                "*/System.Management.Automation.dll"
+            )
+        )
+        automation_ref = automation_candidates[0] if automation_candidates else Path("__missing_System.Management.Automation.dll")
+        launcher_source = Path(__file__).resolve().with_name("ElevatedBrokerLauncher.cs")
+        interactive_launcher_source = Path(__file__).resolve().with_name("InteractiveBrokerLauncher.cs")
+        helper_source = Path(__file__).resolve().with_name("ComputerUseHelper.cs")
+        activity_viewer_source = Path(__file__).resolve().with_name("ActivityLogViewer.cs")
+        helper_refs = [
+            windows_root / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "System.Web.Extensions.dll",
+            windows_root / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "WPF" / "UIAutomationClient.dll",
+            windows_root / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "WPF" / "UIAutomationTypes.dll",
+            windows_root / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "WPF" / "WindowsBase.dll",
+        ]
+        missing_helper_inputs = [
+            path
+            for path in [
+                csc,
+                automation_ref,
+                launcher_source,
+                interactive_launcher_source,
+                helper_source,
+                activity_viewer_source,
+                *helper_refs,
+            ]
+            if not path.is_file()
+        ]
+        if missing_helper_inputs:
+            raise RuntimeError(
+                "Computer Use helper build inputs are missing: "
+                + ", ".join(str(path) for path in missing_helper_inputs)
+            )
+        with tempfile.TemporaryDirectory(prefix="coding-tools-computer-use-build-") as helper_temp:
+            launcher_output = Path(helper_temp) / "elevated-broker-launcher.exe"
+            launcher_compile = subprocess.run(
+                [
+                    str(csc),
+                    "/nologo",
+                    "/target:winexe",
+                    "/optimize+",
+                    f"/out:{launcher_output}",
+                    f"/reference:{automation_ref}",
+                    str(launcher_source),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            if launcher_compile.returncode != 0 or not launcher_output.is_file():
+                raise RuntimeError(
+                    "Elevated broker launcher failed to compile:\n" + launcher_compile.stdout[-8000:]
+                )
+            launcher_self_test = subprocess.run(
+                [str(launcher_output), "--self-test"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            if launcher_self_test.returncode != 0:
+                raise RuntimeError(
+                    "Elevated broker launcher runtime self-test failed:\n" + launcher_self_test.stdout[-8000:]
+                )
+            interactive_launcher_output = Path(helper_temp) / "interactive-broker-launcher.exe"
+            interactive_launcher_compile = subprocess.run(
+                [
+                    str(csc),
+                    "/nologo",
+                    "/target:winexe",
+                    "/optimize+",
+                    f"/out:{interactive_launcher_output}",
+                    f"/reference:{automation_ref}",
+                    str(interactive_launcher_source),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            if interactive_launcher_compile.returncode != 0 or not interactive_launcher_output.is_file():
+                raise RuntimeError(
+                    "Interactive broker launcher failed to compile:\n"
+                    + interactive_launcher_compile.stdout[-8000:]
+                )
+            interactive_launcher_self_test = subprocess.run(
+                [str(interactive_launcher_output), "--self-test"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            if interactive_launcher_self_test.returncode != 0:
+                raise RuntimeError(
+                    "Interactive broker launcher runtime self-test failed:\n"
+                    + interactive_launcher_self_test.stdout[-8000:]
+                )
+            helper_output = Path(helper_temp) / "computer-use-helper.exe"
+            compile_result = subprocess.run(
+                [
+                    str(csc),
+                    "/nologo",
+                    "/target:exe",
+                    "/optimize+",
+                    f"/out:{helper_output}",
+                    *(f"/reference:{path}" for path in helper_refs),
+                    "/reference:System.Drawing.dll",
+                    "/reference:System.Windows.Forms.dll",
+                    str(helper_source),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            if compile_result.returncode != 0 or not helper_output.is_file():
+                raise RuntimeError(
+                    "Computer Use helper failed to compile:\n" + compile_result.stdout[-8000:]
+                )
+            activity_viewer_output = Path(helper_temp) / "activity-log-viewer.exe"
+            viewer_compile = subprocess.run(
+                [
+                    str(csc),
+                    "/nologo",
+                    "/target:winexe",
+                    "/optimize+",
+                    f"/out:{activity_viewer_output}",
+                    "/reference:System.Drawing.dll",
+                    "/reference:System.Windows.Forms.dll",
+                    str(activity_viewer_source),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+            if viewer_compile.returncode != 0 or not activity_viewer_output.is_file():
+                raise RuntimeError(
+                    "Activity Log viewer failed to compile:\n" + viewer_compile.stdout[-8000:]
+                )
 
     human_runtime = server.Runtime(workspace, enable_view_image=False)
     try:
@@ -279,6 +446,16 @@ def main() -> int:
                 raise RuntimeError(
                     "Windows command environment is missing developer-tool profile variables: "
                     + ", ".join(missing_windows_env)
+                )
+
+            _, interactive_policy = runtime._interactive_command_env({})
+            interactive_core = {str(name).upper() for name in interactive_policy.get("core_names", [])}
+            required_interactive_windows_env = {"SYSTEMDRIVE", "PROGRAMDATA", "ALLUSERSPROFILE"}
+            missing_interactive_env = sorted(required_interactive_windows_env.difference(interactive_core))
+            if missing_interactive_env:
+                raise RuntimeError(
+                    "Interactive-user core environment is missing Windows known-folder variables: "
+                    + ", ".join(missing_interactive_env)
                 )
             runtime_prefix = str(runtime.runtime_dir).rstrip("\\/").casefold() + "\\"
             for name in ("USERPROFILE", "APPDATA", "LOCALAPPDATA", "DOTNET_CLI_HOME", "NUGET_PACKAGES"):

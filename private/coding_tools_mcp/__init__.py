@@ -1,3 +1,3 @@
 """Coding Tools MCP server package."""
 
-__version__ = "0.2.2-private.17"
+__version__ = "0.2.2-private.36"
