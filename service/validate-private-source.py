@@ -496,6 +496,76 @@ def main() -> int:
     if find_subsequence_all(["x"] * 12_000, ["x"] * 6_000) != list(range(6_001)):
         raise RuntimeError("linear patch hunk matcher did not find overlapping matches correctly")
 
+    # Freeze the workspace/path boundary before moving it out of server.py.
+    original_workspace_allowlist = os.environ.get(server.WORKSPACE_ALLOWLIST_ENV)
+    try:
+        with tempfile.TemporaryDirectory(prefix="coding-tools-workspace-contract-") as temporary:
+            contract_root = Path(temporary)
+            alpha = contract_root / "alpha"
+            beta = contract_root / "beta"
+            outside = contract_root / "outside"
+            nested = alpha / "nested"
+            alpha.mkdir()
+            beta.mkdir()
+            outside.mkdir()
+            nested.mkdir()
+            marker = nested / "marker.txt"
+            marker.write_text("workspace-contract\n", encoding="utf-8")
+            os.environ[server.WORKSPACE_ALLOWLIST_ENV] = (
+                f"Alpha={alpha}{os.pathsep}Beta={beta}"
+            )
+
+            catalog = server.workspace_catalog_from_env()
+            if [entry.name for entry in catalog] != ["Alpha", "Beta"]:
+                raise RuntimeError("workspace allowlist selector order/names drifted")
+            if [entry.path for entry in catalog] != [alpha.resolve(), beta.resolve()]:
+                raise RuntimeError("workspace allowlist path normalization drifted")
+            if server.workspace_entry_for_selector("alpha").path != alpha.resolve():
+                raise RuntimeError("workspace selector matching stopped being case-insensitive")
+            if server.workspace_entry_for_selector(str(beta)).name != "Beta":
+                raise RuntimeError("workspace selector stopped accepting an exact allowlisted path")
+            allowed = server.validate_workspace_selection(alpha)
+            if allowed != (alpha.resolve(), beta.resolve()):
+                raise RuntimeError("workspace selection validation no longer returns the configured roots")
+            try:
+                server.validate_workspace_selection(outside)
+            except server.ToolFailure as exc:
+                if exc.code != "WORKSPACE_NOT_ALLOWED":
+                    raise
+            else:
+                raise RuntimeError("workspace selection accepted a root outside the private allowlist")
+
+            workspace_contract = server.Workspace(alpha)
+            inside_absolute = workspace_contract.resolve_existing(str(marker.resolve()))
+            if inside_absolute.path != marker.resolve() or inside_absolute.display != "nested/marker.txt":
+                raise RuntimeError("absolute path inside the workspace no longer normalizes to a relative display")
+            if workspace_contract.resolve_existing("nested/marker.txt").path != marker.resolve():
+                raise RuntimeError("relative workspace path resolution drifted")
+            try:
+                workspace_contract.resolve_existing("../outside")
+            except server.ToolFailure as exc:
+                if exc.code != "PATH_OUTSIDE_WORKSPACE":
+                    raise
+            else:
+                raise RuntimeError("workspace traversal guard accepted '..'")
+            try:
+                workspace_contract.resolve_existing(str(outside.resolve()))
+            except server.ToolFailure as exc:
+                if exc.code != "ABSOLUTE_PATH_DENIED":
+                    raise
+            else:
+                raise RuntimeError("workspace accepted an absolute path outside its root")
+            pending = workspace_contract.resolve_for_write("nested/new-file.txt")
+            if pending.existed or pending.path != (nested / "new-file.txt").resolve(strict=False):
+                raise RuntimeError("workspace write-target resolution drifted for a new file")
+            if server.normalize_rel_display(alpha, alpha) != ".":
+                raise RuntimeError("workspace relative display for root drifted")
+    finally:
+        if original_workspace_allowlist is None:
+            os.environ.pop(server.WORKSPACE_ALLOWLIST_ENV, None)
+        else:
+            os.environ[server.WORKSPACE_ALLOWLIST_ENV] = original_workspace_allowlist
+
     # A directory-only shell change is a common model/user expectation. Verify
     # it becomes the shared owner cwd instead of disappearing with a one-shot
     # child shell, and verify another owner cannot inherit it.
