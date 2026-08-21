@@ -496,6 +496,35 @@ def main() -> int:
             required_execution_keys = {"running", "starting", "retained_output", "max_running", "available_slots"}
             if not isinstance(execution_info, dict) or not required_execution_keys.issubset(execution_info):
                 raise RuntimeError("server_info execution-pressure contract drifted")
+
+            exec_environment = owner._exec_environment_summary()
+            required_environment_keys = {"workspace", "permission_mode", "network_allowed", "runtime_dir", "home", "tmpdir", "cache_dir"}
+            if not required_environment_keys.issubset(exec_environment):
+                raise RuntimeError("exec-environment summary contract drifted")
+            if execution_info.get("running") != 0 or execution_info.get("starting") != 0:
+                raise RuntimeError("fresh Runtime execution-pressure baseline drifted")
+
+            skill_dir = runtime_workspace / "skills" / "diagnostic-contract"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: diagnostic-contract\ndescription: Validator diagnostic skill.\n---\n",
+                encoding="utf-8",
+            )
+            skills = owner._skill_catalog()
+            matching_skills = [item for item in skills if item.get("name") == "diagnostic-contract"]
+            if matching_skills != [
+                {
+                    "name": "diagnostic-contract",
+                    "description": "Validator diagnostic skill.",
+                    "path": "skills/diagnostic-contract/SKILL.md",
+                }
+            ]:
+                raise RuntimeError("skill catalog metadata/path contract drifted")
+
+            impossible_tool = "coding-tools-validator-definitely-missing-executable"
+            discovery = owner._discover_tools([impossible_tool])
+            if discovery != [{"name": impossible_tool, "available": False, "path": None}]:
+                raise RuntimeError("tool discovery missing-executable contract drifted")
         finally:
             shared.close()
             owner.close()
