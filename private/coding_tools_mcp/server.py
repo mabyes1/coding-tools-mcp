@@ -94,6 +94,13 @@ from .protocol import (
 from .project_context import ProjectContext, load_project_context
 from .telemetry import SessionTelemetry
 from .textutils import DEFAULT_MAX_LINES, TextTruncation, truncate_text_head
+from .tools.diagnostics import (
+    discover_tools,
+    exec_environment_summary,
+    execution_session_summary,
+    landlock_enforced,
+    skill_catalog,
+)
 from .tools.desktop import desktop_ui_action, human_help_tool
 from .tools.images import (
     identify_image,
@@ -1470,15 +1477,15 @@ class Runtime:
         return self.resolve_for_write(raw_path).display
 
     def _exec_environment_summary(self) -> dict[str, Any]:
-        return {
-            "workspace": str(self.workspace.root),
-            "permission_mode": self.permission_mode,
-            "network_allowed": self.allow_network,
-            "runtime_dir": str(self.runtime_dir),
-            "home": str(self.command_home_dir()),
-            "tmpdir": str(self.command_tmp_dir()),
-            "cache_dir": str(self.cache_dir),
-        }
+        return exec_environment_summary(
+            workspace_root=self.workspace.root,
+            permission_mode=self.permission_mode,
+            network_allowed=self.allow_network,
+            runtime_dir=self.runtime_dir,
+            home_dir=self.command_home_dir(),
+            tmp_dir=self.command_tmp_dir(),
+            cache_dir=self.cache_dir,
+        )
 
     def _execution_session_summary(self) -> dict[str, Any]:
         self._prune_sessions()
@@ -1486,59 +1493,18 @@ class Runtime:
             running = len(self.sessions)
             starting = self.starting_sessions
             retained_output = len(self.output_sessions)
-        return {
-            "running": running,
-            "starting": starting,
-            "retained_output": retained_output,
-            "max_running": MAX_ACTIVE_EXEC_SESSIONS,
-            "available_slots": max(0, MAX_ACTIVE_EXEC_SESSIONS - running - starting),
-        }
+        return execution_session_summary(
+            running=running,
+            starting=starting,
+            retained_output=retained_output,
+            max_running=MAX_ACTIVE_EXEC_SESSIONS,
+        )
 
     def _landlock_enforced(self, landlock: dict[str, Any]) -> bool:
-        return bool(landlock.get("available")) and self.landlock_enabled()
+        return landlock_enforced(landlock, enabled=self.landlock_enabled())
 
     def _skill_catalog(self) -> list[dict[str, str]]:
-        """Discover workspace-bundled SKILL.md files without executing them."""
-        roots = [
-            self.workspace.root / "coding-tools-mcp" / "skills",
-            self.workspace.root / "skills",
-        ]
-        items: list[dict[str, str]] = []
-        seen: set[str] = set()
-        skill_files: list[Path] = []
-        for root in roots:
-            if root.is_dir():
-                skill_files.extend(sorted(root.glob("*/SKILL.md")))
-        for skill_file in skill_files:
-            try:
-                text = skill_file.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                continue
-            name = skill_file.parent.name
-            description = ""
-            if text.startswith("---"):
-                header_end = text.find("\n---", 3)
-                if header_end >= 0:
-                    header = text[3:header_end]
-                    for line in header.splitlines():
-                        key, sep, value = line.partition(":")
-                        if not sep:
-                            continue
-                        if key.strip() == "name" and value.strip():
-                            name = value.strip().strip('"\'')
-                        elif key.strip() == "description" and value.strip():
-                            description = value.strip().strip('"\'')
-            if name in seen:
-                continue
-            seen.add(name)
-            items.append(
-                {
-                    "name": name,
-                    "description": description,
-                    "path": skill_file.relative_to(self.workspace.root).as_posix(),
-                }
-            )
-        return items
+        return skill_catalog(self.workspace.root)
 
     def server_info_payload(self) -> dict[str, Any]:
         tools = self.exposed_tool_names()
@@ -1752,21 +1718,7 @@ class Runtime:
         }
 
     def _discover_tools(self, names: list[str]) -> list[dict[str, Any]]:
-        results: list[dict[str, Any]] = []
-        configured_pwsh = (os.environ.get(f"{ENV_PREFIX}_PWSH_PATH") or "").strip()
-        for raw_name in names[:64]:
-            name = str(raw_name).strip()
-            if not name:
-                continue
-            candidates = [name]
-            configured = configured_tool_path(name)
-            if configured:
-                candidates.insert(0, configured)
-            if name.casefold() in {"pwsh", "powershell"} and configured_pwsh:
-                candidates.insert(0, configured_pwsh)
-            resolved = next((path for path in candidates if Path(path).is_file() or shutil.which(path)), None)
-            results.append({"name": name, "available": bool(resolved), "path": resolved})
-        return results
+        return discover_tools(names, configured_tool_path=configured_tool_path)
 
     def which_tools(self, args: dict[str, Any]) -> dict[str, Any]:
         requested = args.get("tools")
