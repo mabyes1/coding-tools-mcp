@@ -232,7 +232,13 @@ processes / patching / oauth / protocol / transport_* 等既有低階 modules
 
 - [ ] filesystem tools
 - [ ] git tools
-- [ ] image tool
+- [x] image tool
+  - Characterization commit：`7fbf68f` (`test: freeze image tool behavior`)
+  - Extraction commit：`01e2b5c` (`refactor: extract image tool domain`)
+  - `Runtime.view_image()` is now a one-line delegation into `tools/images.py` with explicit `resolve_existing` dependency injection.
+  - PNG identification / dimensions / MCP image data / unsupported-binary / max-bytes contracts PASS.
+  - Five pure image helpers AST-identical to pre-extraction HEAD.
+  - Full source validator PASS；`server.py`：7165 → 7000 lines。
 - [ ] diagnostics / server_info helpers
 - [ ] human_help / desktop facade
 
