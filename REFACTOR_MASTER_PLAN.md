@@ -200,11 +200,15 @@ processes / patching / oauth / protocol / transport_* 等既有低階 modules
 
 先拆幾乎不碰 process lifecycle 的純邏輯，建立重構節奏。
 
-- [ ] `workspace.py`
-  - WorkspaceEntry catalog
-  - workspace selector / allowlist
-  - `ResolvedPath` / `Workspace`
-  - cwd/path boundary helpers
+- [x] `workspace.py`
+  - [x] WorkspaceEntry catalog
+  - [x] workspace selector / allowlist
+  - [x] `ResolvedPath` / `Workspace`
+  - [x] cwd/path boundary helpers
+  - Characterization commit：`71e54d8` (`test: freeze workspace boundary behavior`)
+  - Extraction commit：`7040c7c` (`refactor: extract workspace domain`)
+  - Verification：compile + full source validator PASS；11 extracted symbols/constants AST-identical to pre-extraction HEAD。
+  - `server.py`：8353 → 7960 lines。
 - [ ] `tool_schemas.py`
   - schema builders
   - `input_schemas`
@@ -394,7 +398,8 @@ Python server 穩定後再碰 installer/update，避免兩個高風險面同時�
 - [x] 建立本重構總計畫。
 - [x] Phase 0 Contract Freeze & Characterization 完成；source validator 全綠，public tool contract fingerprint 已鎖定。
 - [ ] Live installed build identity 對齊延後到第一個**安全部署 checkpoint**：目前重啟 MCP 會中斷正在施工的 Tunnel，所以 source-only extraction 階段以 `29121c4` + validator baseline 為 authoritative baseline；在任何 installed-service smoke 前必須先完成對齊。
-- [ ] **NEXT：Phase 1 / Workspace domain extraction。先搬純 workspace/path/cwd 邏輯，不碰 Execution / HTTP。**
+- [x] Phase 1 / Workspace domain extraction 完成。
+- [ ] **NEXT：Phase 1 / Tool schema + catalog extraction。保持 20-tool contract SHA-256 不變，不碰 Runtime tool implementations。**
 
 ### 下一個 session / context 壓縮後應從這裡開始
 
