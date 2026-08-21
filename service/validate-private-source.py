@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -52,6 +53,21 @@ def main() -> int:
     if stale_public_tools:
         raise RuntimeError(
             "stale pre-V9 public tools remain exposed: " + ", ".join(sorted(stale_public_tools))
+        )
+    public_contract = [server.tool_definition(name) for name in server.PUBLIC_TOOL_NAMES]
+    public_contract_bytes = json.dumps(
+        public_contract,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    public_contract_sha256 = hashlib.sha256(public_contract_bytes).hexdigest()
+    expected_public_contract_sha256 = "10a6219c4dd9a739f3ad6d05572f449d0800f8ad9bce16184851d10413b65392"
+    if public_contract_sha256 != expected_public_contract_sha256:
+        raise RuntimeError(
+            "public tool definition/schema contract changed; "
+            f"expected sha256={expected_public_contract_sha256}, actual={public_contract_sha256}. "
+            "If this is an intentional product/API change, review the complete tools/list diff before updating this baseline."
         )
 
     exec_schema = server.input_schemas()["exec_command"]
@@ -336,6 +352,141 @@ def main() -> int:
             raise RuntimeError("human_help_me model-facing handoff text is incomplete")
     finally:
         human_runtime.close()
+
+    # Refactor characterization contracts. These intentionally exercise private
+    # seams that are about to move out of server.py. They are not new product
+    # behavior; they freeze ownership/cleanup rules so extraction cannot change
+    # them accidentally.
+    with tempfile.TemporaryDirectory(prefix="coding-tools-runtime-contract-") as temporary:
+        runtime_workspace = Path(temporary)
+        owner = server.Runtime(runtime_workspace, enable_view_image=False)
+        owner._ensure_runtime_dirs()
+        shared = server.Runtime(
+            runtime_workspace,
+            enable_view_image=False,
+            project_context=owner.project_context,
+            execution_registry=owner.execution_registry,
+        )
+        try:
+            registry = owner.execution_registry
+            if set(owner._tool_handlers) != set(server.TOOL_REGISTRY):
+                raise RuntimeError("Runtime tool-handler catalog drifted from TOOL_REGISTRY")
+            missing_handlers = [
+                name for name, handler in owner._tool_handlers.items() if not callable(handler)
+            ]
+            if missing_handlers:
+                raise RuntimeError(
+                    "Runtime has non-callable registered tool handlers: "
+                    + ", ".join(sorted(missing_handlers))
+                )
+            if not set(owner.exposed_tool_names()).issubset(owner._tool_handlers):
+                raise RuntimeError("public tool surface contains a tool with no Runtime handler")
+
+            runtime_dir = owner.runtime_dir
+            if not runtime_dir.is_dir():
+                raise RuntimeError("runtime characterization could not create its isolated runtime directory")
+            shared.close()
+            if registry.closed:
+                raise RuntimeError("closing a shared Runtime incorrectly closed its ExecutionRegistry")
+            if not runtime_dir.is_dir():
+                raise RuntimeError("closing a shared Runtime incorrectly deleted the shared runtime directory")
+
+            original_server_info_handler = owner._tool_handlers["server_info"]
+
+            def failing_handler(_args: dict[str, object]) -> dict[str, object]:
+                owner.request_sessions["cleanup-contract"] = "synthetic-session"
+                owner.request_context.claimed_permission_grants = {"network"}
+                raise server.ToolFailure(
+                    "CHARACTERIZATION_FAILURE",
+                    "synthetic handler failure",
+                    category="internal",
+                )
+
+            owner._tool_handlers["server_info"] = failing_handler
+            failed_result = owner.call_tool("server_info", {}, request_id="cleanup-contract")
+            owner._tool_handlers["server_info"] = original_server_info_handler
+            if not failed_result.get("isError"):
+                raise RuntimeError("synthetic Runtime handler failure did not remain a tool error")
+            if "cleanup-contract" in owner.request_sessions:
+                raise RuntimeError("tool request/session mapping leaked after a handler failure")
+            if getattr(owner.request_context, "request_id", None) is not None:
+                raise RuntimeError("request_id leaked from Runtime request context after a handler failure")
+            if getattr(owner.request_context, "tool_name", None) is not None:
+                raise RuntimeError("tool_name leaked from Runtime request context after a handler failure")
+            if getattr(owner.request_context, "arguments", None) is not None:
+                raise RuntimeError("arguments leaked from Runtime request context after a handler failure")
+            if getattr(owner.request_context, "claimed_permission_grants", None) != set():
+                raise RuntimeError("permission claims leaked from Runtime request context after a handler failure")
+
+            info = owner.server_info_payload()
+            required_info_keys = {
+                "server",
+                "version",
+                "build_identity",
+                "protocol_version",
+                "workspace",
+                "default_cwd",
+                "auth_enabled",
+                "oauth",
+                "exec_policy",
+                "execution",
+                "http_sessions",
+                "tools",
+                "tool_count",
+            }
+            missing_info_keys = sorted(required_info_keys.difference(info))
+            if missing_info_keys:
+                raise RuntimeError(
+                    "server_info lost refactor-critical fields: " + ", ".join(missing_info_keys)
+                )
+            execution_info = info.get("execution", {})
+            required_execution_keys = {"running", "starting", "retained_output", "max_running", "available_slots"}
+            if not isinstance(execution_info, dict) or not required_execution_keys.issubset(execution_info):
+                raise RuntimeError("server_info execution-pressure contract drifted")
+        finally:
+            shared.close()
+            owner.close()
+        if not registry.closed:
+            raise RuntimeError("the owning Runtime did not close its ExecutionRegistry")
+        if runtime_dir.exists():
+            raise RuntimeError("the owning Runtime did not clean up its isolated runtime directory")
+
+    with tempfile.TemporaryDirectory(prefix="coding-tools-http-lifecycle-") as temporary:
+        http_workspace = Path(temporary)
+        control_runtime = server.Runtime(http_workspace, enable_view_image=False)
+        registry = control_runtime.execution_registry
+
+        def http_runtime_factory() -> server.Runtime:
+            return server.Runtime(
+                http_workspace,
+                enable_view_image=False,
+                project_context=control_runtime.project_context,
+                execution_registry=registry,
+                transport="http",
+            )
+
+        http_server = server.RuntimeHTTPServer(
+            ("127.0.0.1", 0),
+            server.MCPHandler,
+            control_runtime,
+            http_runtime_factory,
+            enable_health=False,
+        )
+        reconnect_binding = http_server.sessions.create("http-lifecycle-owner")
+        reconnect_runtime = reconnect_binding.runtime
+        if reconnect_runtime.execution_registry is not registry:
+            raise RuntimeError("HTTP reconnect Runtime did not share the control ExecutionRegistry")
+        if reconnect_runtime._owns_execution_registry:
+            raise RuntimeError("HTTP reconnect Runtime incorrectly owns the shared ExecutionRegistry")
+        if registry.closed:
+            raise RuntimeError("HTTP lifecycle setup unexpectedly closed the ExecutionRegistry")
+        http_server.server_close()
+        if not registry.closed:
+            raise RuntimeError("RuntimeHTTPServer.server_close did not close the control ExecutionRegistry")
+        if not control_runtime._closed:
+            raise RuntimeError("RuntimeHTTPServer.server_close did not close its control Runtime")
+        if not reconnect_runtime._closed:
+            raise RuntimeError("RuntimeHTTPServer.server_close did not close reconnect session Runtimes")
 
     context = load_project_context(workspace)
     scan_warnings = [warning for warning in context.warnings if "scan stopped" in warning.casefold()]
