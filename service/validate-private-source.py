@@ -793,6 +793,87 @@ def main() -> int:
             repo, filters = primary._git_repo_scope({"path": "."})
             if repo != project or filters:
                 raise RuntimeError("git_diff scope did not resolve '.' from the default cwd")
+
+            git = server.require_git()
+            for config_key, config_value in (
+                ("user.name", "Coding Tools Validator"),
+                ("user.email", "validator@example.invalid"),
+            ):
+                subprocess.run(
+                    [git, "-C", str(project), "config", config_key, config_value],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            subprocess.run(
+                [git, "-C", str(project), "add", "patch-target.txt"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                [git, "-C", str(project), "commit", "-q", "-m", "validator baseline"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            patch_target.write_text("after\nchanged\n", encoding="utf-8")
+
+            git_status_result = primary.git_status({"path": "."})
+            status_entry = next(
+                (
+                    item
+                    for item in git_status_result.get("entries", [])
+                    if item.get("path") == "patch-target.txt"
+                ),
+                None,
+            )
+            if not git_status_result.get("is_repo") or status_entry is None:
+                raise RuntimeError("git_status repository/change contract drifted")
+            if status_entry.get("worktree_status") != "M":
+                raise RuntimeError("git_status worktree-status contract drifted")
+
+            git_diff_result = primary.git_diff({"path": "."})
+            if "changed" not in str(git_diff_result.get("diff") or ""):
+                raise RuntimeError("git_diff content contract drifted")
+            if not any(
+                item.get("path") == "patch-target.txt" and item.get("status") == "modified"
+                for item in git_diff_result.get("files", [])
+            ):
+                raise RuntimeError("git_diff file metadata contract drifted")
+
+            git_log_result = primary.git_log({"path": ".", "max_count": 1})
+            commits = git_log_result.get("commits", [])
+            if not commits or commits[0].get("subject") != "validator baseline":
+                raise RuntimeError("git_log commit metadata contract drifted")
+
+            git_show_result = primary.git_show(
+                {"path": ".", "rev": "HEAD", "include_diff": False}
+            )
+            if not git_show_result.get("is_repo") or "validator baseline" not in str(
+                git_show_result.get("content") or ""
+            ):
+                raise RuntimeError("git_show metadata-only contract drifted")
+
+            git_blame_result = primary.git_blame(
+                {"path": "patch-target.txt", "rev": "HEAD", "start_line": 1, "max_lines": 10}
+            )
+            blame_lines = git_blame_result.get("lines", [])
+            if not git_blame_result.get("is_repo") or not blame_lines:
+                raise RuntimeError("git_blame repository/line contract drifted")
+            if str(blame_lines[0].get("content") or "").strip() != "after":
+                raise RuntimeError("git_blame line-text contract drifted")
+            if not str(blame_lines[0].get("commit") or ""):
+                raise RuntimeError("git_blame commit attribution contract drifted")
+
+            try:
+                server.validate_git_ref("-unsafe")
+            except server.ToolFailure as exc:
+                if exc.code != "INVALID_ARGUMENT":
+                    raise
+            else:
+                raise RuntimeError("git revision validation accepted an option-like ref")
+
             reconnect = server.Runtime(
                 cwd_workspace,
                 enable_view_image=False,
