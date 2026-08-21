@@ -353,6 +353,59 @@ def main() -> int:
     finally:
         human_runtime.close()
 
+    # Freeze the lightweight desktop/browser facade separately from the C#
+    # helper implementation. This protects argument mapping and surface/skill
+    # metadata while letting the facade move out of Runtime safely.
+    with tempfile.TemporaryDirectory(prefix="coding-tools-desktop-contract-") as temporary:
+        desktop_runtime = server.Runtime(Path(temporary), enable_view_image=False)
+        original_computer_use = server.request_computer_use
+        desktop_calls: list[dict[str, object]] = []
+
+        def fake_computer_use(**kwargs: object) -> dict[str, object]:
+            desktop_calls.append(dict(kwargs))
+            return {"ok": True, "action": kwargs.get("action")}
+
+        server.request_computer_use = fake_computer_use
+        try:
+            windows_result = desktop_runtime.computer_use(
+                {
+                    "action": "click",
+                    "window_id": 42,
+                    "x": 10,
+                    "y": 20,
+                    "include_screenshot": False,
+                    "include_text": False,
+                    "timeout_seconds": 12,
+                }
+            )
+            browser_result = desktop_runtime.browser_use(
+                {
+                    "action": "navigate",
+                    "url": "https://example.invalid/path",
+                    "process_name": "chrome",
+                }
+            )
+            if windows_result.get("surface") != "windows" or not str(windows_result.get("skill") or "").endswith("computer-use/SKILL.md"):
+                raise RuntimeError("computer_use facade surface/skill metadata drifted")
+            if browser_result.get("surface") != "browser" or not str(browser_result.get("skill") or "").endswith("control-chrome/SKILL.md"):
+                raise RuntimeError("browser_use facade surface/skill metadata drifted")
+            if len(desktop_calls) != 2:
+                raise RuntimeError("desktop facade did not delegate exactly one broker call per tool call")
+            windows_call, browser_call = desktop_calls
+            if windows_call.get("browser_only") is not False or windows_call.get("window_id") != 42:
+                raise RuntimeError("computer_use broker argument mapping drifted")
+            if windows_call.get("x") != 10 or windows_call.get("y") != 20 or windows_call.get("timeout_seconds") != 12.0:
+                raise RuntimeError("computer_use coordinate/timeout mapping drifted")
+            if windows_call.get("include_screenshot") is not False or windows_call.get("include_text") is not False:
+                raise RuntimeError("computer_use include flags drifted")
+            if browser_call.get("browser_only") is not True or browser_call.get("action") != "navigate":
+                raise RuntimeError("browser_use broker mode/action mapping drifted")
+            if browser_call.get("text") != "https://example.invalid/path" or browser_call.get("process_name") != "chrome":
+                raise RuntimeError("browser_use navigate URL mapping drifted")
+        finally:
+            server.request_computer_use = original_computer_use
+            desktop_runtime.close()
+
     # Refactor characterization contracts. These intentionally exercise private
     # seams that are about to move out of server.py. They are not new product
     # behavior; they freeze ownership/cleanup rules so extraction cannot change
