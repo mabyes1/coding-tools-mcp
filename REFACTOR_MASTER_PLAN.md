@@ -209,13 +209,18 @@ processes / patching / oauth / protocol / transport_* 等既有低階 modules
   - Extraction commit：`7040c7c` (`refactor: extract workspace domain`)
   - Verification：compile + full source validator PASS；11 extracted symbols/constants AST-identical to pre-extraction HEAD。
   - `server.py`：8353 → 7960 lines。
-- [ ] `tool_schemas.py`
-  - schema builders
-  - `input_schemas`
-  - argument/schema validation
-- [ ] `tool_catalog.py`
-  - `ToolSpec`
-  - registry / public names / annotations / definitions
+- [x] `tool_schemas.py`
+  - [x] schema builders
+  - [x] `input_schemas`
+  - [x] argument/schema validation
+- [x] `tool_catalog.py`
+  - [x] `ToolSpec`
+  - [x] registry / public names / annotations / definitions
+  - Extraction commit：`062f3cc` (`refactor: extract tool catalog and schemas`)
+  - Verification：compile + full source validator PASS；14 extracted function/class definitions + 4 core assignments AST-identical to pre-extraction HEAD。
+  - Public tool contract remained exactly 20 tools / 24,739 bytes / SHA-256 `10a6219c4dd9a739f3ad6d05572f449d0800f8ad9bce16184851d10413b65392`。
+  - `tool_catalog.py` / `tool_schemas.py` do not import `server.py`。
+  - `server.py`：7960 → 7165 lines（baseline 8353 → 7165）。
 
 **要求：** 對外 import 暫時可由 `server.py` re-export，讓現有 validator 和其他 module 不必同時大改。
 
@@ -399,7 +404,8 @@ Python server 穩定後再碰 installer/update，避免兩個高風險面同時�
 - [x] Phase 0 Contract Freeze & Characterization 完成；source validator 全綠，public tool contract fingerprint 已鎖定。
 - [ ] Live installed build identity 對齊延後到第一個**安全部署 checkpoint**：目前重啟 MCP 會中斷正在施工的 Tunnel，所以 source-only extraction 階段以 `29121c4` + validator baseline 為 authoritative baseline；在任何 installed-service smoke 前必須先完成對齊。
 - [x] Phase 1 / Workspace domain extraction 完成。
-- [ ] **NEXT：Phase 1 / Tool schema + catalog extraction。保持 20-tool contract SHA-256 不變，不碰 Runtime tool implementations。**
+- [x] Phase 1 / Tool schema + catalog extraction 完成。
+- [ ] **NEXT：Phase 2 / split low-risk tool handler domains。先從 diagnostics / image 等低耦合區開始，不碰 Execution / Session。**
 
 ### 下一個 session / context 壓縮後應從這裡開始
 
