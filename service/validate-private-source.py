@@ -686,6 +686,53 @@ def main() -> int:
                 raise RuntimeError("workspace write-target resolution drifted for a new file")
             if server.normalize_rel_display(alpha, alpha) != ".":
                 raise RuntimeError("workspace relative display for root drifted")
+
+            docs = alpha / "docs"
+            docs_nested = docs / "nested"
+            docs_nested.mkdir(parents=True)
+            (docs / "a.txt").write_text("alpha\nbeta\n", encoding="utf-8")
+            (docs_nested / "c.txt").write_text("gamma beta\n", encoding="utf-8")
+            (docs / "binary.bin").write_bytes(b"abc\x00def")
+            filesystem_runtime = server.Runtime(alpha, enable_view_image=False)
+            try:
+                read_result = filesystem_runtime.read_file(
+                    {"path": "docs/a.txt", "start_line": 2, "max_lines": 1}
+                )
+                read_content = str(read_result.get("content") or "").replace("\r\n", "\n")
+                if read_content != "beta\n" or read_result.get("end_line") != 2:
+                    raise RuntimeError("read_file line-selection contract drifted")
+                try:
+                    filesystem_runtime.read_file({"path": "docs/binary.bin"})
+                except server.ToolFailure as exc:
+                    if exc.code != "BINARY_FILE":
+                        raise
+                else:
+                    raise RuntimeError("read_file binary guard drifted")
+
+                listed = filesystem_runtime.list_dir(
+                    {"path": "docs", "recursive": True, "max_depth": 3, "sort": "name"}
+                )
+                listed_paths = {str(item.get("path")) for item in listed.get("entries", [])}
+                if not {"docs/a.txt", "docs/nested", "docs/nested/c.txt"}.issubset(listed_paths):
+                    raise RuntimeError("list_dir recursive path contract drifted")
+
+                files = filesystem_runtime.list_files(
+                    {"path": "docs", "patterns": ["*.txt"], "sort": "path"}
+                )
+                file_paths = {str(item.get("path")) for item in files.get("files", [])}
+                if not {"docs/a.txt", "docs/nested/c.txt"}.issubset(file_paths):
+                    raise RuntimeError("list_files glob contract drifted")
+
+                searched = filesystem_runtime.search_text(
+                    {"query": "beta", "path": "docs", "case_sensitive": True}
+                )
+                match_paths = {str(item.get("path")) for item in searched.get("matches", [])}
+                if match_paths != {"docs/a.txt", "docs/nested/c.txt"}:
+                    raise RuntimeError("search_text literal-match contract drifted")
+                if int(searched.get("total_matches", -1)) != 2:
+                    raise RuntimeError("search_text total-match contract drifted")
+            finally:
+                filesystem_runtime.close()
     finally:
         if original_workspace_allowlist is None:
             os.environ.pop(server.WORKSPACE_ALLOWLIST_ENV, None)
