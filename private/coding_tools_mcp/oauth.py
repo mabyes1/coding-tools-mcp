@@ -422,12 +422,18 @@ def valid_pkce_challenge(code_challenge: str) -> bool:
     return re.fullmatch(r"[A-Za-z0-9_-]{43}", code_challenge) is not None
 
 
-def create_access_token(config: OAuthConfig, server_url: str, *, client_id: str) -> str:
+def create_access_token(
+    config: OAuthConfig,
+    server_url: str,
+    *,
+    client_id: str,
+    audience: str | None = None,
+) -> str:
     now = int(time.time())
     return jwt.encode(
         {
             "iss": server_url,
-            "aud": server_url,
+            "aud": audience or server_url,
             "sub": client_id,
             "client_id": client_id,
             "iat": now,
@@ -439,18 +445,30 @@ def create_access_token(config: OAuthConfig, server_url: str, *, client_id: str)
     )
 
 
-def validate_access_token(token: str, config: OAuthConfig, server_url: str) -> bool:
-    return access_token_client_id(token, config, server_url) is not None
+def validate_access_token(
+    token: str,
+    config: OAuthConfig,
+    server_url: str,
+    *,
+    audience: str | None = None,
+) -> bool:
+    return access_token_client_id(token, config, server_url, audience=audience) is not None
 
 
-def access_token_client_id(token: str, config: OAuthConfig, server_url: str) -> str | None:
+def access_token_client_id(
+    token: str,
+    config: OAuthConfig,
+    server_url: str,
+    *,
+    audience: str | None = None,
+) -> str | None:
     """Return the registered OAuth client id for a valid bearer token."""
     try:
         claims = jwt.decode(
             token,
             config.token_secret,
             algorithms=["HS256"],
-            audience=server_url,
+            audience=audience or server_url,
             issuer=server_url,
         )
     except jwt.PyJWTError:

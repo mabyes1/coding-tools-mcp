@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import json
 import os
 import subprocess
 import sys
@@ -72,6 +74,16 @@ def main() -> int:
     browser_actions = server.input_schemas()["browser_use"]["properties"]["action"].get("enum", [])
     if "navigate" not in browser_actions or "inspect" not in browser_actions:
         raise RuntimeError("browser_use schema is missing core browser actions")
+    action_contract = server.computer_use_action_contract()
+    if tuple(computer_actions) != action_contract["computer_use"]:
+        raise RuntimeError("computer_use schema drifted from computer-use-actions.json")
+    if tuple(browser_actions) != action_contract["browser_use"]:
+        raise RuntimeError("browser_use schema drifted from computer-use-actions.json")
+    grouped_message, grouped_leaves = server.summarize_exception(
+        ExceptionGroup("task group failed", [ValueError("regression leaf")])
+    )
+    if "regression leaf" not in grouped_message or grouped_leaves != ["ValueError: regression leaf"]:
+        raise RuntimeError("ExceptionGroup diagnostics regressed to an opaque TaskGroup-style error")
 
     if os.name == "nt":
         windows_root = Path(os.environ.get("WINDIR", r"C:\Windows"))
@@ -85,7 +97,9 @@ def main() -> int:
         launcher_source = Path(__file__).resolve().with_name("ElevatedBrokerLauncher.cs")
         interactive_launcher_source = Path(__file__).resolve().with_name("InteractiveBrokerLauncher.cs")
         helper_source = Path(__file__).resolve().with_name("ComputerUseHelper.cs")
+        overlay_source = Path(__file__).resolve().with_name("ComputerUseOverlay.cs")
         activity_viewer_source = Path(__file__).resolve().with_name("ActivityLogViewer.cs")
+        action_contract_source = package_parent / "coding_tools_mcp" / "computer-use-actions.json"
         helper_refs = [
             windows_root / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "System.Web.Extensions.dll",
             windows_root / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "WPF" / "UIAutomationClient.dll",
@@ -100,7 +114,9 @@ def main() -> int:
                 launcher_source,
                 interactive_launcher_source,
                 helper_source,
+                overlay_source,
                 activity_viewer_source,
+                action_contract_source,
                 *helper_refs,
             ]
             if not path.is_file()
@@ -110,7 +126,29 @@ def main() -> int:
                 "Computer Use helper build inputs are missing: "
                 + ", ".join(str(path) for path in missing_helper_inputs)
             )
+
+        # Regression contracts come from bugs we actually hit in production.
+        helper_text = helper_source.read_text(encoding="utf-8")
+        interactive_broker_text = Path(__file__).resolve().with_name("interactive-broker.ps1").read_text(encoding="utf-8")
+        if "System.Management.Automation.Language.Parser]::ParseInput" not in interactive_broker_text:
+            raise RuntimeError("active_user exec must reject PowerShell syntax errors before launching the child shell")
+        for action in sorted(set(action_contract["computer_use"]) | set(action_contract["browser_use"])):
+            if f'action == "{action}"' not in helper_text:
+                raise RuntimeError(f"Computer Use backend has no implementation branch for advertised action: {action}")
+        if 'right_click is not supported' in helper_text:
+            raise RuntimeError("right_click regressed to a schema-only action")
+        if 'if (action == "inspect") ActivateWindow' in helper_text:
+            raise RuntimeError("inspect must not foreground the target window")
+        capture_start = helper_text.find("private static Tuple<byte[], int, int> Capture")
+        capture_end = helper_text.find("private static", capture_start + 20)
+        if capture_start < 0 or "ActivateWindow(" in helper_text[capture_start:capture_end]:
+            raise RuntimeError("screenshot capture must not foreground the target window")
+        if "try { element.SetFocus(); return; }" in helper_text:
+            raise RuntimeError("click must not report success when it only focused the element")
+        if "computer-use-overlay-leases" not in helper_text:
+            raise RuntimeError("Computer Use overlay must use per-operation leases")
         with tempfile.TemporaryDirectory(prefix="coding-tools-computer-use-build-") as helper_temp:
+            (Path(helper_temp) / "computer-use-actions.json").write_bytes(action_contract_source.read_bytes())
             launcher_output = Path(helper_temp) / "elevated-broker-launcher.exe"
             launcher_compile = subprocess.run(
                 [
@@ -207,6 +245,33 @@ def main() -> int:
                 raise RuntimeError(
                     "Computer Use helper failed to compile:\n" + compile_result.stdout[-8000:]
                 )
+            request_json = json.dumps(
+                {
+                    "action": "list_windows",
+                    "browser_only": False,
+                    "include_screenshot": False,
+                    "include_text": False,
+                },
+                separators=(",", ":"),
+            ).encode("utf-8")
+            helper_smoke = subprocess.run(
+                [str(helper_output), "--request-base64", base64.b64encode(request_json).decode("ascii")],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+                timeout=15,
+            )
+            if helper_smoke.returncode != 0:
+                raise RuntimeError("Computer Use list_windows smoke test failed:\n" + helper_smoke.stdout[-8000:])
+            try:
+                smoke_payload = json.loads(helper_smoke.stdout)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("Computer Use list_windows smoke test returned invalid JSON") from exc
+            if not smoke_payload.get("ok") or smoke_payload.get("action") != "list_windows":
+                raise RuntimeError("Computer Use list_windows smoke test returned an invalid payload")
             activity_viewer_output = Path(helper_temp) / "activity-log-viewer.exe"
             viewer_compile = subprocess.run(
                 [
@@ -233,6 +298,20 @@ def main() -> int:
 
     human_runtime = server.Runtime(workspace, enable_view_image=False)
     try:
+        human_runtime.initialized = True
+        unknown_tool_response = server.dispatch_rpc(
+            human_runtime,
+            {
+                "jsonrpc": "2.0",
+                "id": "unknown-tool-regression",
+                "method": "tools/call",
+                "params": {"name": "definitely_removed_tool", "arguments": {}},
+            },
+        )
+        unknown_error = (unknown_tool_response or {}).get("error", {})
+        if unknown_error.get("code") != -32602 or "Unknown tool" not in str(unknown_error.get("message") or ""):
+            raise RuntimeError("removed tools no longer fail cleanly with an Unknown tool JSON-RPC error")
+
         handoff_result = human_runtime.call_tool(
             "human_help_me",
             {
@@ -273,9 +352,17 @@ def main() -> int:
         cwd_workspace = Path(temporary)
         project = cwd_workspace / "project"
         project.mkdir()
+        nested_only = cwd_workspace / "nested" / "deep-project"
+        nested_only.mkdir(parents=True)
         primary = server.Runtime(cwd_workspace, enable_view_image=False)
         try:
             primary.state_owner = "selfcheck-owner"
+            web_project = primary.set_default_cwd({"project_name": "PROJECT"})
+            if web_project.get("default_cwd") != "project":
+                raise RuntimeError("Web Project name did not resolve case-insensitively to a first-level directory")
+            missing_web_project = primary.set_default_cwd({"project_name": "deep-project"})
+            if missing_web_project.get("default_cwd") != ".":
+                raise RuntimeError("Web Project resolution searched recursively instead of falling back to workspace root")
             changed = primary.exec_command({"cmd": "cd project"})
             if not changed.get("cwd_persisted") or changed.get("default_cwd") != "project":
                 raise RuntimeError("directory-only exec did not persist the new default cwd")
@@ -422,6 +509,7 @@ def main() -> int:
         with tempfile.TemporaryDirectory(prefix="coding-tools-broker-check-") as temporary:
             queue = Path(temporary)
             (queue / "broker.pid").write_text(str(os.getpid()), encoding="ascii")
+            (queue / "broker.heartbeat").write_text(str(time.time()), encoding="ascii")
             alive, reported_pid = elevated_actions._broker_is_alive(queue)
             if not alive or reported_pid != os.getpid():
                 raise RuntimeError("Windows broker process liveness probe rejected a live PID")

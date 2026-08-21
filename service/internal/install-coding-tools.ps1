@@ -1,14 +1,5 @@
 $ErrorActionPreference = "Stop"
-
-function Get-Sha256Hex([string]$Path) {
-    $stream = [IO.File]::OpenRead($Path)
-    try {
-        $sha256 = [Security.Cryptography.SHA256]::Create()
-        try { return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace("-", "") }
-        finally { $sha256.Dispose() }
-    }
-    finally { $stream.Dispose() }
-}
+. (Join-Path $PSScriptRoot "deployment-common.ps1")
 
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator
@@ -17,8 +8,9 @@ if (-not $isAdmin) {
     throw "This installer must run as Administrator."
 }
 
-$sourceRoot = $PSScriptRoot
-$templateRoot = Join-Path $sourceRoot "service"
+$serviceSourceRoot = Split-Path -Parent $PSScriptRoot
+$sourceRoot = Split-Path -Parent $serviceSourceRoot
+$templateRoot = $serviceSourceRoot
 $privateSource = Join-Path $sourceRoot "private\coding_tools_mcp"
 $serviceRoot = "C:\ProgramData\WebGPTCodingToolsMCPService"
 $stateRoot = Join-Path $env:LOCALAPPDATA "coding-tools-mcp-web"
@@ -130,6 +122,8 @@ try {
         throw "Installing coding-tools-mcp failed with exit code $LASTEXITCODE."
     }
     Copy-Item -LiteralPath $privateSource -Destination (Join-Path $serviceRoot "app") -Recurse -Force
+    Copy-Item -LiteralPath (Join-Path $privateSource "computer-use-actions.json") `
+        -Destination (Join-Path $serviceRoot "computer-use-actions.json") -Force
     if ($hadOAuthStateBackup) {
         Copy-Item -LiteralPath $oauthStateBackup `
             -Destination (Join-Path $serviceRoot "data\oauth-state.sqlite") -Force
@@ -146,7 +140,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $templateRoot "gpt-coding-mcp.yml") -Destination $serviceRoot -Force
     Copy-Item -LiteralPath (Join-Path $templateRoot "WebGPTCodingToolsMCP.xml") -Destination $serviceRoot -Force
     Copy-Item -LiteralPath (Join-Path $templateRoot "WebGPTCloudflareTunnel.xml") -Destination $serviceRoot -Force
-    foreach ($brokerFile in @("elevated-broker.ps1", "request-elevated-action.ps1", "manage-elevated-broker.ps1")) {
+    foreach ($brokerFile in @("elevated-broker.ps1", "manage-elevated-broker.ps1")) {
         Copy-Item -LiteralPath (Join-Path $templateRoot $brokerFile) -Destination (Join-Path $serviceRoot $brokerFile) -Force
     }
     foreach ($brokerFile in @("interactive-broker.ps1", "manage-interactive-broker.ps1", "install-interactive-broker.ps1")) {
@@ -222,15 +216,8 @@ try {
     if (Test-Path -LiteralPath $mascotAssetSource -PathType Container) {
         Copy-Item -LiteralPath $mascotAssetSource -Destination (Join-Path $serviceRoot "assets") -Recurse -Force
     }
-    $webrootSourceScript = Join-Path $workspaceRoot "phoneMonitor\scripts\sync-installed-webroot.ps1"
     $brokerPath = Join-Path $serviceRoot "elevated-broker.ps1"
-    if (Test-Path -LiteralPath $webrootSourceScript -PathType Leaf) {
-        $webrootHash = Get-Sha256Hex $webrootSourceScript
-        $brokerText = [IO.File]::ReadAllText($brokerPath, [Text.UTF8Encoding]::new($false))
-        $brokerText = [regex]::Replace($brokerText, '(ExpectedSha256\s*=\s*")[A-Fa-f0-9]{64}("?)', { param($match) $match.Groups[1].Value + $webrootHash + $match.Groups[2].Value })
-        $brokerText = $brokerText.Replace("REPLACE_WITH_SYNC_WEBROOT_SHA256", $webrootHash)
-        [IO.File]::WriteAllText($brokerPath, $brokerText, [Text.UTF8Encoding]::new($false))
-    }
+    New-ElevatedActionManifest $brokerPath (Join-Path $serviceRoot "elevated-actions.manifest.json")
     Copy-Item -LiteralPath $credentialSource -Destination (Join-Path $serviceRoot $credentialName) -Force
     Copy-Item -LiteralPath $winsw -Destination (Join-Path $serviceRoot "WebGPTCodingToolsMCP.exe") -Force
     Copy-Item -LiteralPath $winsw -Destination (Join-Path $serviceRoot "WebGPTCloudflareTunnel.exe") -Force
@@ -299,16 +286,33 @@ try {
         "${localServiceSid}:(OI)(CI)M" /C | Out-Host
     & icacls.exe (Join-Path $serviceRoot "logs") /grant `
         "${localServiceSid}:(OI)(CI)M" /C | Out-Host
+    & icacls.exe $elevatedQueueRoot /inheritance:r /remove:g "${currentAccount}" /C | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Removing signed-in user write access from elevated broker queue failed." }
     & icacls.exe $elevatedQueueRoot /inheritance:r /grant:r `
         "*S-1-5-18:(OI)(CI)F" `
         "*S-1-5-32-544:(OI)(CI)F" `
-        "${currentAccount}:(OI)(CI)M" `
         "${localServiceSid}:(OI)(CI)M" /C | Out-Host
     & icacls.exe $interactiveQueueRoot /inheritance:r /grant:r `
         "*S-1-5-18:(OI)(CI)F" `
         "*S-1-5-32-544:(OI)(CI)F" `
         "${currentAccount}:(OI)(CI)M" `
         "${localServiceSid}:(OI)(CI)M" /C | Out-Host
+    foreach ($privilegedFile in @(
+        "elevated-broker.ps1",
+        "elevated-broker-launcher.exe",
+        "elevated-actions.manifest.json",
+        "manage-elevated-broker.ps1",
+        "elevated-actions.manifest.json"
+    )) {
+        $privilegedPath = Join-Path $serviceRoot $privilegedFile
+        if (-not (Test-Path -LiteralPath $privilegedPath -PathType Leaf)) { continue }
+        & icacls.exe $privilegedPath /inheritance:r /grant:r `
+            "*S-1-5-18:F" `
+            "*S-1-5-32-544:F" `
+            "${currentAccount}:RX" `
+            "${localServiceSid}:RX" /C | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "Could not protect privileged broker file: $privilegedPath" }
+    }
     & icacls.exe $workspaceRoot /grant `
         "${localServiceSid}:(OI)(CI)M" /T /C | Out-Host
     & icacls.exe $pythonRoot /grant `

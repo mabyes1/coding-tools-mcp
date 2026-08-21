@@ -7,12 +7,15 @@ $ErrorActionPreference = "Stop"
 $serviceRoot = "C:\ProgramData\WebGPTCodingToolsMCPService"
 $queueRoot = Join-Path $serviceRoot "interactive-requests"
 $pidPath = Join-Path $queueRoot "broker.pid"
+$heartbeatPath = Join-Path $queueRoot "broker.heartbeat"
 $statusPath = Join-Path $queueRoot "broker.status.json"
 $stopPath = Join-Path $queueRoot "broker.stop"
 $logPath = Join-Path $queueRoot "broker.log"
 $protocolVersion = 1
 $requestTtlSeconds = 900
 $maxCapturedBytes = 1048576
+$heartbeatIntervalSeconds = 5
+$workRetentionDays = 7
 
 try {
     $earlyIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -39,6 +42,33 @@ function Write-AtomicJson([string]$Path, [hashtable]$Payload) {
     $temporary = "$Path.$([Guid]::NewGuid().ToString('N')).tmp"
     [IO.File]::WriteAllText($temporary, ($Payload | ConvertTo-Json -Compress -Depth 10), [Text.UTF8Encoding]::new($false))
     Move-Item -LiteralPath $temporary -Destination $Path -Force
+}
+
+function Update-BrokerHeartbeat {
+    try {
+        [IO.File]::WriteAllText(
+            $heartbeatPath,
+            [DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString(),
+            [Text.Encoding]::ASCII
+        )
+    }
+    catch { }
+}
+
+function Clear-StaleBrokerArtifacts {
+    # A broker restart invalidates unfinished IPC. Replaying an interactive
+    # action is unsafe because we cannot know whether it already happened.
+    foreach ($pattern in @("*.request", "*.processing", "*.response")) {
+        Get-ChildItem -LiteralPath $queueRoot -Filter $pattern -File -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+    $cutoff = (Get-Date).AddDays(-$workRetentionDays)
+    Get-ChildItem -LiteralPath $queueRoot -Directory -Filter "work-*" -ErrorAction SilentlyContinue |
+        Where-Object LastWriteTime -lt $cutoff |
+        ForEach-Object {
+            try { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction Stop }
+            catch { Write-BrokerLog "STALE_WORK_CLEANUP_FAILED path=$($_.FullName) error=$($_.Exception.Message)" }
+        }
 }
 
 function Complete-Request([string]$RequestId, [hashtable]$Response) {
@@ -244,6 +274,42 @@ function Handle-ExecRequest([string]$RequestId, $Request) {
     }
     if (-not (Test-Path -LiteralPath $workingDirectory -PathType Container)) {
         Complete-Request $RequestId @{ ok = $false; error = "INTERACTIVE_WORKDIR_INVALID"; message = "Interactive command working directory does not exist."; retryable = $false }
+        return
+    }
+
+    $parseTokens = $null
+    $parseErrors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseInput(
+        $command,
+        [ref]$parseTokens,
+        [ref]$parseErrors
+    )
+    if ($parseErrors.Count -gt 0) {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $parseMessage = (@($parseErrors | ForEach-Object { $_.Message }) -join [Environment]::NewLine).Trim()
+        Complete-Request $RequestId @{
+            ok = $true
+            status = "exited"
+            exit_code = 1
+            timed_out = $false
+            elapsed_ms = 0
+            process_id = $null
+            stdout = ""
+            stderr = $parseMessage
+            stdout_total_bytes = 0
+            stderr_total_bytes = [Text.Encoding]::UTF8.GetByteCount($parseMessage)
+            stdout_truncated = $false
+            stderr_truncated = $false
+            execution_context = "active_user"
+            execution_identity = @{
+                username = $identity.Name
+                session_id = [Diagnostics.Process]::GetCurrentProcess().SessionId
+                elevated = $false
+                run_level = "limited"
+            }
+            message = "Interactive command contains a PowerShell syntax error."
+            retryable = $false
+        }
         return
     }
     $timeoutMs = [Math]::Max(1000, [Math]::Min($timeoutMs, 600000))
@@ -710,6 +776,7 @@ try {
     if (-not (Test-Path -LiteralPath $queueRoot -PathType Container)) {
         throw "Interactive broker queue is missing: $queueRoot"
     }
+    Clear-StaleBrokerArtifacts
     $brokerIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $brokerPrincipal = [Security.Principal.WindowsPrincipal]::new($brokerIdentity)
     $brokerSessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
@@ -723,6 +790,7 @@ try {
     }
 
     Set-Content -LiteralPath $pidPath -Value ([Diagnostics.Process]::GetCurrentProcess().Id) -Encoding ASCII
+    Update-BrokerHeartbeat
     Write-BrokerLog "BOOT_PID_WRITTEN path=$pidPath"
     Write-AtomicJson $statusPath @{
         username = $brokerIdentity.Name
@@ -742,8 +810,13 @@ catch {
     throw
 }
 try {
+    $nextHeartbeat = [DateTimeOffset]::UtcNow
     while ($true) {
         if (Test-Path -LiteralPath $stopPath) { break }
+        if ([DateTimeOffset]::UtcNow -ge $nextHeartbeat) {
+            Update-BrokerHeartbeat
+            $nextHeartbeat = [DateTimeOffset]::UtcNow.AddSeconds($heartbeatIntervalSeconds)
+        }
         foreach ($requestPath in @(Get-ChildItem -LiteralPath $queueRoot -Filter "*.request" -File -ErrorAction SilentlyContinue | Sort-Object CreationTime)) {
             $processingPath = Join-Path $queueRoot "$([IO.Path]::GetFileNameWithoutExtension($requestPath.Name)).processing"
             try { Move-Item -LiteralPath $requestPath.FullName -Destination $processingPath -Force -ErrorAction Stop }
@@ -759,5 +832,5 @@ catch {
 }
 finally {
     Write-BrokerLog "STOP pid=$([Diagnostics.Process]::GetCurrentProcess().Id)"
-    Remove-Item -LiteralPath $stopPath,$pidPath,$statusPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $stopPath,$pidPath,$heartbeatPath,$statusPath -Force -ErrorAction SilentlyContinue
 }

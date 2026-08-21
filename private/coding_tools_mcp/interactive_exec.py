@@ -21,6 +21,7 @@ INTERACTIVE_QUEUE_ENV = "CODING_TOOLS_MCP_INTERACTIVE_QUEUE"
 DEFAULT_INTERACTIVE_QUEUE = Path(r"C:\ProgramData\WebGPTCodingToolsMCPService\interactive-requests")
 INTERACTIVE_PROTOCOL_VERSION = 1
 INTERACTIVE_REQUEST_TTL_SECONDS = 900
+BROKER_HEARTBEAT_TTL_SECONDS = 30.0
 
 
 def interactive_queue_path() -> Path:
@@ -72,10 +73,18 @@ def _process_is_alive(pid: int) -> bool:
         kernel32.CloseHandle(handle)
 
 
+def _heartbeat_is_fresh(queue: Path) -> bool:
+    try:
+        age = time.time() - (queue / "broker.heartbeat").stat().st_mtime
+    except OSError:
+        return False
+    return -30.0 <= age <= BROKER_HEARTBEAT_TTL_SECONDS
+
+
 def interactive_broker_status() -> dict[str, Any]:
     queue = interactive_queue_path()
     pid = _broker_pid(queue) if queue.is_dir() else None
-    alive = bool(pid and _process_is_alive(pid))
+    alive = bool(pid and _process_is_alive(pid) and _heartbeat_is_fresh(queue))
     status_payload: dict[str, Any] = {}
     status_path = queue / "broker.status.json"
     if status_path.is_file():

@@ -10,7 +10,7 @@ if errorlevel 1 (
 :menu
 cls
 echo ==========================================
-echo   Web GPT MCP - Windows Service Manager
+echo   Coding Tools - Windows Service Manager
 echo ==========================================
 echo.
 sc query WebGPTCodingToolsMCP | findstr /I "STATE"
@@ -36,17 +36,17 @@ if errorlevel 10 (
   goto menu
 )
 if errorlevel 9 (
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0service\update-private-mcp.ps1" -Rollback
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0update-coding-tools.ps1" -Rollback
   pause
   goto menu
 )
 if errorlevel 8 (
-  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0service\update-private-mcp.ps1"
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0update-coding-tools.ps1"
   pause
   goto menu
 )
 if errorlevel 7 (
-  start "Web GPT MCP health" "http://127.0.0.1:8766/"
+  start "Coding Tools health" "http://127.0.0.1:8766/"
   goto menu
 )
 if errorlevel 6 (

@@ -6,6 +6,7 @@ using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Web.Script.Serialization;
@@ -16,6 +17,21 @@ using System.Windows.Forms;
 internal static class ComputerUseHelper
 {
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 };
+
+    private const uint MouseEventLeftDown = 0x0002;
+    private const uint MouseEventLeftUp = 0x0004;
+    private const uint MouseEventRightDown = 0x0008;
+    private const uint MouseEventRightUp = 0x0010;
+    private const uint PrintWindowRenderFullContent = 0x00000002;
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetCursorPos(int x, int y);
+
+    [DllImport("user32.dll")]
+    private static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint flags);
 
     private sealed class ElementEntry
     {
@@ -40,8 +56,16 @@ internal static class ComputerUseHelper
             if (String.IsNullOrWhiteSpace(encoded)) throw new InvalidOperationException("--request-base64 is required.");
             var requestJson = Encoding.UTF8.GetString(Convert.FromBase64String(encoded));
             var request = Json.Deserialize<Dictionary<string, object>>(requestJson);
-            TouchComputerUseOverlay(request);
-            var response = Handle(request);
+            var overlayLease = BeginComputerUseOverlay(request);
+            Dictionary<string, object> response;
+            try
+            {
+                response = Handle(request);
+            }
+            finally
+            {
+                EndComputerUseOverlay(overlayLease);
+            }
             var serialized = Json.Serialize(response);
             if (!String.IsNullOrWhiteSpace(responseFile))
             {
@@ -77,7 +101,7 @@ internal static class ComputerUseHelper
         }
     }
 
-    private static void TouchComputerUseOverlay(Dictionary<string, object> request)
+    private static string BeginComputerUseOverlay(Dictionary<string, object> request)
     {
         // Keep the visual safety indicator at the lowest shared execution layer.
         // This guarantees Browser Use / Computer Use still shows the mascot even
@@ -88,22 +112,24 @@ internal static class ComputerUseHelper
             var serviceRoot = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             var queueRoot = Path.Combine(serviceRoot, "interactive-requests");
             var overlayPath = Path.Combine(serviceRoot, "computer-use-overlay.exe");
-            var heartbeatPath = Path.Combine(queueRoot, "computer-use-overlay.heartbeat");
-            var stopPath = Path.Combine(queueRoot, "computer-use-overlay.stop");
+            var leasesRoot = Path.Combine(queueRoot, "computer-use-overlay-leases");
             var pidPath = Path.Combine(queueRoot, "computer-use-overlay.pid");
             var mascotPath = Path.Combine(serviceRoot, "assets", "human-help-mascot.png");
             var browserOnly = GetBool(request, "browser_only", false);
             var mode = browserOnly ? "browser" : "computer";
             var action = GetString(request, "action", "inspect").Trim().ToLowerInvariant();
 
-            Directory.CreateDirectory(queueRoot);
-            try { if (File.Exists(stopPath)) File.Delete(stopPath); } catch { }
+            Directory.CreateDirectory(leasesRoot);
+            var leasePath = Path.Combine(
+                leasesRoot,
+                Process.GetCurrentProcess().Id.ToString() + "-" + Guid.NewGuid().ToString("N") + ".lease"
+            );
             File.WriteAllText(
-                heartbeatPath,
+                leasePath,
                 mode + "|" + action + "|" + DateTimeOffset.Now.ToString("o"),
                 new UTF8Encoding(false)
             );
-            if (!File.Exists(overlayPath)) return;
+            if (!File.Exists(overlayPath)) return leasePath;
 
             if (File.Exists(pidPath))
             {
@@ -113,7 +139,7 @@ internal static class ComputerUseHelper
                     try
                     {
                         var existing = Process.GetProcessById(overlayPid);
-                        if (!existing.HasExited) return;
+                        if (!existing.HasExited) return leasePath;
                     }
                     catch { }
                 }
@@ -122,8 +148,7 @@ internal static class ComputerUseHelper
             var startInfo = new ProcessStartInfo
             {
                 FileName = overlayPath,
-                Arguments = "--heartbeat " + QuoteArgument(heartbeatPath)
-                    + " --stop " + QuoteArgument(stopPath)
+                Arguments = "--leases-dir " + QuoteArgument(leasesRoot)
                     + " --pid " + QuoteArgument(pidPath)
                     + " --mascot " + QuoteArgument(mascotPath),
                 WorkingDirectory = serviceRoot,
@@ -131,12 +156,21 @@ internal static class ComputerUseHelper
                 CreateNoWindow = true
             };
             Process.Start(startInfo);
+            return leasePath;
         }
         catch
         {
             // The overlay is a user-visible indicator, never a reason to fail the
             // underlying bounded UI action.
+            return null;
         }
+    }
+
+    private static void EndComputerUseOverlay(string leasePath)
+    {
+        if (String.IsNullOrWhiteSpace(leasePath)) return;
+        try { if (File.Exists(leasePath)) File.Delete(leasePath); }
+        catch { }
     }
 
     private static string QuoteArgument(string value)
@@ -150,6 +184,7 @@ internal static class ComputerUseHelper
         {
             var action = GetString(request, "action", "inspect").Trim().ToLowerInvariant();
             bool browserOnly = GetBool(request, "browser_only", false);
+            AssertActionSupported(action, browserOnly);
             if (action == "list_windows")
             {
                 return Ok(new Dictionary<string, object>
@@ -164,18 +199,20 @@ internal static class ComputerUseHelper
             AssertAllowedWindow(window);
             long windowId = Convert.ToInt64(window["id"]);
 
-            if (action == "inspect") ActivateWindow(windowId);
+            if (action == "inspect") { }
             else if (action == "screenshot") { }
             else if (action == "activate") ActivateWindow(windowId);
             else if (action == "click")
             {
                 ActivateWindow(windowId);
-                InvokeElement(ResolveElement(request, windowId));
+                ClickTarget(request, windowId, false);
                 Thread.Sleep(120);
             }
             else if (action == "right_click")
             {
-                throw new InvalidOperationException("right_click is not supported by the UI Automation backend.");
+                ActivateWindow(windowId);
+                ClickTarget(request, windowId, true);
+                Thread.Sleep(120);
             }
             else if (action == "type_text")
             {
@@ -258,6 +295,20 @@ internal static class ComputerUseHelper
                 { "retryable", true }
             };
         }
+    }
+
+    private static void AssertActionSupported(string action, bool browserOnly)
+    {
+        var contractPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "computer-use-actions.json");
+        if (!File.Exists(contractPath))
+            throw new InvalidOperationException("Computer Use action contract is missing: " + contractPath);
+        var contract = Json.Deserialize<Dictionary<string, string[]>>(File.ReadAllText(contractPath, Encoding.UTF8));
+        var key = browserOnly ? "browser_use" : "computer_use";
+        string[] actions;
+        if (contract == null || !contract.TryGetValue(key, out actions) || actions == null)
+            throw new InvalidOperationException("Computer Use action contract is invalid for " + key + ".");
+        if (!actions.Contains(action, StringComparer.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Unsupported Computer Use action: " + action);
     }
 
     private static Dictionary<string, object> Ok(Dictionary<string, object> payload)
@@ -436,20 +487,74 @@ internal static class ComputerUseHelper
         Thread.Sleep(80);
     }
 
-    private static void InvokeElement(AutomationElement element)
+    private static bool TryInvokeElement(AutomationElement element)
     {
         object raw;
-        if (element.TryGetCurrentPattern(InvokePattern.Pattern, out raw)) { ((InvokePattern)raw).Invoke(); return; }
-        if (element.TryGetCurrentPattern(SelectionItemPattern.Pattern, out raw)) { ((SelectionItemPattern)raw).Select(); return; }
-        if (element.TryGetCurrentPattern(TogglePattern.Pattern, out raw)) { ((TogglePattern)raw).Toggle(); return; }
+        if (element.TryGetCurrentPattern(InvokePattern.Pattern, out raw)) { ((InvokePattern)raw).Invoke(); return true; }
+        if (element.TryGetCurrentPattern(SelectionItemPattern.Pattern, out raw)) { ((SelectionItemPattern)raw).Select(); return true; }
+        if (element.TryGetCurrentPattern(TogglePattern.Pattern, out raw)) { ((TogglePattern)raw).Toggle(); return true; }
         if (element.TryGetCurrentPattern(ExpandCollapsePattern.Pattern, out raw))
         {
             var pattern = (ExpandCollapsePattern)raw;
             if (pattern.Current.ExpandCollapseState == ExpandCollapseState.Expanded) pattern.Collapse(); else pattern.Expand();
+            return true;
+        }
+        return false;
+    }
+
+    private static void ClickTarget(Dictionary<string, object> request, long windowId, bool rightClick)
+    {
+        if (request.ContainsKey("element_index") && request["element_index"] != null)
+        {
+            var element = ResolveElement(request, windowId);
+            if (!rightClick && TryInvokeElement(element)) return;
+
+            Rect elementRect = element.Current.BoundingRectangle;
+            if (elementRect.IsEmpty || elementRect.Width <= 1 || elementRect.Height <= 1)
+                throw new InvalidOperationException("The target element has no usable screen bounds for a physical click.");
+            MouseClickScreenPoint(
+                (int)Math.Round(elementRect.X + elementRect.Width / 2.0),
+                (int)Math.Round(elementRect.Y + elementRect.Height / 2.0),
+                rightClick
+            );
             return;
         }
-        try { element.SetFocus(); return; }
-        catch { throw new InvalidOperationException("The target element does not expose an invokable UI Automation pattern."); }
+
+        if (!request.ContainsKey("x") || request["x"] == null || !request.ContainsKey("y") || request["y"] == null)
+            throw new InvalidOperationException("element_index or x/y is required for this action.");
+
+        var root = GetRoot(windowId);
+        Rect rootRect = root.Current.BoundingRectangle;
+        if (rootRect.IsEmpty || rootRect.Width <= 1 || rootRect.Height <= 1)
+            throw new InvalidOperationException("Target window has no usable screen bounds.");
+
+        double x = Convert.ToDouble(request["x"]);
+        double y = Convert.ToDouble(request["y"]);
+        if (x < 0 || y < 0 || x >= rootRect.Width || y >= rootRect.Height)
+            throw new InvalidOperationException("The requested click coordinates fall outside the target window.");
+
+        MouseClickScreenPoint(
+            (int)Math.Round(rootRect.X + x),
+            (int)Math.Round(rootRect.Y + y),
+            rightClick
+        );
+    }
+
+    private static void MouseClickScreenPoint(int x, int y, bool rightClick)
+    {
+        if (!SetCursorPos(x, y))
+            throw new InvalidOperationException("Windows refused to move the pointer to the requested click target.");
+        Thread.Sleep(30);
+        if (rightClick)
+        {
+            mouse_event(MouseEventRightDown, 0, 0, 0, UIntPtr.Zero);
+            mouse_event(MouseEventRightUp, 0, 0, 0, UIntPtr.Zero);
+        }
+        else
+        {
+            mouse_event(MouseEventLeftDown, 0, 0, 0, UIntPtr.Zero);
+            mouse_event(MouseEventLeftUp, 0, 0, 0, UIntPtr.Zero);
+        }
     }
 
     private static void SetElementValue(AutomationElement element, string value)
@@ -498,7 +603,6 @@ internal static class ComputerUseHelper
 
     private static Tuple<byte[], int, int> Capture(long windowId)
     {
-        ActivateWindow(windowId);
         var root = GetRoot(windowId);
         Rect rect = root.Current.BoundingRectangle;
         if (rect.IsEmpty || rect.Width <= 1 || rect.Height <= 1) throw new InvalidOperationException("Could not read target window bounds.");
@@ -507,7 +611,20 @@ internal static class ComputerUseHelper
         using (var bitmap = new Bitmap(width, height, PixelFormat.Format32bppArgb))
         using (var graphics = Graphics.FromImage(bitmap))
         {
-            graphics.CopyFromScreen((int)rect.X, (int)rect.Y, 0, 0, new System.Drawing.Size(width, height));
+            bool captured = false;
+            IntPtr hdc = IntPtr.Zero;
+            try
+            {
+                hdc = graphics.GetHdc();
+                captured = PrintWindow(new IntPtr(windowId), hdc, PrintWindowRenderFullContent);
+            }
+            catch { captured = false; }
+            finally
+            {
+                if (hdc != IntPtr.Zero) graphics.ReleaseHdc(hdc);
+            }
+            if (!captured)
+                graphics.CopyFromScreen((int)rect.X, (int)rect.Y, 0, 0, new System.Drawing.Size(width, height));
             Bitmap output = bitmap;
             Bitmap scaled = null;
             double scale = Math.Min(1.0, Math.Min(1600.0 / width, 1000.0 / height));

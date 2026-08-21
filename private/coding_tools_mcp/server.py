@@ -84,6 +84,7 @@ from .processes import (
 )
 from .protocol import (
     PROTOCOL_VERSION,
+    STATELESS_PROTOCOL_VERSION,
     SUPPORTED_PROTOCOL_VERSIONS,
     dispatch_rpc,
     jsonrpc_error,
@@ -129,8 +130,7 @@ ACTIVITY_INLINE_SECRET_RE = re.compile(
 ACTIVITY_BEARER_RE = re.compile(r"(?i)\bBearer\s+\S+")
 ACTIVITY_LONG_VALUE_RE = re.compile(r"(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{96,}={0,2}(?![A-Za-z0-9+/])")
 ACTIVITY_REQUEST_BASE64_RE = re.compile(r"(?i)(--request-base64\s+)\S+")
-ACTIVITY_LOG_MAX_BYTES = 2 * 1024 * 1024
-ACTIVITY_LOG_KEEP_BYTES = 1024 * 1024
+ACTIVITY_LOG_RETENTION_DAYS = 7
 ACTIVITY_LOG_LOCK = threading.Lock()
 ACTIVITY_LOG_PATH = (
     Path(
@@ -159,6 +159,53 @@ RISKY_ENV_NAMES = {
 SHELL_ENV_INHERIT_CHOICES = ("core", "all", "none")
 WORKSPACE_ALLOWLIST_ENV = f"{ENV_PREFIX}_WORKSPACE_ALLOWLIST"
 EXECUTABLE_ALLOWLIST_ENV = f"{ENV_PREFIX}_EXECUTABLE_ALLOWLIST"
+
+
+@functools.cache
+def runtime_build_identity() -> dict[str, Any]:
+    path = Path(__file__).with_name("build-identity.json")
+    payload: dict[str, Any] = {
+        "package_version": __version__,
+        "display_version": __version__,
+        "git_sha": None,
+        "dirty": None,
+        "build_id": None,
+    }
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(loaded, dict):
+            payload.update({key: loaded.get(key) for key in payload if key in loaded})
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        pass
+    return payload
+
+
+def runtime_version() -> str:
+    return str(runtime_build_identity().get("display_version") or __version__)
+
+
+def summarize_exception(exc: BaseException) -> tuple[str, list[str]]:
+    """Expose useful leaf errors instead of opaque ExceptionGroup/TaskGroup text."""
+
+    leaves: list[str] = []
+
+    def collect(current: BaseException) -> None:
+        if isinstance(current, BaseExceptionGroup):
+            for child in current.exceptions:
+                collect(child)
+            return
+        message = str(current).strip() or current.__class__.__name__
+        leaves.append(f"{current.__class__.__name__}: {message}")
+
+    collect(exc)
+    unique: list[str] = []
+    for leaf in leaves:
+        if leaf not in unique:
+            unique.append(leaf)
+    if not unique:
+        unique = [f"{exc.__class__.__name__}: {str(exc).strip() or 'unknown error'}"]
+    summary = unique[0] if len(unique) == 1 else " | ".join(unique[:4])
+    return summary, unique[:16]
 
 
 @dataclass(frozen=True)
@@ -854,7 +901,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "set_default_cwd": ToolSpec(
         title="Set default cwd",
-        description="Use when entering a project. It persists across connector reconnects for this owner/workspace and controls later relative tool paths.",
+        description="Enter a project. If the ChatGPT Web Project name is known, pass project_name to select a same-named first-level directory or workspace-root fallback. Persists across reconnects and relative paths.",
         idempotent=True,
     ),
     "read_file": ToolSpec(
@@ -1972,11 +2019,11 @@ class Runtime:
         self.telemetry.record_session_start(client_info, self.protocol_version)
         return {
             "protocolVersion": self.protocol_version,
-            "capabilities": {"tools": {"listChanged": False}},
+            "capabilities": {"tools": {"listChanged": True}},
             "serverInfo": {
                 "name": SERVER_NAME,
                 "title": SERVER_TITLE,
-                "version": __version__,
+                "version": runtime_version(),
             },
             "instructions": self.project_context.server_instructions(),
         }
@@ -2168,7 +2215,8 @@ class Runtime:
         return {
             "server": SERVER_NAME,
             "title": SERVER_TITLE,
-            "version": __version__,
+            "version": runtime_version(),
+            "build_identity": runtime_build_identity(),
             "protocol_version": self.protocol_version,
             **self._exec_environment_summary(),
             "workspace_allowlist": [
@@ -2230,16 +2278,6 @@ class Runtime:
             raise JsonRpcError(-32602, f"Unknown tool: {name}", {"reason": "unknown_tool"})
         spec = TOOL_REGISTRY[name]
         validate_arguments(name, args)
-        if name not in {"browser_use", "computer_use"} and os.name == "nt":
-            try:
-                queue = interactive_queue_path()
-                queue.mkdir(parents=True, exist_ok=True)
-                (queue / "computer-use-overlay.stop").write_text(
-                    datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
-                    encoding="utf-8",
-                )
-            except OSError:
-                pass
         try:
             append_activity_start(name, args)
             self.request_context.request_id = request_id
@@ -2292,15 +2330,16 @@ class Runtime:
             self.emit_tool_trace(name, args, payload, started_at)
             return make_tool_result(name, payload, is_error=True)
         except Exception as exc:  # noqa: BLE001 - tool failures must stay structured
+            error_message, error_leaves = summarize_exception(exc)
             payload = {
                 "ok": False,
                 "error": {
                     "code": "INTERNAL_ERROR",
                     "kind": "runtime_error",
-                    "message": str(exc),
+                    "message": error_message,
                     "category": "internal",
                     "retryable": False,
-                    "details": {},
+                    "details": {"leaf_errors": error_leaves},
                 },
             }
             if spec.error_status:
@@ -2545,6 +2584,30 @@ class Runtime:
         }
 
     def set_default_cwd(self, args: dict[str, Any]) -> dict[str, Any]:
+        project_name = str(args.get("project_name") or "").strip()
+        if project_name:
+            if project_name in {".", ".."} or "/" in project_name or "\\" in project_name:
+                raise ToolFailure(
+                    "INVALID_PROJECT_NAME",
+                    "project_name must be a single first-level workspace directory name.",
+                    category="validation",
+                )
+            exact_match: Path | None = None
+            folded_matches: list[Path] = []
+            try:
+                for child in self.workspace.root.iterdir():
+                    if not child.is_dir():
+                        continue
+                    if child.name == project_name:
+                        exact_match = child
+                        break
+                    if child.name.casefold() == project_name.casefold():
+                        folded_matches.append(child)
+            except OSError:
+                folded_matches = []
+            selected = exact_match or (folded_matches[0] if len(folded_matches) == 1 else self.workspace.root)
+            return self._store_default_cwd(selected)
+
         resolved = self.workspace.resolve_existing(str(args.get("path", ".")))
         if not resolved.path.is_dir():
             raise ToolFailure("NOT_A_DIRECTORY", "Default cwd must be a directory.", category="validation")
@@ -5726,13 +5789,46 @@ def _activity_start_lines(name: str, args: dict[str, Any]) -> list[str]:
     return [f"[{stamp}] ▶ {name}"]
 
 
+def _prepare_activity_log_for_write() -> None:
+    if ACTIVITY_LOG_PATH is None:
+        return
+    ACTIVITY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now().astimezone()
+    if ACTIVITY_LOG_PATH.exists():
+        try:
+            last_write = datetime.fromtimestamp(ACTIVITY_LOG_PATH.stat().st_mtime).astimezone()
+            if last_write.date() != now.date():
+                archive = ACTIVITY_LOG_PATH.with_name(
+                    f"{ACTIVITY_LOG_PATH.stem}-{last_write.date().isoformat()}{ACTIVITY_LOG_PATH.suffix}"
+                )
+                if archive.exists():
+                    archive = ACTIVITY_LOG_PATH.with_name(
+                        f"{ACTIVITY_LOG_PATH.stem}-{last_write.strftime('%Y-%m-%d-%H%M%S')}{ACTIVITY_LOG_PATH.suffix}"
+                    )
+                os.replace(ACTIVITY_LOG_PATH, archive)
+        except OSError:
+            pass
+
+    cutoff = time.time() - ACTIVITY_LOG_RETENTION_DAYS * 24 * 60 * 60
+    try:
+        pattern = f"{ACTIVITY_LOG_PATH.stem}-*{ACTIVITY_LOG_PATH.suffix}"
+        for archived in ACTIVITY_LOG_PATH.parent.glob(pattern):
+            try:
+                if archived.stat().st_mtime < cutoff:
+                    archived.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
 def append_activity_start(name: str, args: dict[str, Any]) -> None:
     if ACTIVITY_LOG_PATH is None:
         return
     try:
         block = "\n".join(_activity_start_lines(name, args)) + "\n"
         with ACTIVITY_LOG_LOCK:
-            ACTIVITY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _prepare_activity_log_for_write()
             with ACTIVITY_LOG_PATH.open("a", encoding="utf-8", newline="\n") as handle:
                 handle.write(block)
     except Exception:
@@ -5751,14 +5847,7 @@ def append_activity_log(
         lines = _activity_log_lines(name, args, payload, duration_ms)
         block = "\n".join(lines) + "\n\n"
         with ACTIVITY_LOG_LOCK:
-            ACTIVITY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-            if ACTIVITY_LOG_PATH.exists() and ACTIVITY_LOG_PATH.stat().st_size > ACTIVITY_LOG_MAX_BYTES:
-                raw = ACTIVITY_LOG_PATH.read_bytes()
-                tail = raw[-ACTIVITY_LOG_KEEP_BYTES:].decode("utf-8", errors="replace")
-                ACTIVITY_LOG_PATH.write_text(
-                    "[activity log rotated]\n" + tail,
-                    encoding="utf-8",
-                )
+            _prepare_activity_log_for_write()
             with ACTIVITY_LOG_PATH.open("a", encoding="utf-8", newline="\n") as handle:
                 handle.write(block)
     except Exception:
@@ -6292,6 +6381,23 @@ def tool_annotations(name: str, *, fake_readonly: bool = False) -> dict[str, Any
 
 
 @functools.cache
+def computer_use_action_contract() -> dict[str, tuple[str, ...]]:
+    path = Path(__file__).with_name("computer-use-actions.json")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise RuntimeError("Computer Use action contract must be a JSON object")
+    contract: dict[str, tuple[str, ...]] = {}
+    for surface in ("computer_use", "browser_use"):
+        values = raw.get(surface)
+        if not isinstance(values, list) or not values or not all(isinstance(value, str) and value for value in values):
+            raise RuntimeError(f"Computer Use action contract is invalid for {surface}")
+        if len(values) != len(set(values)):
+            raise RuntimeError(f"Computer Use action contract contains duplicates for {surface}")
+        contract[surface] = tuple(values)
+    return contract
+
+
+@functools.cache
 def input_schemas() -> dict[str, dict[str, Any]]:
     # Cached: callers only read the returned tree, and rebuilding the full
     # ~190-line schema dict on every tools/call dispatch is measurable.
@@ -6337,17 +6443,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "action": {
                     **string,
-                    "enum": [
-                        "list_windows",
-                        "inspect",
-                        "screenshot",
-                        "activate",
-                        "click",
-                        "right_click",
-                        "type_text",
-                        "press_key",
-                        "scroll",
-                    ],
+                    "enum": list(computer_use_action_contract()["computer_use"]),
                     "default": "inspect",
                 },
                 "window_id": integer,
@@ -6368,18 +6464,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "action": {
                     **string,
-                    "enum": [
-                        "list_windows",
-                        "inspect",
-                        "screenshot",
-                        "activate",
-                        "click",
-                        "right_click",
-                        "type_text",
-                        "press_key",
-                        "scroll",
-                        "navigate",
-                    ],
+                    "enum": list(computer_use_action_contract()["browser_use"]),
                     "default": "inspect",
                 },
                 "window_id": integer,
@@ -6412,6 +6497,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
         "set_default_cwd": object_schema(
             {
                 "path": {**string, "default": "."},
+                "project_name": {**string, "minLength": 1, "maxLength": 255},
             }
         ),
         "read_file": object_schema(
@@ -6696,7 +6782,7 @@ def server_card_payload(runtime: Runtime, *, oauth_base_url: str | None = None) 
         "server": {
             "name": SERVER_NAME,
             "title": SERVER_TITLE,
-            "version": __version__,
+            "version": runtime_version(),
         },
         "transport": {
             "type": "streamable_http",
@@ -6712,7 +6798,7 @@ def server_card_payload(runtime: Runtime, *, oauth_base_url: str | None = None) 
             "annotationOverride": ("fake_readonly" if runtime.fake_readonly_annotations else None),
         },
         "capabilities": {
-            "tools": {"listChanged": False},
+            "tools": {"listChanged": True},
         },
     }
     return payload
@@ -6795,6 +6881,86 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         self.send_cors_headers()
         self.end_headers()
 
+    def _read_mcp_body(self) -> bytes | None:
+        """Read an MCP request body with both fixed-length and chunked HTTP framing."""
+
+        transfer_encoding = self.headers.get("Transfer-Encoding", "").strip().lower()
+        raw_length = self.headers.get("Content-Length")
+        if transfer_encoding:
+            codings = [item.strip() for item in transfer_encoding.split(",") if item.strip()]
+            if codings != ["chunked"] or raw_length is not None:
+                self.close_connection = True
+                self.send_rpc_error(-32600, "Only chunked Transfer-Encoding is supported", status=400)
+                return None
+            body = bytearray()
+            while True:
+                line = self.rfile.readline(8192)
+                if not line or not line.endswith(b"\r\n"):
+                    self.close_connection = True
+                    self.send_rpc_error(-32700, "Malformed chunked request body")
+                    return None
+                size_text = line[:-2].split(b";", 1)[0].strip()
+                try:
+                    size = int(size_text, 16)
+                except ValueError:
+                    self.close_connection = True
+                    self.send_rpc_error(-32700, "Malformed chunk size")
+                    return None
+                if size < 0 or len(body) + size > MAX_HTTP_REQUEST_BYTES:
+                    self.close_connection = True
+                    self.send_rpc_error(
+                        -32600,
+                        "Request body exceeds maximum size",
+                        status=413,
+                        data={"max_bytes": MAX_HTTP_REQUEST_BYTES},
+                    )
+                    return None
+                if size == 0:
+                    while True:
+                        trailer = self.rfile.readline(8192)
+                        if not trailer:
+                            self.close_connection = True
+                            self.send_rpc_error(-32700, "Malformed chunked trailers")
+                            return None
+                        if trailer in {b"\r\n", b"\n"}:
+                            return bytes(body)
+                chunk = self.rfile.read(size)
+                if len(chunk) != size or self.rfile.read(2) != b"\r\n":
+                    self.close_connection = True
+                    self.send_rpc_error(-32700, "Malformed chunked request body")
+                    return None
+                body.extend(chunk)
+
+        if raw_length is None:
+            self.close_connection = True
+            self.send_rpc_error(-32600, "Content-Length or chunked Transfer-Encoding is required", status=411)
+            return None
+        try:
+            length = int(raw_length)
+        except ValueError:
+            self.close_connection = True
+            self.send_rpc_error(-32600, "Content-Length must be a non-negative integer")
+            return None
+        if length < 0:
+            self.close_connection = True
+            self.send_rpc_error(-32600, "Content-Length must be a non-negative integer")
+            return None
+        if length > MAX_HTTP_REQUEST_BYTES:
+            self.close_connection = True
+            self.send_rpc_error(
+                -32600,
+                "Request body exceeds maximum size",
+                status=413,
+                data={"max_bytes": MAX_HTTP_REQUEST_BYTES},
+            )
+            return None
+        body = self.rfile.read(length)
+        if len(body) != length:
+            self.close_connection = True
+            self.send_rpc_error(-32700, "Incomplete request body")
+            return None
+        return body
+
     def handle_metadata_request(self, *, head_only: bool) -> None:
         request_path = self.path.split("?", 1)[0]
         normalized = posixpath.normpath(request_path)
@@ -6815,9 +6981,16 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             if not self.is_authorized():
                 self.send_unauthorized(head_only=head_only)
                 return
+            if not head_only and "text/event-stream" in self.headers.get("Accept", "").lower():
+                session_id = self.headers.get("Mcp-Session-Id")
+                if not session_id or self.server.sessions.get(session_id) is None:  # type: ignore[attr-defined]
+                    self.send_rpc_error(-32001, "Unknown MCP session", status=404)
+                    return
+                self.handle_tool_notification_stream(session_id)
+                return
             self.send_rpc_error(
                 -32000,
-                "SSE GET stream is not supported",
+                "GET /mcp requires Accept: text/event-stream and a valid Mcp-Session-Id",
                 status=405,
                 extra_headers={"Allow": "POST, DELETE"},
                 head_only=head_only,
@@ -6827,6 +7000,42 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             self.send_json(server_card_payload(self.runtime, oauth_base_url=self.oauth_base_url()), head_only=head_only)
             return
         self.send_json({"error": "Unknown endpoint"}, status=404, head_only=head_only)
+
+    def handle_tool_notification_stream(self, session_id: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache, no-transform")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Mcp-Session-Id", session_id)
+        self.send_cors_headers()
+        self.end_headers()
+        try:
+            self.connection.settimeout(None)
+        except OSError:
+            pass
+
+        generation = self.server.tool_list_generation  # type: ignore[attr-defined]
+        try:
+            while True:
+                # Keep the HTTP session from expiring while the notification
+                # stream is open, but do not count the stream as an in-flight
+                # tool call.
+                if self.server.sessions.get(session_id) is None:  # type: ignore[attr-defined]
+                    return
+                next_generation = self.server.wait_for_tool_list_change(generation, timeout=15.0)  # type: ignore[attr-defined]
+                if next_generation != generation:
+                    payload = json.dumps(
+                        {"jsonrpc": "2.0", "method": "notifications/tools/list_changed", "params": {}},
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    self.wfile.write(b"event: message\n")
+                    self.wfile.write(b"data: " + payload + b"\n\n")
+                    generation = next_generation
+                else:
+                    self.wfile.write(b": keepalive\n\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return
 
     def do_POST(self) -> None:
         request_path = self.path.split("?", 1)[0]
@@ -6845,44 +7054,29 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             return
         origin = self.headers.get("Origin")
         if origin and not is_allowed_origin(origin):
+            self.close_connection = True
             self.send_rpc_error(-32600, "Origin denied", status=403)
             return
         if not self.is_authorized():
+            self.close_connection = True
             self.send_unauthorized()
             return
         if self.headers.get_content_type().lower() != "application/json":
+            self.close_connection = True
             self.send_rpc_error(-32600, "Content-Type must be application/json", status=415)
             return
         protocol_version = self.headers.get("MCP-Protocol-Version")
         if protocol_version and not protocol_version_is_supported(protocol_version):
+            self.close_connection = True
             self.send_rpc_error(
                 -32600,
                 "Unsupported MCP protocol version",
                 data={"supported": list(SUPPORTED_PROTOCOL_VERSIONS), "received": protocol_version},
             )
             return
-        raw_length = self.headers.get("Content-Length")
-        if raw_length is None:
-            self.send_rpc_error(-32600, "Content-Length is required", status=411)
+        body = self._read_mcp_body()
+        if body is None:
             return
-        try:
-            length = int(raw_length)
-        except ValueError:
-            self.send_rpc_error(-32600, "Content-Length must be a non-negative integer")
-            return
-        if length < 0:
-            self.send_rpc_error(-32600, "Content-Length must be a non-negative integer")
-            return
-        if length > MAX_HTTP_REQUEST_BYTES:
-            self.close_connection = True
-            self.send_rpc_error(
-                -32600,
-                "Request body exceeds maximum size",
-                status=413,
-                data={"max_bytes": MAX_HTTP_REQUEST_BYTES},
-            )
-            return
-        body = self.rfile.read(length)
         try:
             request = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -6903,9 +7097,18 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             return
         method = request.get("method")
         session_id = self.headers.get("Mcp-Session-Id")
+        request_params = request.get("params") if isinstance(request.get("params"), dict) else {}
+        request_meta = request_params.get("_meta") if isinstance(request_params.get("_meta"), dict) else {}
+        stateless_request = (
+            method == "server/discover"
+            or protocol_version == STATELESS_PROTOCOL_VERSION
+            or request_meta.get("io.modelcontextprotocol/protocolVersion") == STATELESS_PROTOCOL_VERSION
+        )
         created_session = False
         leased_session_id: str | None = None
-        if method == "initialize":
+        if stateless_request:
+            self._runtime = self.server.control_runtime  # type: ignore[attr-defined]
+        elif method == "initialize":
             if session_id:
                 self.send_rpc_error(
                     -32600, "initialize must not include Mcp-Session-Id", request_id=request.get("id")
@@ -6991,9 +7194,30 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
 
     def handle_rpc(self, request: dict[str, Any]) -> dict[str, Any] | None:
         try:
+            if request.get("method") == "server/discover":
+                return {
+                    "jsonrpc": "2.0",
+                    "id": response_id(request),
+                    "result": {
+                        "resultType": "complete",
+                        "supportedVersions": list(SUPPORTED_PROTOCOL_VERSIONS),
+                        "capabilities": {"tools": {"listChanged": False}},
+                        "serverInfo": {
+                            "name": SERVER_NAME,
+                            "version": runtime_version(),
+                        },
+                        "instructions": self.runtime.project_context.server_instructions(),
+                    },
+                }
             return dispatch_rpc(self.runtime, request)
         except Exception as exc:  # noqa: BLE001 - HTTP must always answer with JSON-RPC
-            return jsonrpc_error(response_id(request), -32603, str(exc))
+            error_message, error_leaves = summarize_exception(exc)
+            return jsonrpc_error(
+                response_id(request),
+                -32603,
+                error_message,
+                {"exception_type": exc.__class__.__name__, "leaf_errors": error_leaves},
+            )
 
     def is_authorized(self) -> bool:
         if not self.runtime.auth_enabled():
@@ -7004,8 +7228,15 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 return True
         if self.runtime.oauth_config is not None and header.startswith("Bearer "):
             token = header[len("Bearer "):]
-            if validate_access_token(token, self.runtime.oauth_config, self.oauth_base_url()):
-                return True
+            base = self.oauth_base_url()
+            for audience in self.oauth_resource_urls():
+                if validate_access_token(
+                    token,
+                    self.runtime.oauth_config,
+                    base,
+                    audience=audience,
+                ):
+                    return True
         return False
 
     def session_owner(self) -> str | None:
@@ -7015,13 +7246,17 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if not header:
             return None
         if header.startswith("Bearer ") and self.runtime.oauth_config is not None:
-            client_id = access_token_client_id(
-                header[len("Bearer ") :],
-                self.runtime.oauth_config,
-                self.oauth_base_url(),
-            )
-            if client_id:
-                return "oauth-client:" + hashlib.sha256(client_id.encode("utf-8")).hexdigest()
+            token = header[len("Bearer ") :]
+            base = self.oauth_base_url()
+            for audience in self.oauth_resource_urls():
+                client_id = access_token_client_id(
+                    token,
+                    self.runtime.oauth_config,
+                    base,
+                    audience=audience,
+                )
+                if client_id:
+                    return "oauth-client:" + hashlib.sha256(client_id.encode("utf-8")).hexdigest()
         return hashlib.sha256(header.encode("utf-8")).hexdigest()
 
     def oauth_base_url(self) -> str:
@@ -7046,6 +7281,14 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             host_without_port = host.rsplit(":", 1)[0].strip("[]")
             proto = "http" if is_loopback_bind_host(host_without_port) else "https"
         return f"{proto}://{host}".rstrip("/")
+
+    def oauth_resource_urls(self) -> tuple[str, str]:
+        base = self.oauth_base_url()
+        return base, f"{base}{MCP_ENDPOINT_PATH}"
+
+    def normalize_oauth_resource(self, resource: str) -> str | None:
+        normalized = resource.rstrip("/")
+        return normalized if normalized in self.oauth_resource_urls() else None
 
     def send_unauthorized(self, *, head_only: bool = False) -> None:
         if self.runtime.oauth_config is not None:
@@ -7075,6 +7318,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 "registration_endpoint": f"{base}/oauth/register",
                 "response_types_supported": list(OAUTH_RESPONSE_TYPES_SUPPORTED),
                 "grant_types_supported": list(OAUTH_GRANT_TYPES_SUPPORTED),
+                "scopes_supported": ["mcp", "offline_access"],
                 "code_challenge_methods_supported": ["S256"],
                 "token_endpoint_auth_methods_supported": list(OAUTH_TOKEN_AUTH_METHODS),
             },
@@ -7088,7 +7332,12 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             return
         base = self.oauth_base_url()
         self.send_json(
-            {"resource": base, "authorization_servers": [base], "bearer_methods_supported": ["header"]},
+            {
+                "resource": f"{base}{MCP_ENDPOINT_PATH}",
+                "authorization_servers": [base],
+                "bearer_methods_supported": ["header"],
+                "scopes_supported": ["mcp", "offline_access"],
+            },
             head_only=head_only,
         )
 
@@ -7184,7 +7433,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if code_challenge_method != "S256" or not valid_pkce_challenge(code_challenge):
             self._send_html("<h2>Error</h2><p>code_challenge_method must be S256 and code_challenge is required</p>", status=400)
             return
-        if resource.rstrip("/") != self.oauth_base_url():
+        if self.normalize_oauth_resource(resource) is None:
             self._send_html("<h2>Error</h2><p>resource must identify this MCP server</p>", status=400)
             return
 
@@ -7232,7 +7481,8 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
         if code_challenge_method != "S256" or not valid_pkce_challenge(code_challenge):
             fail("Invalid PKCE parameters")
             return
-        if resource.rstrip("/") != self.oauth_base_url():
+        normalized_resource = self.normalize_oauth_resource(resource)
+        if normalized_resource is None:
             fail("Invalid resource")
             return
         if not secrets.compare_digest(password, cfg.password):
@@ -7250,7 +7500,7 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
                 "state": state,
                 "expires_at": now + OAUTH_CODE_TTL_SECONDS,
                 "server_url": self.oauth_base_url(),
-                "resource": resource.rstrip("/"),
+                "resource": normalized_resource,
             },
         )
 
@@ -7329,14 +7579,21 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             if not refresh_token or cfg.state_store is None:
                 _err("invalid_grant", "refresh_token is not available")
                 return
-            if not resource or not secrets.compare_digest(resource, self.oauth_base_url()):
+            normalized_resource = self.normalize_oauth_resource(resource)
+            if normalized_resource is None:
                 _err("invalid_target", "resource mismatch")
                 return
+            server_url = normalized_resource
             consumed, family_id = cfg.state_store.consume_refresh_token(refresh_token, client_id)
             if not consumed or family_id is None:
                 _err("invalid_grant", "Unknown, expired, or already-used refresh token")
                 return
-            access_token = create_access_token(cfg, server_url, client_id=client_id)
+            access_token = create_access_token(
+                cfg,
+                self.oauth_base_url(),
+                client_id=client_id,
+                audience=server_url,
+            )
             next_refresh, refresh_expires_at, _ = cfg.state_store.issue_refresh_token(
                 client_id, ttl=cfg.refresh_token_ttl, family_id=family_id
             )
@@ -7375,7 +7632,12 @@ class MCPHandler(http.server.BaseHTTPRequestHandler):
             _err("invalid_grant", "PKCE verification failed")
             return
 
-        access_token = create_access_token(cfg, server_url, client_id=client_id)
+        access_token = create_access_token(
+            cfg,
+            self.oauth_base_url(),
+            client_id=client_id,
+            audience=server_url,
+        )
         payload: dict[str, Any] = {
             "access_token": access_token,
             "token_type": "Bearer",
@@ -7464,10 +7726,10 @@ class MCPHealthHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path.split("?", 1)[0] in {"/", "/index.html"}:
             body = (
-                "<!doctype html><meta charset='utf-8'><title>Web GPT MCP</title>"
+                "<!doctype html><meta charset='utf-8'><title>Coding Tools MCP</title>"
                 "<style>body{font:15px system-ui;margin:2rem;max-width:60rem}"
                 "pre{background:#f4f4f4;padding:1rem;overflow:auto}</style>"
-                "<h1>Web GPT MCP</h1><pre id='status'>loading…</pre>"
+                "<h1>Coding Tools MCP</h1><pre id='status'>loading…</pre>"
                 "<script>fetch('/healthz').then(r=>r.json()).then(v=>status.textContent="
                 "JSON.stringify(v,null,2)).catch(e=>status.textContent=String(e))</script>"
             ).encode("utf-8")
@@ -7487,7 +7749,14 @@ class MCPHealthHandler(http.server.BaseHTTPRequestHandler):
         _write_http_body_safely(self, body)
 
     def do_POST(self) -> None:
-        if self.path.split("?", 1)[0] != "/prune":
+        request_path = self.path.split("?", 1)[0]
+        if request_path == "/notify-tools-changed":
+            generation = self.server.mcp_server.notify_tools_changed()
+            body = json.dumps(
+                {"status": "ok", "tool_list_generation": generation}, separators=(",", ":")
+            ).encode("utf-8")
+            self.send_response(200)
+        elif request_path != "/prune":
             body = b'{"error":"not_found"}'
             self.send_response(404)
         else:
@@ -7511,6 +7780,9 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
         handler: type[MCPHandler],
         control_runtime: Runtime,
         runtime_factory: Any,
+        *,
+        tool_list_state: dict[str, Any] | None = None,
+        enable_health: bool = True,
     ) -> None:
         super().__init__(address, handler)
         self.control_runtime = control_runtime
@@ -7518,8 +7790,14 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
         self.control_runtime.execution_registry.http_session_stats_provider = self.sessions.stats
         self.rate_limiter = SlidingWindowRateLimiter()
         self.started_at = time.time()
+        self._tool_list_state = tool_list_state or {
+            "condition": threading.Condition(),
+            "generation": 0,
+        }
         self.health_server: http.server.ThreadingHTTPServer | None = None
         self.health_thread: threading.Thread | None = None
+        if not enable_health:
+            return
         raw_health_port = (os.environ.get(f"{ENV_PREFIX}_HEALTH_PORT") or "8766").strip()
         try:
             health_port = int(raw_health_port)
@@ -7542,6 +7820,24 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
                 print(f"WARNING: local health endpoint disabled: {exc}", file=sys.stderr)
                 self.health_server = None
 
+    @property
+    def tool_list_generation(self) -> int:
+        return int(self._tool_list_state["generation"])
+
+    def notify_tools_changed(self) -> int:
+        condition = self._tool_list_state["condition"]
+        with condition:
+            self._tool_list_state["generation"] = int(self._tool_list_state["generation"]) + 1
+            condition.notify_all()
+            return int(self._tool_list_state["generation"])
+
+    def wait_for_tool_list_change(self, generation: int, *, timeout: float) -> int:
+        condition = self._tool_list_state["condition"]
+        with condition:
+            if int(self._tool_list_state["generation"]) == generation:
+                condition.wait(timeout=max(0.1, timeout))
+            return int(self._tool_list_state["generation"])
+
     def health_payload(self) -> dict[str, Any]:
         with self.control_runtime.sessions_lock:
             running_exec = len(self.control_runtime.sessions)
@@ -7549,6 +7845,8 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
         return {
             "status": "ok",
             "version": __version__,
+            "display_version": runtime_version(),
+            "build_identity": runtime_build_identity(),
             "started_at": datetime.fromtimestamp(self.started_at, tz=timezone.utc).isoformat(),
             "permission_mode": self.control_runtime.permission_mode,
             "dangerously_skip_all_permissions": self.control_runtime.dangerously_skip_all_permissions,
@@ -7790,7 +8088,124 @@ def run_http(args: argparse.Namespace) -> int:
             execution_registry=runtime.execution_registry,
         )
 
-    server = RuntimeHTTPServer((args.host, args.port), MCPHandler, runtime, runtime_factory)
+    tool_list_state: dict[str, Any] = {
+        "condition": threading.Condition(),
+        "generation": 0,
+    }
+    server = RuntimeHTTPServer(
+        (args.host, args.port),
+        MCPHandler,
+        runtime,
+        runtime_factory,
+        tool_list_state=tool_list_state,
+    )
+
+    tunnel_server: RuntimeHTTPServer | None = None
+    tunnel_thread: threading.Thread | None = None
+    raw_tunnel_port = (os.environ.get(f"{ENV_PREFIX}_TUNNEL_PORT") or "").strip()
+    if raw_tunnel_port:
+        try:
+            tunnel_port = int(raw_tunnel_port)
+        except ValueError:
+            print(f"ERROR: {ENV_PREFIX}_TUNNEL_PORT must be an integer.", file=sys.stderr)
+            server.server_close()
+            if oauth_config is not None:
+                oauth_config.close()
+            return 2
+        if not 1 <= tunnel_port <= 65535 or tunnel_port == int(args.port):
+            print(
+                f"ERROR: {ENV_PREFIX}_TUNNEL_PORT must be a different TCP port between 1 and 65535.",
+                file=sys.stderr,
+            )
+            server.server_close()
+            if oauth_config is not None:
+                oauth_config.close()
+            return 2
+        if runtime_policy.fake_readonly_annotations:
+            print(
+                f"ERROR: {ENV_PREFIX}_TUNNEL_PORT cannot be used with --dangerously-fake-readonly-annotations.",
+                file=sys.stderr,
+            )
+            server.server_close()
+            if oauth_config is not None:
+                oauth_config.close()
+            return 2
+
+        tunnel_runtime = build_runtime(
+            args,
+            runtime_policy,
+            auth_token=None,
+            oauth_config=None,
+            emit_warning=False,
+            project_context=runtime.project_context,
+            transport="http",
+            execution_registry=runtime.execution_registry,
+        )
+
+        def tunnel_runtime_factory() -> Runtime:
+            return build_runtime(
+                args,
+                runtime_policy,
+                auth_token=None,
+                oauth_config=None,
+                emit_warning=False,
+                project_context=runtime.project_context,
+                transport="http",
+                execution_registry=runtime.execution_registry,
+            )
+
+        try:
+            tunnel_server = RuntimeHTTPServer(
+                ("127.0.0.1", tunnel_port),
+                MCPHandler,
+                tunnel_runtime,
+                tunnel_runtime_factory,
+                tool_list_state=tool_list_state,
+                enable_health=False,
+            )
+        except OSError as exc:
+            tunnel_runtime.close()
+            print(
+                f"ERROR: could not bind local Secure MCP Tunnel listener on 127.0.0.1:{tunnel_port}: {exc}",
+                file=sys.stderr,
+            )
+            server.server_close()
+            if oauth_config is not None:
+                oauth_config.close()
+            return 2
+
+        def combined_http_session_stats() -> dict[str, int | float]:
+            primary = server.sessions.stats()
+            tunnel = tunnel_server.sessions.stats() if tunnel_server is not None else {}
+            additive = {
+                "active",
+                "in_flight",
+                "creating",
+                "max",
+                "expired",
+                "stale_in_flight_evicted",
+                "capacity_evicted",
+                "rejected",
+            }
+            maxima = {"oldest_age_seconds", "oldest_in_flight_seconds"}
+            merged: dict[str, int | float] = dict(primary)
+            for key in additive:
+                merged[key] = int(primary.get(key, 0)) + int(tunnel.get(key, 0))
+            for key in maxima:
+                merged[key] = max(float(primary.get(key, 0.0)), float(tunnel.get(key, 0.0)))
+            return merged
+
+        runtime.execution_registry.http_session_stats_provider = combined_http_session_stats
+        tunnel_thread = threading.Thread(
+            target=tunnel_server.serve_forever,
+            name="coding-tools-mcp-secure-tunnel",
+            daemon=True,
+        )
+        tunnel_thread.start()
+        print(
+            f"{SERVER_NAME} Secure MCP Tunnel listener on http://127.0.0.1:{tunnel_port}/mcp (loopback only, auth handled by tunnel)",
+            file=sys.stderr,
+        )
     if oauth_config:
         url_label = oauth_config.server_url or "dynamic request URL"
         suffix = " + bearer" if runtime.auth_token else ""
@@ -7806,6 +8221,9 @@ def run_http(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         return 130
     finally:
+        if tunnel_server is not None:
+            tunnel_server.shutdown()
+            tunnel_server.server_close()
         server.server_close()
         if oauth_config is not None:
             oauth_config.close()

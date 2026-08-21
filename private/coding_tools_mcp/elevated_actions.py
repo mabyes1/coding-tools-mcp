@@ -33,9 +33,10 @@ ELEVATED_ACTIONS = frozenset({
     "repair-vibedeck-virtual-display",
     "repair-vibedeck-autostart",
     "sync-installed-webroot",
-    "update-private-mcp",
+    "update-coding-tools",
 })
 ELEVATED_REQUEST_TTL_SECONDS = 900
+BROKER_HEARTBEAT_TTL_SECONDS = 30.0
 MCP_PERMISSION_NAMES = frozenset({
     "network",
     "destructive_command",
@@ -69,6 +70,12 @@ def _broker_is_alive(queue: Path) -> tuple[bool, int | None]:
     except (OSError, UnicodeDecodeError, ValueError):
         return False, None
     if pid <= 0:
+        return False, pid
+    try:
+        heartbeat_age = time.time() - (queue / "broker.heartbeat").stat().st_mtime
+    except OSError:
+        return False, pid
+    if heartbeat_age < -30.0 or heartbeat_age > BROKER_HEARTBEAT_TTL_SECONDS:
         return False, pid
     if os.name == "nt":
         # os.kill(pid, 0) is not a portable existence probe on Windows and

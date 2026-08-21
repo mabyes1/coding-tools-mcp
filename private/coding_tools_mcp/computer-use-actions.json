@@ -1,0 +1,25 @@
+{
+  "computer_use": [
+    "list_windows",
+    "inspect",
+    "screenshot",
+    "activate",
+    "click",
+    "right_click",
+    "type_text",
+    "press_key",
+    "scroll"
+  ],
+  "browser_use": [
+    "list_windows",
+    "inspect",
+    "screenshot",
+    "activate",
+    "click",
+    "right_click",
+    "type_text",
+    "press_key",
+    "scroll",
+    "navigate"
+  ]
+}

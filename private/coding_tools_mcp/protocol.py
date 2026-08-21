@@ -6,7 +6,8 @@ from .errors import JsonRpcError
 
 
 PROTOCOL_VERSION = "2025-11-25"
-SUPPORTED_PROTOCOL_VERSIONS = (PROTOCOL_VERSION, "2025-06-18")
+STATELESS_PROTOCOL_VERSION = "2026-07-28"
+SUPPORTED_PROTOCOL_VERSIONS = (PROTOCOL_VERSION, "2025-06-18", STATELESS_PROTOCOL_VERSION)
 
 
 def jsonrpc_error(
@@ -90,7 +91,10 @@ def dispatch_rpc(runtime: Any, request: dict[str, Any]) -> dict[str, Any] | None
         validate_rpc_envelope(request)
         method = request["method"]
         params = rpc_params(request)
-        if not runtime.initialized and method not in {"initialize", "ping"}:
+        request_meta = params.get("_meta")
+        stateless_version = request_meta.get("io.modelcontextprotocol/protocolVersion") if isinstance(request_meta, dict) else None
+        stateless_request = stateless_version == STATELESS_PROTOCOL_VERSION
+        if not runtime.initialized and method not in {"initialize", "ping"} and not stateless_request:
             raise JsonRpcError(-32002, "Server not initialized")
         if method == "initialize":
             if runtime.initialized:

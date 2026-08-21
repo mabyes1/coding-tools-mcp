@@ -7,10 +7,12 @@ $ErrorActionPreference = "Stop"
 $serviceRoot = "C:\ProgramData\WebGPTCodingToolsMCPService"
 $queueRoot = Join-Path $serviceRoot "elevated-requests"
 $pidPath = Join-Path $queueRoot "broker.pid"
+$heartbeatPath = Join-Path $queueRoot "broker.heartbeat"
 $stopPath = Join-Path $queueRoot "broker.stop"
 $logPath = Join-Path $queueRoot "broker.log"
 $protocolVersion = 1
 $requestTtlSeconds = 900
+$heartbeatIntervalSeconds = 5
 
 function Write-BrokerLog([string]$Message) {
     try {
@@ -18,6 +20,24 @@ function Write-BrokerLog([string]$Message) {
         [IO.File]::AppendAllText($logPath, "$timestamp $Message`r`n", [Text.UTF8Encoding]::new($false))
     }
     catch { }
+}
+
+function Update-BrokerHeartbeat {
+    try {
+        [IO.File]::WriteAllText(
+            $heartbeatPath,
+            [DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString(),
+            [Text.Encoding]::ASCII
+        )
+    }
+    catch { }
+}
+
+function Clear-StaleBrokerArtifacts {
+    foreach ($pattern in @("*.request", "*.processing", "*.response")) {
+        Get-ChildItem -LiteralPath $queueRoot -Filter $pattern -File -ErrorAction SilentlyContinue |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Get-Sha256Hex([string]$Path) {
@@ -47,63 +67,54 @@ $allowedAction = [ordered]@{
     }
     "install-interactive-broker" = @{
         ScriptPath = "D:\coding-tools-mcp\coding-tools-mcp\service\install-interactive-broker.ps1"
-        ExpectedSha256 = "4D1D3F959D16DA1894FF1B6631603FA9BBC20DCF09A2A9482CA6C2A7D147C7E5"
         Description = "Install or refresh the non-elevated signed-in desktop execution broker"
         Wait = $true
         Arguments = @()
     }
     "install-vibedeck-update" = @{
         ScriptPath = "D:\coding-tools-mcp\phoneMonitor\scripts\build-and-install-windows.ps1"
-        ExpectedSha256 = "A265E6C37C9E082033D2B499B4E3898CD61386403A7BA3DFDEA91FD32BA9010C"
         Description = "Build and install the validated VibeDeck update through the canonical Windows Setup path"
         Wait = $true
         Arguments = @("-SkipTests")
     }
     "install-vibedeck-webcodecs-lab" = @{
         ScriptPath = "D:\coding-tools-mcp\phoneMonitor-webcodecs\scripts\build-and-install-windows.ps1"
-        ExpectedSha256 = "0219A1992B618626079B179CB50D9045C8B49104246C7C2E76ECFADB3BCA4F9F"
         Description = "Build and install the isolated VibeDeck WebCodecs streaming lab worktree"
         Wait = $true
         Arguments = @("-SkipTests")
     }
     "install-vibedeck-virtual-display" = @{
         ScriptPath = "D:\coding-tools-mcp\phoneMonitor\src\PhoneMonitor.Host\Installers\install-virtual-display.ps1"
-        ExpectedSha256 = "A1C5C36406A7F6E74542BC4BDD645D27292C585943B7DCD74077658B76673B58"
         Description = "Install the pinned and verified production virtual display driver used by VibeDeck"
         Wait = $true
         Arguments = @("-ResultPath", "C:\ProgramData\VibeDeck\virtual-display-install-result.json")
     }
     "remove-legacy-phonemonitor-vdd" = @{
         ScriptPath = "D:\coding-tools-mcp\phoneMonitor\scripts\remove-legacy-phonemonitor-vdd.ps1"
-        ExpectedSha256 = "D74BDAC5B126243C4924F98E194B7F681CA504E7250A99F638586DF964CDA337"
         Description = "Remove only the legacy PhoneMonitor development display adapter after the production MttVDD is confirmed healthy"
         Wait = $true
         Arguments = @()
     }
     "remove-vibedeck-rescue-vdd" = @{
         ScriptPath = "D:\coding-tools-mcp\phoneMonitor\scripts\remove-rescue-vdd.ps1"
-        ExpectedSha256 = "784024F8D84B24244CC035805CE9DD15B8C879CD64935F3B1DCD65D7E2CAE833"
         Description = "Remove only the temporary MttVDD rescue display device while preserving the original PhoneMonitor display"
         Wait = $true
         Arguments = @()
     }
     "recover-vibedeck-stuck-setup" = @{
         ScriptPath = "D:\coding-tools-mcp\phoneMonitor\scripts\recover-stuck-vibedeck-setup.ps1"
-        ExpectedSha256 = "85F32FBED47320E01C28EE494739B391B445890884CF9EB73C60BB5EFA225461"
         Description = "Terminate only an orphaned cmd child that is blocking VibeDeck Setup while leaving Setup itself running"
         Wait = $true
         Arguments = @()
     }
     "repair-vibedeck-virtual-display" = @{
         ScriptPath = "D:\coding-tools-mcp\phoneMonitor\scripts\repair-virtual-display-device.ps1"
-        ExpectedSha256 = "D71BA593CC0ED3BB55817330792687E1B941CBF65D1423E1928C2D6C60EE5310"
         Description = "Restart only the VibeDeck virtual display PnP device and rescan Windows display targets"
         Wait = $true
         Arguments = @()
     }
     "recreate-vibedeck-virtual-display" = @{
         ScriptPath = "D:\coding-tools-mcp\phoneMonitor\scripts\repair-virtual-display-device.ps1"
-        ExpectedSha256 = "D71BA593CC0ED3BB55817330792687E1B941CBF65D1423E1928C2D6C60EE5310"
         Description = "Recreate only the stale PhoneMonitor virtual display root device from its validated local driver package"
         Wait = $true
         Arguments = @("-Recreate")
@@ -116,19 +127,33 @@ $allowedAction = [ordered]@{
     }
     "sync-installed-webroot" = @{
         ScriptPath = "D:\coding-tools-mcp\phoneMonitor\scripts\sync-installed-webroot.ps1"
-        ExpectedSha256 = "REPLACE_WITH_SYNC_WEBROOT_SHA256"
         Destination = "C:\Program Files\VibeDeck\wwwroot"
         Description = "Sync the approved VibeDeck web root from the private workspace"
         Wait = $true
         Arguments = @()
     }
-    "update-private-mcp" = @{
-        ScriptPath = "D:\coding-tools-mcp\coding-tools-mcp\service\update-private-mcp.ps1"
-        ExpectedSha256 = "REPLACE_WITH_UPDATE_PRIVATE_MCP_SHA256"
+    "update-coding-tools" = @{
+        ScriptPath = "D:\coding-tools-mcp\coding-tools-mcp\service\internal\deploy-coding-tools.ps1"
         Description = "Deploy the validated private coding-tools MCP source and restart its services"
         Wait = $false
         Arguments = @("-StartDelaySeconds", "3")
     }
+}
+
+$actionManifestPath = Join-Path $PSScriptRoot "elevated-actions.manifest.json"
+if (-not (Test-Path -LiteralPath $actionManifestPath -PathType Leaf)) {
+    throw "Elevated action manifest is missing: $actionManifestPath"
+}
+$actionManifest = [IO.File]::ReadAllText($actionManifestPath, [Text.UTF8Encoding]::new($false)) | ConvertFrom-Json
+
+function Get-PinnedActionHash([string]$ActionName, [string]$ScriptPath) {
+    $property = @($actionManifest.actions.PSObject.Properties | Where-Object Name -eq $ActionName | Select-Object -First 1)
+    if ($property.Count -ne 1 -or $null -eq $property[0].Value) { return $null }
+    $entry = $property[0].Value
+    if ([string]$entry.script_path -ne $ScriptPath) { return $null }
+    $hash = ([string]$entry.sha256).Trim().ToUpperInvariant()
+    if ($hash -notmatch '^[A-F0-9]{64}$') { return $null }
+    return $hash
 }
 
 function Write-AtomicJson([string]$Path, [hashtable]$Payload) {
@@ -238,8 +263,13 @@ function Handle-Request([string]$ProcessingPath) {
                 Complete-Request $requestId @{ ok = $false; error = "ELEVATED_SCRIPT_NOT_FOUND"; message = "The approved action script is missing."; retryable = $false }
                 return
             }
+            $expectedHash = Get-PinnedActionHash $actionName $action.ScriptPath
+            if (-not $expectedHash) {
+                Complete-Request $requestId @{ ok = $false; error = "ELEVATED_SCRIPT_NOT_PINNED"; message = "The approved action is missing from the deployed hash manifest."; retryable = $false }
+                return
+            }
             $actualHash = (Get-Sha256Hex $action.ScriptPath).ToUpperInvariant()
-            if ($action.ExpectedSha256 -notmatch '^[A-Fa-f0-9]{64}$' -or $actualHash -ne $action.ExpectedSha256.ToUpperInvariant()) {
+            if ($actualHash -ne $expectedHash) {
                 Complete-Request $requestId @{ ok = $false; error = "ELEVATED_SCRIPT_HASH_MISMATCH"; message = "The approved action script hash does not match the broker allowlist."; retryable = $false }
                 return
             }
@@ -281,6 +311,7 @@ function Handle-Request([string]$ProcessingPath) {
 if (-not (Test-Path -LiteralPath $queueRoot -PathType Container)) {
     throw "Elevated broker queue is missing: $queueRoot"
 }
+Clear-StaleBrokerArtifacts
 $brokerIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $brokerPrincipal = [Security.Principal.WindowsPrincipal]::new($brokerIdentity)
 $brokerSessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
@@ -292,10 +323,16 @@ if (-not $brokerPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Admi
 }
 
 Set-Content -LiteralPath $pidPath -Value ([Diagnostics.Process]::GetCurrentProcess().Id) -Encoding ASCII
+Update-BrokerHeartbeat
 Write-BrokerLog "START pid=$([Diagnostics.Process]::GetCurrentProcess().Id) session=$([Diagnostics.Process]::GetCurrentProcess().SessionId) user=$([Security.Principal.WindowsIdentity]::GetCurrent().Name)"
 try {
+    $nextHeartbeat = [DateTimeOffset]::UtcNow
     while ($true) {
         if (Test-Path -LiteralPath $stopPath) { break }
+        if ([DateTimeOffset]::UtcNow -ge $nextHeartbeat) {
+            Update-BrokerHeartbeat
+            $nextHeartbeat = [DateTimeOffset]::UtcNow.AddSeconds($heartbeatIntervalSeconds)
+        }
         foreach ($requestPath in @(Get-ChildItem -LiteralPath $queueRoot -Filter "*.request" -File -ErrorAction SilentlyContinue | Sort-Object CreationTime)) {
             $processingPath = Join-Path $queueRoot "$([IO.Path]::GetFileNameWithoutExtension($requestPath.Name)).processing"
             try {
@@ -317,4 +354,5 @@ finally {
     Write-BrokerLog "STOP pid=$([Diagnostics.Process]::GetCurrentProcess().Id)"
     Remove-Item -LiteralPath $stopPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $heartbeatPath -Force -ErrorAction SilentlyContinue
 }

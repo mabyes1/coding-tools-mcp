@@ -12,11 +12,13 @@ internal sealed class ActivityLogViewerForm : Form
     private readonly string _logPath;
     private readonly string _pidPath;
     private readonly string _dndPath;
+    private readonly string _permissionModePath;
     private readonly RichTextBox _output;
     private readonly CheckBox _detailsToggle;
     private readonly CheckBox _autoScrollToggle;
     private readonly CheckBox _dndToggle;
     private readonly Label _statusLabel;
+    private readonly Label _modeLabel;
     private readonly Timer _timer;
     private long _position;
     private string _pendingLine = "";
@@ -42,6 +44,11 @@ internal sealed class ActivityLogViewerForm : Form
         _logPath = logPath;
         _pidPath = pidPath;
         _dndPath = dndPath;
+        var logDirectory = Path.GetDirectoryName(_logPath);
+        var serviceRoot = String.IsNullOrWhiteSpace(logDirectory) ? null : Path.GetDirectoryName(logDirectory);
+        _permissionModePath = String.IsNullOrWhiteSpace(serviceRoot)
+            ? @"C:\ProgramData\WebGPTCodingToolsMCPService\permission-mode.txt"
+            : Path.Combine(serviceRoot, "permission-mode.txt");
 
         Text = "AI 工作紀錄 · coding-tools";
         StartPosition = FormStartPosition.Manual;
@@ -98,11 +105,25 @@ internal sealed class ActivityLogViewerForm : Form
             Anchor = AnchorStyles.Top | AnchorStyles.Right,
         };
         header.Controls.Add(_statusLabel);
+
+        _modeLabel = new Label
+        {
+            AutoSize = true,
+            Text = "",
+            Visible = false,
+            Font = new Font("Microsoft JhengHei UI", 9.5f, FontStyle.Bold),
+            ForeColor = Failure,
+            BackColor = Color.Transparent,
+            Anchor = AnchorStyles.Top | AnchorStyles.Right,
+        };
+        header.Controls.Add(_modeLabel);
         header.Resize += delegate
         {
             _statusLabel.Location = new Point(header.ClientSize.Width - _statusLabel.Width - 20, 18);
+            _modeLabel.Location = new Point(header.ClientSize.Width - _modeLabel.Width - 20, 45);
         };
         _statusLabel.Location = new Point(header.ClientSize.Width - _statusLabel.Width - 20, 18);
+        _modeLabel.Location = new Point(header.ClientSize.Width - _modeLabel.Width - 20, 45);
 
         _detailsToggle = new CheckBox
         {
@@ -198,6 +219,7 @@ internal sealed class ActivityLogViewerForm : Form
             WriteWelcome();
             LoadTail();
             UpdateDndStatus();
+            UpdatePermissionModeStatus();
         };
 
         FormClosed += delegate
@@ -210,7 +232,11 @@ internal sealed class ActivityLogViewerForm : Form
         };
 
         _timer = new Timer { Interval = 250 };
-        _timer.Tick += delegate { ReadNewContent(); };
+        _timer.Tick += delegate
+        {
+            ReadNewContent();
+            UpdatePermissionModeStatus();
+        };
         _timer.Start();
     }
 
@@ -253,6 +279,23 @@ internal sealed class ActivityLogViewerForm : Form
         }
         if (_statusLabel.Parent != null)
             _statusLabel.Location = new Point(_statusLabel.Parent.ClientSize.Width - _statusLabel.Width - 20, 18);
+    }
+
+    private void UpdatePermissionModeStatus()
+    {
+        string mode = "safe";
+        try
+        {
+            if (!String.IsNullOrWhiteSpace(_permissionModePath) && File.Exists(_permissionModePath))
+                mode = File.ReadAllText(_permissionModePath).Trim().ToLowerInvariant();
+        }
+        catch { mode = "unknown"; }
+
+        bool dangerous = String.Equals(mode, "dangerous", StringComparison.OrdinalIgnoreCase);
+        _modeLabel.Visible = dangerous;
+        _modeLabel.Text = dangerous ? "⚠ YOLO MODE · 安全閘門停用" : "";
+        if (_modeLabel.Parent != null)
+            _modeLabel.Location = new Point(_modeLabel.Parent.ClientSize.Width - _modeLabel.Width - 20, 45);
     }
 
     private void WriteWelcome()
@@ -509,7 +552,8 @@ internal sealed class ActivityLogViewerForm : Form
     {
         if (String.IsNullOrWhiteSpace(command)) return "執行命令";
 
-        if (command.IndexOf("update-private-mcp.ps1", StringComparison.OrdinalIgnoreCase) >= 0)
+        if (command.IndexOf("update-coding-tools.ps1", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            command.IndexOf("deploy-coding-tools.ps1", StringComparison.OrdinalIgnoreCase) >= 0)
         {
             if (command.IndexOf("ValidateOnly", StringComparison.OrdinalIgnoreCase) >= 0)
                 return "驗證 coding-tools MCP 更新";

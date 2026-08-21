@@ -24,21 +24,21 @@ if errorlevel 3 goto stop
 if errorlevel 2 goto start
 if errorlevel 1 goto install
 :status
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0service\manage-elevated-broker.ps1" -Action Status
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\manage-elevated-broker.ps1" -Action Status
 goto done
 :uninstall
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0service\manage-elevated-broker.ps1" -Action Uninstall
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\manage-elevated-broker.ps1" -Action Uninstall
 goto done
 :disable
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0service\manage-elevated-broker.ps1" -Action Disable
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\manage-elevated-broker.ps1" -Action Disable
 goto done
 :stop
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0service\manage-elevated-broker.ps1" -Action Stop
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\manage-elevated-broker.ps1" -Action Stop
 goto done
 :start
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0service\manage-elevated-broker.ps1" -Action Start
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\manage-elevated-broker.ps1" -Action Start
 goto done
 :install
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0service\install-elevated-broker.ps1"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0..\install-elevated-broker.ps1"
 :done
 pause
