@@ -230,7 +230,14 @@ processes / patching / oauth / protocol / transport_* 等既有低階 modules
 
 把 Runtime 內最容易獨立的 handler 先移出，但 Runtime 仍當 composition root。
 
-- [ ] filesystem tools
+- [x] filesystem tools
+  - Characterization commit：`1a9f2ae` (`test: freeze filesystem read and search behavior`)
+  - Extraction commit：`4453e9e` (`refactor: extract filesystem read and search tools`)
+  - `read_file` / `list_dir` / `list_files` / `search_text` moved to `tools/filesystem.py` with explicit `Workspace` / resolver / executable-discovery dependencies.
+  - `fd` and `rg` fast paths moved together with their fallback implementations so engine selection does not split domain ownership.
+  - Temp-workspace contracts cover line selection, binary rejection, directory listing, glob discovery, search context/column semantics, and cross-platform line endings.
+  - Ten extracted filesystem helpers AST-identical to pre-extraction HEAD.
+  - Full source validator PASS after the interrupted shutdown attempt；`server.py`：6853 → 6273 lines（baseline 8353 → 6273）。
 - [ ] git tools
 - [x] image tool
   - Characterization commit：`7fbf68f` (`test: freeze image tool behavior`)
@@ -240,7 +247,18 @@ processes / patching / oauth / protocol / transport_* 等既有低階 modules
   - Five pure image helpers AST-identical to pre-extraction HEAD.
   - Full source validator PASS；`server.py`：7165 → 7000 lines。
 - [ ] diagnostics / server_info helpers
-- [ ] human_help / desktop facade
+  - [x] pure diagnostics helpers extracted to `tools/diagnostics.py`
+  - Characterization commit：`17ac139` (`test: freeze diagnostics helper behavior`)
+  - Extraction commit：`10c6830` (`refactor: extract diagnostics helpers`)
+  - Covered contracts：fresh execution pressure、exec-environment summary、workspace SKILL metadata/path、missing executable discovery。
+  - `server_info_payload()` intentionally remains in Runtime as composition root until session ownership moves in Phase 3。
+- [x] human_help / desktop facade
+  - Characterization commit：`be361ad` (`test: freeze desktop tool facade behavior`)
+  - Extraction commit：`4260c49` (`refactor: extract desktop tool facade`)
+  - `human_help_me` / computer/browser argument mapping moved to `tools/desktop.py` with explicit interactive-broker callbacks；broker protocol unchanged。
+  - Full source validator PASS；old Runtime bodies and extracted helper bodies AST-identical after signature/docstring normalization。
+
+Current `server.py`：6853 lines（baseline 8353 → 6853）。
 
 優先採「service object / plain functions + explicit dependencies」，避免把一個 God Class 切成六個互相拿整個 Runtime 的小 God Class。
 
