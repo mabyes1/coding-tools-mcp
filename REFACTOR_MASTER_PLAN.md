@@ -422,7 +422,7 @@ Python server 穩定後再碰 installer/update，避免兩個高風險面同時�
 - Latest verified production extraction：`4453e9e` (`refactor: extract filesystem read and search tools`)。
 - Latest checkpoint before this handoff update：`78408cc` (`docs: checkpoint filesystem extraction`)。
 - `server.py`：**8353 → 6273 lines**。
-- Full source validator：**PASS**，最後一次結果 `PRIVATE_MCP_SOURCE_CHECK_OK tools=20 context_files=0`。
+- Full source validator：**PASS**，最後一次結果 `PRIVATE_MCP_SOURCE_CHECK_OK tools=20 context_files=1`。
 - Public MCP contract 仍為 **20 tools / 24,739 canonical bytes / SHA-256 `10a6219c4dd9a739f3ad6d05572f449d0800f8ad9bce16184851d10413b65392`**。
 - 新抽出的低階 modules 目前沒有反向 import `server.py`。
 - Worktree 收尾時只有既有 `ADHD_ASSESSMENT_NOTES_2026-08-21.md` untracked；它是使用者私人筆記，**禁止修改、stage、commit**。
@@ -437,6 +437,9 @@ Python server 穩定後再碰 installer/update，避免兩個高風險面同時�
 - [x] Phase 2：pure diagnostics helpers → `tools/diagnostics.py`。
 - [x] Phase 2：filesystem read/list/search + `fd` / `rg` fast paths → `tools/filesystem.py`。
 - [ ] Phase 2：git tools。
+  - Characterization commit：`9849017` (`test: freeze git tool behavior`)。
+  - 已鎖定：repo/default-cwd scope、git status worktree state、diff content/file metadata、log metadata、show metadata-only、blame attribution/content、option-like ref rejection。
+  - 目前只完成 contract freeze，**production Git implementation 尚未 extraction**。
 - [ ] Phase 2：剩餘 diagnostics / `server_info_payload()`；**刻意延後**，因為它仍與 execution/session ownership 相連，應與 Phase 3 邊界一起處理。
 
 ### 重要：今晚的 shutdown interruption
@@ -464,10 +467,10 @@ Python server 穩定後再碰 installer/update，避免兩個高風險面同時�
 3. `set_default_cwd` 到 `D:\\coding-tools-mcp\\coding-tools-mcp`（若 default cwd 尚未在此）。
 4. `git status`：預期只有 `ADHD_ASSESSMENT_NOTES_2026-08-21.md` untracked。若有任何其他修改，先釐清，不要直接覆蓋。
 5. `git log -n 10`，確認 filesystem extraction / handoff commits 存在。
-6. 先跑一次 compile + `service/validate-private-source.py --package-parent private --workspace ..`，確認 green baseline。
+6. 先跑一次 compile + `service/validate-private-source.py --package-parent private --workspace ..`，確認 green baseline。2026-08-21 收尾時此 validator 已在 commit `9849017` 後重新跑綠。
 7. **NEXT IMPLEMENTATION：Phase 2 / Git tools extraction。**
-   - 先 map `git_status` / `git_diff` / `git_log` / internal git helpers 的 dependency graph。
-   - 先補 Git domain characterization，尤其 default cwd / repo scope / path filters / untracked / staged+unstaged semantics。
+   - Git characterization 已完成並 commit，不要重寫；先讀 `9849017` 的 tests 理解 frozen behavior。
+   - map `git_status` / `git_diff` / `git_log` / `git_show` / `git_blame` 與 internal git helpers 的 dependency graph。
    - 再抽到 `tools/git.py`，Runtime 保留薄 delegation。
    - pure helper relocation 優先做 AST equivalence check。
    - extraction 完成後 full validator + diff review + independent commit + 更新本文件。
