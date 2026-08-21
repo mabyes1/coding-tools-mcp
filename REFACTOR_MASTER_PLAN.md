@@ -258,7 +258,7 @@ processes / patching / oauth / protocol / transport_* 等既有低階 modules
   - `human_help_me` / computer/browser argument mapping moved to `tools/desktop.py` with explicit interactive-broker callbacks；broker protocol unchanged。
   - Full source validator PASS；old Runtime bodies and extracted helper bodies AST-identical after signature/docstring normalization。
 
-Current `server.py`：6853 lines（baseline 8353 → 6853）。
+Current `server.py`：6273 lines（baseline 8353 → 6273）。
 
 優先採「service object / plain functions + explicit dependencies」，避免把一個 God Class 切成六個互相拿整個 Runtime 的小 God Class。
 
@@ -414,30 +414,73 @@ Python server 穩定後再碰 installer/update，避免兩個高風險面同時�
 
 ## 9. Current Checkpoint
 
-**狀態：PLAN / PRE-CODE**
+**狀態：PHASE 2 IN PROGRESS / GREEN CHECKPOINT**
 
-### 2026-08-21 initial reconnaissance
+### 2026-08-21 end-of-session handoff
 
-- [x] 確認 stable baseline commit = `29121c4`。
-- [x] 確認 tracked repo clean；ADHD markdown 為既有 untracked exclusion。
-- [x] 發現目前 live Tunnel `server_info.build_identity` 仍回報 `0.2.2-private.36-dev+57f020cdd9e0` / `dirty=true`；repo source baseline 與 installed build identity 尚未對齊。已明確記錄此 ambiguity，source-only extraction 不以 live build 作判準，第一次 installed-service smoke 前必須對齊。
-- [x] 重新盤點 live `server.py`，確認目前 8353 lines，`Runtime` 仍是最大責任聚合點。
-- [x] 重新讀 live source validator，整理現有 regression contracts。
-- [x] 驗證舊 review 的兩項 P0 已經落地：privileged ACL hardening、bundle deploy/rollback transaction。
-- [x] 建立本重構總計畫。
-- [x] Phase 0 Contract Freeze & Characterization 完成；source validator 全綠，public tool contract fingerprint 已鎖定。
-- [ ] Live installed build identity 對齊延後到第一個**安全部署 checkpoint**：目前重啟 MCP 會中斷正在施工的 Tunnel，所以 source-only extraction 階段以 `29121c4` + validator baseline 為 authoritative baseline；在任何 installed-service smoke 前必須先完成對齊。
-- [x] Phase 1 / Workspace domain extraction 完成。
-- [x] Phase 1 / Tool schema + catalog extraction 完成。
-- [ ] **NEXT：Phase 2 / split low-risk tool handler domains。先從 diagnostics / image 等低耦合區開始，不碰 Execution / Session。**
+- Stable project baseline remains `29121c4`；所有重構都建立在 Phase 0 frozen contracts 上。
+- Latest verified production extraction：`4453e9e` (`refactor: extract filesystem read and search tools`)。
+- Latest checkpoint before this handoff update：`78408cc` (`docs: checkpoint filesystem extraction`)。
+- `server.py`：**8353 → 6273 lines**。
+- Full source validator：**PASS**，最後一次結果 `PRIVATE_MCP_SOURCE_CHECK_OK tools=20 context_files=0`。
+- Public MCP contract 仍為 **20 tools / 24,739 canonical bytes / SHA-256 `10a6219c4dd9a739f3ad6d05572f449d0800f8ad9bce16184851d10413b65392`**。
+- 新抽出的低階 modules 目前沒有反向 import `server.py`。
+- Worktree 收尾時只有既有 `ADHD_ASSESSMENT_NOTES_2026-08-21.md` untracked；它是使用者私人筆記，**禁止修改、stage、commit**。
 
-### 下一個 session / context 壓縮後應從這裡開始
+### 已完成
 
-1. 讀 `REFACTOR_MASTER_PLAN.md`。
-2. `git status`，確認只有預期變更。
-3. Phase 0 已完成；source baseline validation 必須保持全綠。
-4. 第一個真正 extraction 是 **Workspace domain**，不是 Execution / HTTP。
-5. 在第一次 installed-service smoke 前，先把 live build identity 對齊當時的 green commit。
+- [x] Phase 0：Contract Freeze & Characterization。
+- [x] Phase 1：`workspace.py` extraction。
+- [x] Phase 1：`tool_catalog.py` / `tool_schemas.py` extraction。
+- [x] Phase 2：image domain → `tools/images.py`。
+- [x] Phase 2：human-help / computer/browser facade → `tools/desktop.py`。
+- [x] Phase 2：pure diagnostics helpers → `tools/diagnostics.py`。
+- [x] Phase 2：filesystem read/list/search + `fd` / `rg` fast paths → `tools/filesystem.py`。
+- [ ] Phase 2：git tools。
+- [ ] Phase 2：剩餘 diagnostics / `server_info_payload()`；**刻意延後**，因為它仍與 execution/session ownership 相連，應與 Phase 3 邊界一起處理。
+
+### 重要：今晚的 shutdown interruption
+
+使用者曾誤按關機後取消。結果：
+
+- Tunnel connector endpoint 一度回 `ExceptionGroup / TaskGroup`，該 Tunnel session 可視為被中斷。
+- signed-in interactive broker 也被關掉，因此 `active_user` Git command 暫時不可用。
+- 另一條 `coding-tools` MCP service 仍正常，已用它重新跑 compile + full validator 並完成 filesystem commit。
+- 不需要為這次中斷做 source rollback；Git 已回到 clean green checkpoint。
+- 下次電腦重新開機後，**先用 `server_info` / `git status` 確認服務與 repo 狀態即可**，不要假設今晚的 connector session 還存在。
+
+### Live build identity 尚未對齊
+
+目前 installed service 最後觀察到的 build identity 仍是舊的：
+
+`0.2.2-private.36-dev+57f020cdd9e0` / `git_sha=57f020cdd9e0` / `dirty=true`
+
+這在目前 source-only extraction 階段是**已知且接受的 ambiguity**。不要為了對齊版本在每一刀之間 deploy/restart，否則會一直切斷施工 connector。第一次真正進入 **installed-service smoke checkpoint** 前，再把 live build 對齊當時的 green commit，並驗證 `/healthz`、`server_info`、connector tool calls。
+
+### 下一個新 Session 必做順序
+
+1. **先讀完整 `REFACTOR_MASTER_PLAN.md`，尤其 Phase 2、SOP、Current Checkpoint。**
+2. `server_info`，確認 MCP service 可用；若 Tunnel 不可用但 `coding-tools` 可用，可直接用後者，不需要先修 Tunnel 才能讀 repo。
+3. `set_default_cwd` 到 `D:\\coding-tools-mcp\\coding-tools-mcp`（若 default cwd 尚未在此）。
+4. `git status`：預期只有 `ADHD_ASSESSMENT_NOTES_2026-08-21.md` untracked。若有任何其他修改，先釐清，不要直接覆蓋。
+5. `git log -n 10`，確認 filesystem extraction / handoff commits 存在。
+6. 先跑一次 compile + `service/validate-private-source.py --package-parent private --workspace ..`，確認 green baseline。
+7. **NEXT IMPLEMENTATION：Phase 2 / Git tools extraction。**
+   - 先 map `git_status` / `git_diff` / `git_log` / internal git helpers 的 dependency graph。
+   - 先補 Git domain characterization，尤其 default cwd / repo scope / path filters / untracked / staged+unstaged semantics。
+   - 再抽到 `tools/git.py`，Runtime 保留薄 delegation。
+   - pure helper relocation 優先做 AST equivalence check。
+   - extraction 完成後 full validator + diff review + independent commit + 更新本文件。
+8. **暫時不要碰：**
+   - `apply_patch` extraction：它與 patch transaction / write permission / workspace write boundary 較重，filesystem read/search 已拆，但 patch 應獨立處理。
+   - ExecutionRegistry / exec/session lifecycle：這是 Phase 3，高風險，不得在 Git extraction 順手處理。
+   - HTTP/OAuth：Phase 5。
+   - deployment scripts：Phase 7。
+9. Git domain 完成後，再重新評估 Phase 2 是否先拆 `apply_patch` domain，或直接宣告低風險 handler extraction 完成並進 Phase 3。**先更新計畫，再做決定。**
+
+### 新 Session 可直接貼給 AI 的一句話
+
+> 繼續 `D:\coding-tools-mcp\coding-tools-mcp\REFACTOR_MASTER_PLAN.md` 的鬼之重構；先讀 Current Checkpoint、確認 git/validator green，然後照 handoff 從 Phase 2 Git tools extraction 開始，不要重做已完成的 Workspace / schema / image / desktop / diagnostics / filesystem，也不要提前碰 Execution/HTTP/deployment。
 
 ---
 
