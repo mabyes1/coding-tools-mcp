@@ -238,14 +238,20 @@ processes / patching / oauth / protocol / transport_* 等既有低階 modules
   - Temp-workspace contracts cover line selection, binary rejection, directory listing, glob discovery, search context/column semantics, and cross-platform line endings.
   - Ten extracted filesystem helpers AST-identical to pre-extraction HEAD.
   - Full source validator PASS after the interrupted shutdown attempt；`server.py`：6853 → 6273 lines（baseline 8353 → 6273）。
-- [ ] git tools
+- [x] git tools
   - Characterization commit：`9849017` (`test: freeze git tool behavior`)
-  - 2026-08-22 extraction in progress：implementation moved into `tools/git_tools.py` with explicit workspace / cwd / resolver / command-env / git-discovery / patch-baseline dependencies.
+  - Extraction commit：`b178501` (`refactor: extract git tool domain`)
+  - Implementation moved into `tools/git_tools.py` with explicit workspace / cwd / resolver / command-env / git-discovery / patch-baseline dependencies.
   - `Runtime.git_status` / `git_diff` / `git_log` / `git_show` / `git_blame` are now one-line delegations；legacy `_git_repo_scope` remains as a thin compatibility bridge because the frozen validator exercises it directly.
   - Duplicate Git parser implementations were removed from `server.py`; `server.py` now re-exports the extracted helpers.
   - Compile + full source validator PASS；four pure helpers (`parse_branch_line`, `validate_git_ref`, `parse_git_blame_porcelain`, `parse_diff_files`) are AST-identical to pre-extraction HEAD.
-  - Final pre-commit review：dead `_git_*` wrappers removed except `_git_repo_scope`, which remains only because the frozen validator calls it directly；`git diff --check` PASS.
-  - Current uncommitted checkpoint：`server.py` 5802 lines（baseline 8353 → 5802）；ready for extraction commit.
+  - Final review：dead `_git_*` wrappers removed except `_git_repo_scope`, which remains only because the frozen validator calls it directly；staged `git diff --check` PASS.
+  - `server.py`：6273 → 5802 lines（baseline 8353 → 5802）。
+- [ ] apply_patch tool
+  - 2026-08-22 dependency map：the orchestration is localized to workspace/default-cwd resolution, symlink-write rejection, `patch_lock`, `AtomicPatchCommitter`, `patch_baselines`, and result formatting. It does **not** directly own permission-grant logic.
+  - Decision：treat this as the final Phase 2 tool-domain extraction rather than carrying it into Phase 3. Keep low-level parsing/atomic commit primitives in existing `patching.py`; extract Runtime orchestration only.
+  - Existing characterization only proves relative-path update from persistent default cwd, so add add/dry-run/move/delete + baseline semantics before production relocation.
+  - Characterization expanded on 2026-08-22：add result/content, dry-run no-mutation/no-baseline-change, update+move metadata/content, delete counts, patch-baseline registration, and staged validation failure all-or-nothing behavior. Full validator PASS; ready for a tests-only freeze commit.
 - [x] image tool
   - Characterization commit：`7fbf68f` (`test: freeze image tool behavior`)
   - Extraction commit：`01e2b5c` (`refactor: extract image tool domain`)
@@ -265,7 +271,7 @@ processes / patching / oauth / protocol / transport_* 等既有低階 modules
   - `human_help_me` / computer/browser argument mapping moved to `tools/desktop.py` with explicit interactive-broker callbacks；broker protocol unchanged。
   - Full source validator PASS；old Runtime bodies and extracted helper bodies AST-identical after signature/docstring normalization。
 
-Current `server.py`：5802 lines（baseline 8353 → 5802；Git extraction ready to commit）。
+Current `server.py`：5802 lines（baseline 8353 → 5802）。
 
 優先採「service object / plain functions + explicit dependencies」，避免把一個 God Class 切成六個互相拿整個 Runtime 的小 God Class。
 
@@ -423,7 +429,7 @@ Python server 穩定後再碰 installer/update，避免兩個高風險面同時�
 
 **狀態：PHASE 2 IN PROGRESS / GREEN CHECKPOINT**
 
-### 2026-08-22 live checkpoint — Git extraction in progress
+### 2026-08-22 checkpoint — Git extraction complete
 
 - Resumed from `ec31adb` (`docs: finalize refactor handoff`) with the Git characterization commit `9849017` already present.
 - Found an interrupted/uncommitted Git extraction: modified `server.py` + new `tools/git_tools.py`; no unrelated tracked changes were present. Existing `ADHD_ASSESSMENT_NOTES_2026-08-21.md` remains excluded.
@@ -434,7 +440,10 @@ Python server 穩定後再碰 installer/update，避免兩個高風險面同時�
 - Dead `_git_*` wrappers were removed after repository-wide caller search; `_git_repo_scope` is intentionally retained as the one compatibility bridge exercised by the frozen validator.
 - Final pre-commit checks：`git diff --check` **PASS**；no `server.py` reverse import exists in `tools/git_tools.py`；full source validator remains **PASS** after wrapper removal.
 - `server.py` current line count：**5802**（baseline 8353 → 5802）。
-- **Next within this same sub-phase：** stage only `server.py` + `tools/git_tools.py` + this plan, review staged diff/check, then commit Git extraction. `ADHD_ASSESSMENT_NOTES_2026-08-21.md` remains explicitly excluded.
+- Extraction commit：`b178501` (`refactor: extract git tool domain`)；post-commit worktree returned to only the excluded `ADHD_ASSESSMENT_NOTES_2026-08-21.md` untracked file.
+- `apply_patch` dependency map completed after the Git commit. It is sufficiently localized to remain a Phase 2 extraction; permission grants are not implemented inside the patch orchestrator.
+- Characterization now covers add/dry-run/move/delete, patch-baseline registration, and staged validation failure without partial commit；full validator PASS before any production relocation.
+- **Next：** commit this validator freeze separately, then move orchestration out of Runtime while leaving `patching.py` transaction primitives untouched.
 
 ### 2026-08-21 end-of-session handoff
 
@@ -456,10 +465,11 @@ Python server 穩定後再碰 installer/update，避免兩個高風險面同時�
 - [x] Phase 2：human-help / computer/browser facade → `tools/desktop.py`。
 - [x] Phase 2：pure diagnostics helpers → `tools/diagnostics.py`。
 - [x] Phase 2：filesystem read/list/search + `fd` / `rg` fast paths → `tools/filesystem.py`。
-- [ ] Phase 2：git tools。
+- [x] Phase 2：git tools。
   - Characterization commit：`9849017` (`test: freeze git tool behavior`)。
+  - Extraction commit：`b178501` (`refactor: extract git tool domain`)。
   - 已鎖定：repo/default-cwd scope、git status worktree state、diff content/file metadata、log metadata、show metadata-only、blame attribution/content、option-like ref rejection。
-  - 2026-08-22 已進入 production extraction；最新 live checkpoint 見上節，目前等待 final diff review + commit。
+  - Production implementation 已移至 `tools/git_tools.py`；Runtime public handlers 為薄 delegation；full validator PASS。
 - [ ] Phase 2：剩餘 diagnostics / `server_info_payload()`；**刻意延後**，因為它仍與 execution/session ownership 相連，應與 Phase 3 邊界一起處理。
 
 ### 重要：今晚的 shutdown interruption
