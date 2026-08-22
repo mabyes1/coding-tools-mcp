@@ -456,11 +456,11 @@ Python server 穩定後再碰 installer/update，避免兩個高風險面同時�
 
 ### Phase 8 — Validator Decomposition & Architecture Guardrails
 
-- [~] 把 600+ 行 validator 拆成按 domain 的 checks，但保留單一入口。
+- [x] 把 600+ 行 validator 拆成按 domain 的 checks，但保留單一入口。
 - [x] 加 architecture guard：禁止低階 module import `server.py`。
 - [x] 加 tool catalog consistency guard。
 - [x] 加容易再次膨脹的 size / dependency warning（警告即可，不以行數粗暴 fail build）。
-- [ ] 最終 full regression + installed service smoke + tunnel smoke。
+- [~] 最終 full regression + installed service smoke + tunnel smoke。
 
 Phase 8 checkpoint：
 - 新增 `service/validation/architecture_checks.py`：AST 掃描 production package，除 `server.py` facade 與 `__main__.py` entry 外禁止任何 module import `server.py`；目前 reverse-import violation = 0。
@@ -468,8 +468,13 @@ Phase 8 checkpoint：
 - growth guard 為 warning-only：`server.py` facade > 800 lines、一般 module > 1500 lines、非 facade import statements > 45 才輸出 `ARCH_WARNING`；目前 warning = 0，不拿行數當粗暴 build gate。
 - 新增 `service/validation/catalog_checks.py`，搬出 20-tool budget、固定 public contract SHA256、elevated-action/ordinary-permission boundary、tool schema/action contract、ExceptionGroup diagnostics。
 - 新增 `service/validation/windows_deployment_checks.py`，搬出 Windows broker/helper build inputs、deployment architecture/ACL contract、C# compile/self-test 與 Computer Use smoke。
-- 單一入口 `service/validate-private-source.py` 仍保留；目前 1828 → 1488 lines，compile + full validator + `git diff --check` PASS。
-- 下一刀：runtime/session lifecycle、output paging、process-control characterization 依 domain 拆分；避免重新製造一個肥 `session_checks.py`。
+- 單一入口 `service/validate-private-source.py` 仍保留，但已從 **1828 → 104 lines**；現在只做參數解析、production imports、domain check orchestration 與最後 summary，不再承載 domain test implementation。
+- domain checks 已拆為：architecture、catalog/schema/elevation、Windows deployment/build、desktop/handoff、Runtime lifecycle、session registry/retention、session output paging、process control、hidden session inspection、HTTP reconnect lifecycle、HTTP transport/session diagnostics、command policy、execution、image、workspace/filesystem、patch、cwd/git/permission、Windows runtime/env。
+- process/session checks 沒有合併成單一肥 `session_checks.py`；registry ownership、output、process-control、inspection、HTTP lifecycle 各自保留獨立責任。
+- compile + full source validator + `git diff --check` PASS；目前 `ARCH_WARNING = 0`，`PRIVATE_MCP_SOURCE_CHECK_OK tools=20 context_files=1`。
+- `update-coding-tools.ps1 -ValidateOnly` 在 validator 完整拆分後再次 PASS：`PRIVATE_MCP_VALIDATE_OK version=0.2.2-private.37`，確認 deployment temp-copy 路徑也能正確攜帶/載入 `service/validation/*`。
+
+**Validator decomposition：COMPLETE / GREEN.** Phase 8 剩最後 installed service / tunnel smoke 與最終 worktree/contract review。
 
 ---
 
