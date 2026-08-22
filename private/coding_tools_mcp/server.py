@@ -137,6 +137,7 @@ from .tools.diagnostics import (
     exec_environment_summary,
     execution_session_summary,
     landlock_enforced,
+    server_info_payload as build_server_info_payload,
     skill_catalog,
 )
 from .tools.desktop import desktop_ui_action, human_help_tool
@@ -1369,21 +1370,21 @@ class Runtime:
             if self.oauth_config is not None and self.oauth_config.state_store is not None
             else None
         )
-        return {
-            "server": SERVER_NAME,
-            "title": SERVER_TITLE,
-            "version": runtime_version(),
-            "build_identity": runtime_build_identity(),
-            "protocol_version": self.protocol_version,
-            **self._exec_environment_summary(),
-            "workspace_allowlist": [
+        return build_server_info_payload(
+            server=SERVER_NAME,
+            title=SERVER_TITLE,
+            version=runtime_version(),
+            build_identity=runtime_build_identity(),
+            protocol_version=self.protocol_version,
+            exec_environment=self._exec_environment_summary(),
+            workspace_allowlist=[
                 {"name": entry.name, "path": str(entry.path)}
                 for entry in workspace_catalog_from_env()
             ],
-            "default_cwd": self.default_cwd_display(),
-            "default_cwd_scope": "oauth_owner_workspace" if self.state_owner else "mcp_session",
-            "auth_enabled": self.auth_enabled(),
-            "oauth": {
+            default_cwd=self.default_cwd_display(),
+            default_cwd_scope="oauth_owner_workspace" if self.state_owner else "mcp_session",
+            auth_enabled=self.auth_enabled(),
+            oauth={
                 "enabled": self.oauth_enabled(),
                 "persistent_state": oauth_state_path is not None,
                 "state_path": oauth_state_path,
@@ -1394,32 +1395,29 @@ class Runtime:
                     self.oauth_config.refresh_token_ttl if self.oauth_config is not None else None
                 ),
             },
-            "dangerously_skip_all_permissions": self.dangerously_skip_all_permissions,
-            "annotation_override": "fake_readonly" if self.fake_readonly_annotations else None,
-            "landlock": landlock,
-            "exec_policy": {
+            dangerously_skip_all_permissions=self.dangerously_skip_all_permissions,
+            annotation_override="fake_readonly" if self.fake_readonly_annotations else None,
+            landlock=landlock,
+            exec_policy={
                 "shell_expansion": self.shell_expansion_policy(),
                 "inline_script": self.inline_script_policy(),
                 "global_tmp_write": self.global_tmp_write_policy(),
                 "secret_env_filter": self.secret_env_filter_policy(),
             },
-            "permission_elicitation_supported": True,
-            "permission_approval_transport": "local_windows_broker",
-            "shell_env_inherit": self.shell_env_policy.inherit,
-            "shell_env_include_only": list(self.shell_env_policy.include_only),
-            "shell_env_exclude": list(self.shell_env_policy.exclude),
-            "endpoint_path": MCP_ENDPOINT_PATH,
-            "project_context": {
+            shell_env_inherit=self.shell_env_policy.inherit,
+            shell_env_include_only=list(self.shell_env_policy.include_only),
+            shell_env_exclude=list(self.shell_env_policy.exclude),
+            endpoint_path=MCP_ENDPOINT_PATH,
+            project_context={
                 "root_instruction_files": [item.path for item in self.project_context.root_files],
                 "nested_instruction_files": list(self.project_context.nested_files),
                 "warnings": list(self.project_context.warnings),
             },
-            "skills": self._skill_catalog(),
-            "http_sessions": http_session_stats,
-            "execution": self._execution_session_summary(),
-            "tools": tools,
-            "tool_count": len(tools),
-        }
+            skills=self._skill_catalog(),
+            http_sessions=http_session_stats,
+            execution=self._execution_session_summary(),
+            tools=tools,
+        )
 
     def call_tool(
         self,

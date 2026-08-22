@@ -297,7 +297,7 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
   - Compile + full validator PASS；`session_store.py` has no reverse import of `server.py`；`git diff --check` PASS.
   - Extraction commit：`f1dad6b` (`refactor: extract execution registry`).
   - `server.py`：5686 → 5641（baseline 8353 → 5641）。
-- [ ] session retention / output snapshot / prune / cancel / stdin lifecycle 收斂成單一 session service。
+- [x] session retention / output snapshot / prune / cancel / stdin lifecycle 收斂成單一 session service。
   - 2026-08-22 boundary decision：**do not move the whole remaining session block at once**. First move only retention/store lifecycle into `ExecutionRegistry`: completed-session remember, scratch cleanup, retained-byte accounting, eviction, completion, TTL prune, and active/completed lookup.
   - Keep `_make_session` with later execution/spawn orchestration. Keep output formatting/snapshot/read-output and stdin/kill/poll as separate later sub-phases. Keep `cancel_request` in Runtime as request-id → session-id glue even after session cancellation moves.
   - Existing validator does not directly freeze retention eviction/TTL behavior. Add characterization for completed-session promotion, oldest eviction + scratch cleanup, TTL prune + scratch cleanup, and missing-session lookup errors before moving these methods.
@@ -322,7 +322,7 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
   - All six moved methods are AST-identical to pre-relocation HEAD；compile + full validator + reverse-import check + `git diff --check` PASS. Current `server.py`：5372 → 5281（baseline 8353 → 5281）。
   - Process-control extraction commit：`2390347` (`refactor: move session process control into registry`).
   - Hidden inspection handlers (`list_sessions`, `process_tree`, `kill_tree`, `tail_output`, `find_output`) remain in `TOOL_REGISTRY` even though they are not on the public 20-tool surface, so they are **not dead code** and must keep callable Runtime handlers. Their relocation is deferred because `_session_metadata` currently depends on activity redaction and `find_output` depends on a filesystem text helper; avoid creating cross-layer imports just to reduce line count.
-- [ ] exec orchestration 與 command policy 分離：
+- [x] exec orchestration 與 command policy 分離：
   - `command_policy.py`：解析與 allow/deny 判斷
   - `execution.py`：spawn / active_user delegation / output formatting
   - 2026-08-22 next boundary：extract the pure shell/path parsing layer first (`shlex_split`, heredoc stripping, executable/path candidate parsing, inline-script detection, env wrapping, literal-network command detection) plus only the constants they own. Runtime allow/deny decisions stay in place for this first command-policy commit.
@@ -357,8 +357,11 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
   - Hidden handlers `_session_metadata`, `list_sessions`, `process_tree`, `kill_tree`, `tail_output`, and `find_output` now delegate to `ExecutionRegistry`; command redaction and line preview are injected callbacks, so `session_store.py` has no reverse dependency on `server.py` or filesystem helpers.
   - Hidden inspection extraction compile + full validator + `git diff --check` PASS；`server.py`：4284 → 4170（baseline 8353 → 4170）。
   - Next boundary：move/refactor `server_info_payload()` composition and document registry ownership/close semantics as the Phase 3 exit step.
-- [ ] Runtime 只保留 request-to-service wiring。
-- [ ] 明確定義 registry ownership：誰 create、誰 close、HTTP reconnect 如何 share。
+  - `server_info_payload()` stable document construction moved to `tools/diagnostics.py`; Runtime now resolves live domain state and delegates the document shape to the diagnostics builder. Existing server-info/execution-pressure characterization remains PASS；`server.py`：4170 → 4168（baseline 8353 → 4168）。
+- [x] Runtime 對 execution/session domain 只保留 request-to-service wiring / compatibility wrappers；permission and transport wiring are intentionally handled in later phases.
+- [x] 明確定義 registry ownership：creating Runtime owns/close-cleans its registry；reconnect Runtime receives a shared registry and must not close it；`RuntimeHTTPServer.server_close()` closes reconnect runtimes then the control Runtime/registry. Phase 0 + Phase 3 validator covers all three paths plus live-child hard kill.
+
+**Phase 3 source checkpoint：COMPLETE / GREEN.** Session concurrency pressure, kill, retention/TTL, output paging, stdin/poll, real managed child execution, active-user one-shot formatting, reconnect sharing, and server-info pressure all pass the full source validator. Installed-service smoke is intentionally deferred to the single final deployment checkpoint so source-only refactor commits do not repeatedly kill the construction connector.
 
 **Exit gate：** session concurrency、kill、retention、read_output、active_user、server_info pressure 全部 regression checks 通過；實際 service smoke test 通過。
 
