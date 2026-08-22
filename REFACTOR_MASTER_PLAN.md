@@ -338,7 +338,9 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
   - Decision characterization commit：`238a542` (`test: freeze command policy decisions`).
   - Runtime allow/deny orchestration moved to `CommandPolicy` with explicit dependencies only：workspace, permission callback, capability booleans, env filter, tmp-path rule, external-executable allowlist rule, and special-device list. Runtime keeps thin compatibility wrappers for `_check_command_policy`, `_check_command_paths`, `_check_command_path_candidate`, and `_reject_setuid_executable`.
   - Decision extraction full validator + reverse-import check + `git diff --check` PASS；`server.py`：4811 → 4660（baseline 8353 → 4660）。
+  - Decision extraction commit：`d338253` (`refactor: extract command policy service`).
   - Next boundary：freeze execution/spawn behavior, then move managed service execution and active-user result formatting without mixing permission-policy changes.
+  - Execution characterization added and full validator PASS：real managed terminal execution, `yield_time_ms=0` running-session + poll continuation + cleanup, and active-user one-shot result metadata/summary through a broker stub. Ready for tests-only freeze commit.
 - [ ] Runtime 只保留 request-to-service wiring。
 - [ ] 明確定義 registry ownership：誰 create、誰 close、HTTP reconnect 如何 share。
 
