@@ -302,6 +302,10 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
   - Keep `_make_session` with later execution/spawn orchestration. Keep output formatting/snapshot/read-output and stdin/kill/poll as separate later sub-phases. Keep `cancel_request` in Runtime as request-id → session-id glue even after session cancellation moves.
   - Existing validator does not directly freeze retention eviction/TTL behavior. Add characterization for completed-session promotion, oldest eviction + scratch cleanup, TTL prune + scratch cleanup, and missing-session lookup errors before moving these methods.
   - Retention/store characterization added：completed active session promotes to retained output；retained count evicts the oldest entry at `MAX_RETAINED_OUTPUT_SESSIONS` and removes its scratch dir；TTL prune removes expired retained output + scratch dir；missing active/completed lookups preserve `SESSION_NOT_FOUND` with their existing distinct categories. Full validator PASS; ready for tests-only freeze commit.
+  - Characterization commit：`c55f22f` (`test: freeze session retention lifecycle`).
+  - Production relocation in worktree：`_remember_output_session`, `_cleanup_session_scratch`, `_retained_output_bytes_locked`, `_evict_retained_locked`, `_complete_session`, `_prune_sessions`, `_get_output_session`, `_get_session` moved verbatim onto `ExecutionRegistry`; Runtime keeps thin compatibility wrappers.
+  - Retention constants `MAX_RETAINED_OUTPUT_SESSIONS`, `COMPLETED_SESSION_TTL_SECONDS`, `MAX_RUNTIME_OUTPUT_BYTES` moved to `session_store.py` and are re-exported by `server.py`.
+  - All eight moved methods are AST-identical to pre-relocation HEAD；compile + full validator + reverse-import check + `git diff --check` PASS. Current `server.py`：5641 → 5598（baseline 8353 → 5598）。
 - [ ] exec orchestration 與 command policy 分離：
   - `command_policy.py`：解析與 allow/deny 判斷
   - `execution.py`：spawn / active_user delegation / output formatting
@@ -472,7 +476,9 @@ Python server 穩定後再碰 installer/update，避免兩個高風險面同時�
 - `PermissionGrant` + `ExecutionRegistry` relocation commit：`f1dad6b` (`refactor: extract execution registry`)；AST equivalence + full validator + reverse-import check all PASS；post-commit worktree returned to only the excluded ADHD note.
 - Session lifecycle map completed. The next extraction is deliberately narrower than the phase headline: retention/store primitives only. Output formatting, stdin/poll/kill, request cancellation, and spawn orchestration remain separate.
 - Retention/store characterization now passes in the full validator: promotion, FIFO count eviction + scratch cleanup, TTL prune + scratch cleanup, and missing lookup error semantics are frozen.
-- **Next：** commit this retention/store freeze separately, then move only those store primitives into `ExecutionRegistry`.
+- Retention/store characterization commit：`c55f22f` (`test: freeze session retention lifecycle`).
+- Eight retention/store methods are now relocated verbatim onto `ExecutionRegistry`; Runtime keeps thin wrappers for compatibility. AST equivalence + full validator + reverse-import check + `git diff --check` PASS；`server.py` is 5598 lines.
+- **Next：** staged review + commit of retention/store relocation only. Then map output snapshot/read-output formatting as the next separate session sub-phase; do not mix stdin/kill yet.
 
 ### 2026-08-21 end-of-session handoff
 

@@ -72,7 +72,13 @@ from .processes import (
     terminate_process_group,
     truncate_output_bytes_tail,
 )
-from .session_store import ExecutionRegistry, PermissionGrant
+from .session_store import (
+    COMPLETED_SESSION_TTL_SECONDS,
+    MAX_RETAINED_OUTPUT_SESSIONS,
+    MAX_RUNTIME_OUTPUT_BYTES,
+    ExecutionRegistry,
+    PermissionGrant,
+)
 from .protocol import (
     PROTOCOL_VERSION,
     STATELESS_PROTOCOL_VERSION,
@@ -367,9 +373,6 @@ DESTRUCTIVE_RE = re.compile(
 MAX_HTTP_REQUEST_BYTES = 1_048_576
 EXEC_PREVIEW_BYTES = 4096
 MAX_ACTIVE_EXEC_SESSIONS = 16
-MAX_RETAINED_OUTPUT_SESSIONS = 32
-COMPLETED_SESSION_TTL_SECONDS = 300
-MAX_RUNTIME_OUTPUT_BYTES = 16 * 1024 * 1024
 SHELL_CONTROL_TOKENS = {"|", "||", "&", "&&", ";", "(", ")"}
 REDIRECTION_TOKENS = {">", ">>", "<", "<>", ">&", "<&", "&>", "&>>"}
 HEREDOC_TOKENS = {"<<", "<<<"}
@@ -2488,66 +2491,25 @@ class Runtime:
         )
 
     def _remember_output_session(self, session: ExecSession) -> None:
-        session.refresh_status()
-        with self.sessions_lock:
-            self.output_sessions.pop(session.session_id, None)
-            self.output_sessions[session.session_id] = session
-            self._evict_retained_locked()
+        self.execution_registry._remember_output_session(session)
 
     def _cleanup_session_scratch(self, session: ExecSession) -> None:
-        if session.scratch_dir:
-            shutil.rmtree(session.scratch_dir, ignore_errors=True)
+        self.execution_registry._cleanup_session_scratch(session)
 
     def _retained_output_bytes_locked(self) -> int:
-        return sum(session.retained_bytes for session in self.sessions.values()) + sum(
-            session.retained_bytes for session in self.output_sessions.values()
-        )
+        return self.execution_registry._retained_output_bytes_locked()
 
     def _evict_retained_locked(self) -> None:
-        retained = self._retained_output_bytes_locked()
-        while self.output_sessions and (
-            len(self.output_sessions) > MAX_RETAINED_OUTPUT_SESSIONS
-            or retained > MAX_RUNTIME_OUTPUT_BYTES
-        ):
-            oldest = self.output_sessions.pop(next(iter(self.output_sessions)))
-            retained -= oldest.retained_bytes
-            self._cleanup_session_scratch(oldest)
+        self.execution_registry._evict_retained_locked()
 
     def _complete_session(self, session: ExecSession) -> None:
-        session.refresh_status()
-        if session.process.poll() is None:
-            return
-        with self.sessions_lock:
-            self.sessions.pop(session.session_id, None)
-        self._remember_output_session(session)
+        self.execution_registry._complete_session(session)
 
     def _prune_sessions(self) -> None:
-        with self.sessions_lock:
-            active = list(self.sessions.values())
-        for session in active:
-            session.refresh_status()
-            if session.process.poll() is not None:
-                self._complete_session(session)
-        cutoff = time.time() - COMPLETED_SESSION_TTL_SECONDS
-        with self.sessions_lock:
-            expired = [
-                session_id
-                for session_id, session in self.output_sessions.items()
-                if session.completed_at is not None and session.completed_at < cutoff
-            ]
-            for session_id in expired:
-                expired_session = self.output_sessions.pop(session_id, None)
-                if expired_session is not None:
-                    self._cleanup_session_scratch(expired_session)
-            self._evict_retained_locked()
+        self.execution_registry._prune_sessions()
 
     def _get_output_session(self, session_id: str) -> ExecSession:
-        self._prune_sessions()
-        with self.sessions_lock:
-            session = self.sessions.get(session_id) or self.output_sessions.get(session_id)
-        if session is None:
-            raise ToolFailure("SESSION_NOT_FOUND", "Output session not found.", category="runtime")
-        return session
+        return self.execution_registry._get_output_session(session_id)
 
     def _format_session_output(self, session: ExecSession, payload: dict[str, Any], args: dict[str, Any]) -> dict[str, Any]:
         terminal = payload.get("status") != "running"
@@ -3019,12 +2981,7 @@ class Runtime:
             self.cancel_session(session_id)
 
     def _get_session(self, session_id: str) -> ExecSession:
-        self._prune_sessions()
-        with self.sessions_lock:
-            session = self.sessions.get(session_id) or self.output_sessions.get(session_id)
-        if session is None:
-            raise ToolFailure("SESSION_NOT_FOUND", "Session not found; stdin access denied.", category="not_found")
-        return session
+        return self.execution_registry._get_session(session_id)
 
     def git_status(self, args: dict[str, Any]) -> dict[str, Any]:
         return self._git_tools().status(args)
