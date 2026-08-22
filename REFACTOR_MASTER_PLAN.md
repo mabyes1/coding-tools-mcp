@@ -306,6 +306,10 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
   - Production relocation in worktree：`_remember_output_session`, `_cleanup_session_scratch`, `_retained_output_bytes_locked`, `_evict_retained_locked`, `_complete_session`, `_prune_sessions`, `_get_output_session`, `_get_session` moved verbatim onto `ExecutionRegistry`; Runtime keeps thin compatibility wrappers.
   - Retention constants `MAX_RETAINED_OUTPUT_SESSIONS`, `COMPLETED_SESSION_TTL_SECONDS`, `MAX_RUNTIME_OUTPUT_BYTES` moved to `session_store.py` and are re-exported by `server.py`.
   - All eight moved methods are AST-identical to pre-relocation HEAD；compile + full validator + reverse-import check + `git diff --check` PASS. Current `server.py`：5641 → 5598（baseline 8353 → 5598）。
+  - Retention/store extraction commit：`feadb6d` (`refactor: move session retention into registry`).
+  - Next sub-phase boundary：move output snapshot/format/read paging only (`_snapshot_session`, `_session_output_summary`, `_format_session_output`, `read_output`) plus their pure output-ref helpers into the same session service. Keep stdin/poll/kill and metadata/list/process-tree out of this commit.
+  - Existing validator has no direct output cursor/paging characterization. Before relocation, freeze explicit-cursor delta snapshot, truncated output-ref/next-action formatting, read-output paging, invalid output mode, and stream/output-ref mismatch rejection.
+  - Output characterization added：explicit byte-cursor delta/cursor totals, invalid output-mode rejection, truncated terminal `output_ref` + `read_output` continuation action, byte-offset paging + next offset/action, and stream/output-ref mismatch rejection. Full validator PASS; ready for tests-only freeze commit.
 - [ ] exec orchestration 與 command policy 分離：
   - `command_policy.py`：解析與 allow/deny 判斷
   - `execution.py`：spawn / active_user delegation / output formatting
@@ -478,7 +482,10 @@ Python server 穩定後再碰 installer/update，避免兩個高風險面同時�
 - Retention/store characterization now passes in the full validator: promotion, FIFO count eviction + scratch cleanup, TTL prune + scratch cleanup, and missing lookup error semantics are frozen.
 - Retention/store characterization commit：`c55f22f` (`test: freeze session retention lifecycle`).
 - Eight retention/store methods are now relocated verbatim onto `ExecutionRegistry`; Runtime keeps thin wrappers for compatibility. AST equivalence + full validator + reverse-import check + `git diff --check` PASS；`server.py` is 5598 lines.
-- **Next：** staged review + commit of retention/store relocation only. Then map output snapshot/read-output formatting as the next separate session sub-phase; do not mix stdin/kill yet.
+- Retention/store extraction commit：`feadb6d` (`refactor: move session retention into registry`)；post-commit worktree returned to only the excluded ADHD note.
+- Output snapshot/read-output is the next isolated session sub-phase. It will not include stdin/poll/kill or session metadata/list/process-tree.
+- Output snapshot/read-output characterization now passes in the full validator, including reconnect-safe explicit cursors and continuation refs/actions.
+- **Next：** commit this output contract freeze separately, then relocate only this output layer.
 
 ### 2026-08-21 end-of-session handoff
 
