@@ -277,7 +277,7 @@ processes / patching / oauth / protocol / transport_* 等既有低階 modules
   - `human_help_me` / computer/browser argument mapping moved to `tools/desktop.py` with explicit interactive-broker callbacks；broker protocol unchanged。
   - Full source validator PASS；old Runtime bodies and extracted helper bodies AST-identical after signature/docstring normalization。
 
-Current `server.py`：5686 lines（baseline 8353 → 5686）。
+Current `server.py`：5641 lines（baseline 8353 → 5641）。
 
 優先採「service object / plain functions + explicit dependencies」，避免把一個 God Class 切成六個互相拿整個 Runtime 的小 God Class。
 
@@ -287,16 +287,21 @@ Current `server.py`：5686 lines（baseline 8353 → 5686）。
 
 這是高風險區，獨立成自己的工程。
 
-- [ ] `ExecutionRegistry` 從 server.py 移出。
+- [x] `ExecutionRegistry` 從 server.py 移出。
   - 2026-08-22 map：registry currently owns active/completed execution maps and locks, **plus** reconnect-shared owner cwd / permission grants / runtime-dir metadata / HTTP session stats provider.
   - Relocation rule：move the registry as-is to `session_store.py`; do not split those historical shared-state fields during this extraction. Move `PermissionGrant` with it only as a data type so `session_store.py` does not import `server.py`; Phase 4 may later separate permission ownership.
   - Existing Phase 0 characterization already freezes owning-vs-shared Runtime close semantics and HTTP reconnect sharing. Add one missing close characterization for a live child process: registry close must clear maps, hard-kill the child, drain readers, and remain idempotent.
   - Live-child close characterization added on 2026-08-22 and full validator PASS：a spawned 60-second child is terminated by `ExecutionRegistry.close()`, maps are cleared, `closed=True`, and repeated close is harmless. Ready for a tests-only freeze commit.
   - Characterization commit：`e63d563` (`test: freeze execution registry close`).
-  - Production relocation completed in worktree：`PermissionGrant` + `ExecutionRegistry` moved verbatim to `session_store.py`; `server.py` re-exports them via import. AST equivalence PASS for both classes versus pre-relocation HEAD.
+  - Production relocation：`PermissionGrant` + `ExecutionRegistry` moved verbatim to `session_store.py`; `server.py` re-exports them via import. AST equivalence PASS for both classes versus pre-relocation HEAD.
   - Compile + full validator PASS；`session_store.py` has no reverse import of `server.py`；`git diff --check` PASS.
-  - Current pre-commit line count：`server.py` 5686 → 5641（baseline 8353 → 5641）。
+  - Extraction commit：`f1dad6b` (`refactor: extract execution registry`).
+  - `server.py`：5686 → 5641（baseline 8353 → 5641）。
 - [ ] session retention / output snapshot / prune / cancel / stdin lifecycle 收斂成單一 session service。
+  - 2026-08-22 boundary decision：**do not move the whole remaining session block at once**. First move only retention/store lifecycle into `ExecutionRegistry`: completed-session remember, scratch cleanup, retained-byte accounting, eviction, completion, TTL prune, and active/completed lookup.
+  - Keep `_make_session` with later execution/spawn orchestration. Keep output formatting/snapshot/read-output and stdin/kill/poll as separate later sub-phases. Keep `cancel_request` in Runtime as request-id → session-id glue even after session cancellation moves.
+  - Existing validator does not directly freeze retention eviction/TTL behavior. Add characterization for completed-session promotion, oldest eviction + scratch cleanup, TTL prune + scratch cleanup, and missing-session lookup errors before moving these methods.
+  - Retention/store characterization added：completed active session promotes to retained output；retained count evicts the oldest entry at `MAX_RETAINED_OUTPUT_SESSIONS` and removes its scratch dir；TTL prune removes expired retained output + scratch dir；missing active/completed lookups preserve `SESSION_NOT_FOUND` with their existing distinct categories. Full validator PASS; ready for tests-only freeze commit.
 - [ ] exec orchestration 與 command policy 分離：
   - `command_policy.py`：解析與 allow/deny 判斷
   - `execution.py`：spawn / active_user delegation / output formatting
@@ -464,8 +469,10 @@ Python server 穩定後再碰 installer/update，避免兩個高風險面同時�
 - Phase 3 map confirms `ExecutionRegistry` also carries owner cwd / permission grant shared state. This impurity is preserved intentionally for the relocation; splitting it now would combine architecture change with movement.
 - Live-child registry close characterization now passes in the full validator.
 - Registry close characterization commit：`e63d563` (`test: freeze execution registry close`).
-- `PermissionGrant` + `ExecutionRegistry` are now relocated verbatim to `session_store.py`; AST equivalence + full validator + reverse-import check all PASS.
-- **Next：** staged review and commit of the registry relocation only. After that, map the remaining session lifecycle methods before moving any of them; do not jump straight into exec orchestration.
+- `PermissionGrant` + `ExecutionRegistry` relocation commit：`f1dad6b` (`refactor: extract execution registry`)；AST equivalence + full validator + reverse-import check all PASS；post-commit worktree returned to only the excluded ADHD note.
+- Session lifecycle map completed. The next extraction is deliberately narrower than the phase headline: retention/store primitives only. Output formatting, stdin/poll/kill, request cancellation, and spawn orchestration remain separate.
+- Retention/store characterization now passes in the full validator: promotion, FIFO count eviction + scratch cleanup, TTL prune + scratch cleanup, and missing lookup error semantics are frozen.
+- **Next：** commit this retention/store freeze separately, then move only those store primitives into `ExecutionRegistry`.
 
 ### 2026-08-21 end-of-session handoff
 
