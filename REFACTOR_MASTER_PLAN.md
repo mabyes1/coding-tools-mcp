@@ -327,7 +327,12 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
   - `execution.py`：spawn / active_user delegation / output formatting
   - 2026-08-22 next boundary：extract the pure shell/path parsing layer first (`shlex_split`, heredoc stripping, executable/path candidate parsing, inline-script detection, env wrapping, literal-network command detection) plus only the constants they own. Runtime allow/deny decisions stay in place for this first command-policy commit.
   - Add focused characterization for heredoc body stripping without hiding live redirections/commands, env-wrapped path discovery, inline script detection, inspectable path classification, and literal-network command classification before relocation.
-  - Pure parser characterization added and full validator PASS：heredoc body stripping preserves live redirection/commands and ignores quoted markers；shell executable discovery；env-wrapped path/command parsing；inline `python -c` detection；inspectable path classification；literal-only network command classification. Ready for tests-only freeze commit.
+  - Pure parser characterization added and full validator PASS：heredoc body stripping preserves live redirection/commands and ignores quoted markers；shell executable discovery；env-wrapped path/command parsing；inline `python -c` detection；inspectable path classification；literal-only network command classification.
+  - Characterization commit：`59f1d4f` (`test: freeze command policy parsers`).
+  - Production pure-parser relocation completed：17 shell/path parser functions plus their token/command constants moved to `command_policy.py`; `server.py` re-exports the compatibility names and Runtime allow/deny decisions are unchanged.
+  - All 17 moved functions are AST-identical to pre-relocation HEAD；`command_policy.py` has no reverse import of `server.py`；compile + full validator + `git diff --check` PASS using the service venv interpreter (`C:\\ProgramData\\WebGPTCodingToolsMCPService\\venv\\Scripts\\python.exe`).
+  - Current pre-commit `server.py`：5281 → 4811（baseline 8353 → 4811）。
+  - Next boundary：freeze and extract Runtime allow/deny command-policy orchestration without moving process spawn/active-user execution in the same commit.
 - [ ] Runtime 只保留 request-to-service wiring。
 - [ ] 明確定義 registry ownership：誰 create、誰 close、HTTP reconnect 如何 share。
 
