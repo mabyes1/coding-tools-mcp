@@ -54,6 +54,29 @@ def main() -> int:
         raise RuntimeError(
             "stale pre-V9 public tools remain exposed: " + ", ".join(sorted(stale_public_tools))
         )
+    if elevated_actions.ELEVATED_ACTIONS.intersection(elevated_actions.MCP_PERMISSION_NAMES):
+        raise RuntimeError("ordinary MCP permission names overlap true elevated action names")
+    try:
+        elevated_actions.request_elevated_action("validator-unregistered-elevated-action", timeout_seconds=1)
+    except server.ToolFailure as exc:
+        if exc.code != "ELEVATED_ACTION_NOT_ALLOWED" or exc.category != "security":
+            raise RuntimeError("unregistered elevated action no longer fails at the manifest boundary") from exc
+    else:
+        raise RuntimeError("unregistered elevated action bypassed the manifest allowlist")
+    try:
+        elevated_actions.request_permission_approval(
+            tool_name="request_elevated_action",
+            permission="network",
+            reason="validator boundary check",
+            arguments={},
+            scope="once",
+            ttl_seconds=60,
+        )
+    except server.ToolFailure as exc:
+        if exc.code != "INVALID_ARGUMENT":
+            raise RuntimeError("ordinary permission approval accepted an elevated-action tool") from exc
+    else:
+        raise RuntimeError("ordinary permission approval crossed into the elevated-action API")
     public_contract = [server.tool_definition(name) for name in server.PUBLIC_TOOL_NAMES]
     public_contract_bytes = json.dumps(
         public_contract,
@@ -116,6 +139,21 @@ def main() -> int:
         overlay_source = Path(__file__).resolve().with_name("ComputerUseOverlay.cs")
         activity_viewer_source = Path(__file__).resolve().with_name("ActivityLogViewer.cs")
         action_contract_source = package_parent / "coding_tools_mcp" / "computer-use-actions.json"
+        elevated_install_text = Path(__file__).resolve().with_name("install-elevated-broker.ps1").read_text(encoding="utf-8")
+        interactive_install_text = Path(__file__).resolve().with_name("install-interactive-broker.ps1").read_text(encoding="utf-8")
+        deploy_text = Path(__file__).resolve().parent.joinpath("internal", "deploy-coding-tools.ps1").read_text(encoding="utf-8")
+        for label, script_text in (
+            ("elevated installer", elevated_install_text),
+            ("deploy", deploy_text),
+        ):
+            if '/remove:g "${currentAccount}"' not in script_text:
+                raise RuntimeError(f"{label} stopped removing signed-in-user write access from the elevated queue")
+            for acl_fragment in ("*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "${localServiceSid}:(OI)(CI)M"):
+                if acl_fragment not in script_text:
+                    raise RuntimeError(f"{label} elevated queue ACL contract lost {acl_fragment}")
+        for acl_fragment in ("*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "${localServiceSid}:(OI)(CI)M"):
+            if acl_fragment not in interactive_install_text:
+                raise RuntimeError(f"interactive broker queue ACL contract lost {acl_fragment}")
         helper_refs = [
             windows_root / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "System.Web.Extensions.dll",
             windows_root / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "WPF" / "UIAutomationClient.dll",

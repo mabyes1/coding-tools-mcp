@@ -373,9 +373,14 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
   - `permissions.py` now owns `PermissionGrant`, reconnect-shared `PermissionStore`, arguments digest, owner/workspace/tool/permission matching, TTL expiry, once-grant consumption, session-grant reuse, approval response construction, and request cleanup.
   - `ExecutionRegistry` no longer owns grant dictionaries or grant semantics; it carries only the shared `PermissionStore` anchor so existing reconnect construction that shares only the execution registry preserves behavior.
   - Runtime `_permission_*` and `request_permissions()` are compatibility facades. Existing once/session/different-owner/dangerous/privileged-boundary characterization remains PASS；`server.py`：4168 → 4057（baseline 8353 → 4057）。
-- [ ] normal approval 與 true elevation 的 API 名稱與型別保持清楚區隔。
-- [ ] Elevated Action 仍只能透過 manifest-defined actions。
-- [ ] Interactive broker 與 Elevated broker 的 queue / identity / ACL regression checks 補齊。
+- [x] normal approval 與 true elevation 的 API 名稱與型別保持清楚區隔。
+  - Validator asserts MCP permission names do not overlap elevated action names；ordinary `request_permission_approval` rejects the elevated-action tool boundary；`request_permissions` remains public while `request_elevated_action` remains hidden from the 20-tool public surface.
+- [x] Elevated Action 仍只能透過 manifest-defined actions。
+  - Validator calls an unregistered action and requires `ELEVATED_ACTION_NOT_ALLOWED` / security **before** any broker availability/queue path can matter.
+- [x] Interactive broker 與 Elevated broker 的 queue / identity / ACL regression checks 補齊。
+  - Existing launcher compile/runtime self-tests and broker PID/heartbeat liveness checks remain active. New static ACL guards require elevated queue signed-in-user write removal plus SYSTEM/Administrators full-control and LocalService modify grants in installer/deploy paths; interactive queue retains the required SYSTEM/Administrators/LocalService grants.
+
+**Phase 4：COMPLETE / GREEN.** Grant semantics, owner/reconnect behavior, dangerous-mode bypass, OS-privilege disclaimer, elevated manifest boundary, launcher/broker liveness, and queue ACL contracts all pass the full validator.
 
 **Exit gate：** ACL、broker identity、grant semantics、dangerous mode 都有 automated or scripted verification。
 
