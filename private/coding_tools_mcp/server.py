@@ -60,13 +60,7 @@ from .oauth import (
     validate_access_token,
     verify_pkce,
 )
-from .patching import (
-    AtomicPatchCommitter,
-    FileBaseline,
-    StagedFile,
-    apply_update_hunks,
-    parse_patch,
-)
+from .patching import AtomicPatchCommitter
 from .processes import (
     HARD_KILL_SIGNAL,
     SESSION_BUFFER_BYTES,
@@ -131,6 +125,7 @@ from .tools.images import (
     should_resize_image,
     view_image_tool,
 )
+from .tools.patch_tools import apply_patch_tool
 from .tool_catalog import (
     PUBLIC_TOOL_NAMES,
     TOOL_REGISTRY,
@@ -1859,127 +1854,16 @@ class Runtime:
         )
 
     def apply_patch(self, args: dict[str, Any]) -> dict[str, Any]:
-        patch = str(args.get("patch", ""))
-        dry_run = bool(args.get("dry_run", False))
-        with self.patch_lock:
-            operations = parse_patch(patch)
-            for op in operations:
-                op.path = self._normalize_patch_path(
-                    op.path,
-                    require_existing=op.kind in {"update", "delete"},
-                )
-                if op.move_to:
-                    op.move_to = self._normalize_patch_path(op.move_to, require_existing=False)
-            staged: dict[str, StagedFile] = {}
-            summaries: list[str] = []
-            affected: list[dict[str, str]] = []
-            additions = 0
-            removals = 0
-            for op in operations:
-                if op.kind in {"add", "update", "delete"}:
-                    self.workspace.reject_write_symlink(op.path)
-                if op.move_to:
-                    self.workspace.reject_write_symlink(op.move_to)
-                if op.kind == "add":
-                    target = self.workspace.resolve_for_write(op.path)
-                    if target.existed:
-                        raise ToolFailure("PATCH_FAILED", "Cannot add file that already exists.", category="validation")
-                    baseline = FileBaseline.capture(target.path)
-                    staged[target.display] = StagedFile(
-                        target.display,
-                        target.path,
-                        op.add_content or "",
-                        baseline,
-                        None,
-                    )
-                    affected.append({"path": target.display, "operation": "add"})
-                    summaries.append(f"A {target.display}")
-                    additions += len((op.add_content or "").splitlines())
-                elif op.kind == "delete":
-                    target = self.workspace.resolve_existing(op.path)
-                    if target.path.is_dir():
-                        raise ToolFailure("PATCH_FAILED", "Cannot delete a directory.", category="validation")
-                    prior = staged.get(target.display)
-                    baseline = prior.baseline if prior is not None else FileBaseline.capture(target.path)
-                    staged[target.display] = StagedFile(target.display, target.path, None, baseline, baseline.mode)
-                    affected.append({"path": target.display, "operation": "delete"})
-                    summaries.append(f"D {target.display}")
-                    removals += len((baseline.data or b"").splitlines())
-                elif op.kind == "update":
-                    source = self.workspace.resolve_existing(op.path)
-                    if source.path.is_dir():
-                        raise ToolFailure("PATCH_FAILED", "Cannot update a directory.", category="validation")
-                    prior = staged.get(source.display)
-                    if prior is not None and prior.content is None:
-                        raise ToolFailure("PATCH_FAILED", "Cannot update a deleted file.", category="validation")
-                    baseline = prior.baseline if prior is not None else FileBaseline.capture(source.path)
-                    content = prior.content if prior is not None else baseline.text(source.display)
-                    assert content is not None
-                    updated = apply_update_hunks(content, op.hunks, op.path)
-                    for hunk in op.hunks:
-                        for line in hunk:
-                            additions += line.startswith("+")
-                            removals += line.startswith("-")
-                    source_mode = prior.mode if prior is not None else baseline.mode
-                    if op.move_to:
-                        dest = self.workspace.resolve_for_write(op.move_to)
-                        if dest.existed and dest.display != source.display:
-                            raise ToolFailure("PATCH_FAILED", "Cannot move over an existing file.", category="validation")
-                        dest_baseline = baseline if dest.display == source.display else FileBaseline.capture(dest.path)
-                        staged[source.display] = StagedFile(
-                            source.display,
-                            source.path,
-                            None,
-                            baseline,
-                            source_mode,
-                        )
-                        staged[dest.display] = StagedFile(
-                            dest.display,
-                            dest.path,
-                            updated,
-                            dest_baseline,
-                            source_mode,
-                        )
-                        affected.append({"path": dest.display, "old_path": source.display, "operation": "move"})
-                        summaries.append(f"R {source.display} -> {dest.display}")
-                    else:
-                        staged[source.display] = StagedFile(
-                            source.display,
-                            source.path,
-                            updated,
-                            baseline,
-                            source_mode,
-                        )
-                        affected.append({"path": source.display, "operation": "update"})
-                        summaries.append(f"M {source.display}")
-            if not affected:
-                raise ToolFailure("PATCH_FAILED", "No files were modified.", category="validation")
-            if not dry_run:
-                self._commit_staged_files(list(staged.values()))
-        return {
-            "dry_run": dry_run,
-            "clean": True,
-            "base": self.default_cwd_display(),
-            "summary": "\n".join(summaries),
-            "affected_files": affected,
-            "additions": additions,
-            "removals": removals,
-            "warnings": [],
-        }
-
-    def _normalize_patch_path(self, raw_path: str, *, require_existing: bool) -> str:
-        """Return a workspace-relative patch path resolved from the default cwd."""
-        resolved = self.resolve_existing(raw_path) if require_existing else self.resolve_for_write(raw_path)
-        return resolved.display
-
-    def _commit_staged_files(self, staged: list[StagedFile]) -> None:
-        self.patch_committer.commit(staged)
-        for change in staged:
-            if change.display in self.patch_baselines:
-                continue
-            self.patch_baselines[change.display] = (
-                None if change.baseline.data is None else change.baseline.data.decode("utf-8", errors="replace")
-            )
+        return apply_patch_tool(
+            args,
+            workspace=self.workspace,
+            resolve_existing=self.resolve_existing,
+            resolve_for_write=self.resolve_for_write,
+            default_cwd_display=self.default_cwd_display,
+            patch_lock=self.patch_lock,
+            patch_committer=self.patch_committer,
+            patch_baselines=self.patch_baselines,
+        )
 
     def exec_command(self, args: dict[str, Any]) -> dict[str, Any]:
         self._prune_sessions()

@@ -252,6 +252,11 @@ processes / patching / oauth / protocol / transport_* 等既有低階 modules
   - Decision：treat this as the final Phase 2 tool-domain extraction rather than carrying it into Phase 3. Keep low-level parsing/atomic commit primitives in existing `patching.py`; extract Runtime orchestration only.
   - Existing characterization only proves relative-path update from persistent default cwd, so add add/dry-run/move/delete + baseline semantics before production relocation.
   - Characterization expanded on 2026-08-22：add result/content, dry-run no-mutation/no-baseline-change, update+move metadata/content, delete counts, patch-baseline registration, and staged validation failure all-or-nothing behavior. Full validator PASS; ready for a tests-only freeze commit.
+  - Characterization commit：`027ad52` (`test: freeze apply patch orchestration`).
+  - Production extraction now starts from a green checkpoint; target module is `tools/patch_tools.py`, while `patching.py` remains the low-level parser/atomic-commit layer.
+  - Production orchestration moved to `tools/patch_tools.py`; `Runtime.apply_patch()` is now a thin explicit-dependency delegation. `patching.py` remained untouched.
+  - Compile + expanded full validator PASS；repository search confirms no stale Runtime-only patch helpers and no reverse import of `server.py` from the new module；`git diff --check` PASS.
+  - Current pre-commit line count：`server.py` 5802 → 5686（baseline 8353 → 5686）。
 - [x] image tool
   - Characterization commit：`7fbf68f` (`test: freeze image tool behavior`)
   - Extraction commit：`01e2b5c` (`refactor: extract image tool domain`)
@@ -443,7 +448,9 @@ Python server 穩定後再碰 installer/update，避免兩個高風險面同時�
 - Extraction commit：`b178501` (`refactor: extract git tool domain`)；post-commit worktree returned to only the excluded `ADHD_ASSESSMENT_NOTES_2026-08-21.md` untracked file.
 - `apply_patch` dependency map completed after the Git commit. It is sufficiently localized to remain a Phase 2 extraction; permission grants are not implemented inside the patch orchestrator.
 - Characterization now covers add/dry-run/move/delete, patch-baseline registration, and staged validation failure without partial commit；full validator PASS before any production relocation.
-- **Next：** commit this validator freeze separately, then move orchestration out of Runtime while leaving `patching.py` transaction primitives untouched.
+- Characterization freeze commit：`027ad52` (`test: freeze apply patch orchestration`).
+- Production orchestration is now in `tools/patch_tools.py`; `Runtime.apply_patch()` is a thin delegation and `patching.py` remains unchanged. Expanded validator + `git diff --check` PASS.
+- **Next：** staged review of only `server.py` + `tools/patch_tools.py` + this plan, commit extraction, then reassess whether Phase 2 can close and Phase 3 can start.
 
 ### 2026-08-21 end-of-session handoff
 
