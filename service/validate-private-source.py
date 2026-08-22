@@ -1039,6 +1039,30 @@ def main() -> int:
                 raise RuntimeError("active-user one-shot metadata contract drifted")
             if "stdout" in active or "stderr" in active or "active_user" not in str(active.get("summary") or ""):
                 raise RuntimeError("active-user summary formatting contract drifted")
+
+            missing_tool_payload: dict[str, object] = {
+                "status": "exited",
+                "exit_code": 127,
+                "stdout": "",
+                "stderr": "definitely-missing-command: command not found",
+            }
+            exec_runtime._add_exec_diagnostics(missing_tool_payload)
+            if missing_tool_payload.get("error_kind") != "tool_not_found":
+                raise RuntimeError("exec diagnostic tool-not-found classification drifted")
+            process_error = missing_tool_payload.get("process_error")
+            if not isinstance(process_error, dict) or process_error.get("exit_code") != 127:
+                raise RuntimeError("exec diagnostic process-error metadata drifted")
+
+            timeout_payload: dict[str, object] = {
+                "status": "timeout",
+                "exit_code": None,
+                "stdout": "",
+                "stderr": "",
+                "timed_out": True,
+            }
+            exec_runtime._add_exec_diagnostics(timeout_payload)
+            if timeout_payload.get("error_kind") != "timeout":
+                raise RuntimeError("exec diagnostic timeout classification drifted")
         finally:
             server.request_interactive_exec = original_interactive_exec
             exec_runtime.close()

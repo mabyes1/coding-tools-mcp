@@ -344,7 +344,9 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
   - Execution characterization commit：`2a9100d` (`test: freeze execution orchestration`).
   - Managed spawn/session registration/initial wait and active-user one-shot result formatting moved to `execution.py` via `ExecutionService`; Runtime retains request-id registration and provides explicit policy/env/landlock/diagnostic hooks. `process_group_popen_kwargs` moved to `processes.py` as a process primitive and remains re-exported by `server.py`.
   - Execution extraction compile + full validator + reverse-import check + `git diff --check` PASS；`server.py`：4660 → 4370（baseline 8353 → 4370）。
+  - Execution extraction commit：`00aedff` (`refactor: extract execution service`).
   - Next boundary：move command-environment construction and execution diagnostics into execution-owned helpers while preserving the existing Runtime compatibility methods used by Git and validators.
+  - Diagnostic characterization added：missing-executable exit classification remains `tool_not_found` with process metadata；timeout classification remains `timeout`. Existing Windows command-env and interactive-env characterization remains green. Ready for tests-only freeze commit.
 - [ ] Runtime 只保留 request-to-service wiring。
 - [ ] 明確定義 registry ownership：誰 create、誰 close、HTTP reconnect 如何 share。
 
