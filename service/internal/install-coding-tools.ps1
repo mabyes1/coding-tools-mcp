@@ -26,8 +26,10 @@ $workspaceRoot = "D:\coding-tools-mcp"
 $elevatedQueueRoot = Join-Path $serviceRoot "elevated-requests"
 $interactiveQueueRoot = Join-Path $serviceRoot "interactive-requests"
 $localServiceSid = "*S-1-5-19"
+$managedServiceFiles = Get-CodingToolsManagedServiceFiles
 $oauthStateBackup = Join-Path ([IO.Path]::GetTempPath()) ("web-gpt-oauth-state-" + [guid]::NewGuid().ToString("N") + ".sqlite")
 $hadOAuthStateBackup = $false
+$brokerStageRoot = Join-Path ([IO.Path]::GetTempPath()) ("web-gpt-broker-stage-" + [guid]::NewGuid().ToString("N"))
 
 Start-Transcript -LiteralPath $installLog -Force
 try {
@@ -46,17 +48,9 @@ try {
         }
     }
 
+    Stop-CodingToolsPrivateServices 15
     foreach ($serviceName in @("WebGPTCloudflareTunnel", "WebGPTCodingToolsMCP")) {
         if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
-            Stop-Service -Name $serviceName -Force -ErrorAction SilentlyContinue
-            $stopDeadline = (Get-Date).AddSeconds(15)
-            do {
-                Start-Sleep -Milliseconds 250
-                $serviceState = (Get-Service -Name $serviceName -ErrorAction SilentlyContinue).Status
-            } until ($serviceState -ne "Running" -or (Get-Date) -ge $stopDeadline)
-            if ($serviceState -eq "Running") {
-                throw "Timed out stopping service: $serviceName"
-            }
             & sc.exe delete $serviceName | Out-Host
         }
     }
@@ -122,8 +116,6 @@ try {
         throw "Installing coding-tools-mcp failed with exit code $LASTEXITCODE."
     }
     Copy-Item -LiteralPath $privateSource -Destination (Join-Path $serviceRoot "app") -Recurse -Force
-    Copy-Item -LiteralPath (Join-Path $privateSource "computer-use-actions.json") `
-        -Destination (Join-Path $serviceRoot "computer-use-actions.json") -Force
     if ($hadOAuthStateBackup) {
         Copy-Item -LiteralPath $oauthStateBackup `
             -Destination (Join-Path $serviceRoot "data\oauth-state.sqlite") -Force
@@ -140,84 +132,12 @@ try {
     Copy-Item -LiteralPath (Join-Path $templateRoot "gpt-coding-mcp.yml") -Destination $serviceRoot -Force
     Copy-Item -LiteralPath (Join-Path $templateRoot "WebGPTCodingToolsMCP.xml") -Destination $serviceRoot -Force
     Copy-Item -LiteralPath (Join-Path $templateRoot "WebGPTCloudflareTunnel.xml") -Destination $serviceRoot -Force
-    foreach ($brokerFile in @("elevated-broker.ps1", "manage-elevated-broker.ps1")) {
-        Copy-Item -LiteralPath (Join-Path $templateRoot $brokerFile) -Destination (Join-Path $serviceRoot $brokerFile) -Force
-    }
-    foreach ($brokerFile in @("interactive-broker.ps1", "manage-interactive-broker.ps1", "install-interactive-broker.ps1")) {
-        Copy-Item -LiteralPath (Join-Path $templateRoot $brokerFile) -Destination (Join-Path $serviceRoot $brokerFile) -Force
-    }
-    $computerUseSource = Join-Path $templateRoot "ComputerUseHelper.cs"
-    $computerUseExe = Join-Path $serviceRoot "computer-use-helper.exe"
-    $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-    $windowsPowerShellForBuild = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
-    $automationRef = (& $windowsPowerShellForBuild -NoLogo -NoProfile -NonInteractive -Command "[System.Management.Automation.PowerShell].Assembly.Location").Trim()
-    $brokerLauncherSource = Join-Path $templateRoot "ElevatedBrokerLauncher.cs"
-    $brokerLauncherExe = Join-Path $serviceRoot "elevated-broker-launcher.exe"
-
-    # A repair/reinstall can encounter the existing scheduled launcher still
-    # running from this exact path. Stop it before recompiling the WinExe.
-    $installedBrokerManager = Join-Path $serviceRoot "manage-elevated-broker.ps1"
-    if (Test-Path -LiteralPath $installedBrokerManager -PathType Leaf) {
-        & $windowsPowerShellForBuild -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-            -File $installedBrokerManager -Action Stop 2>$null | Out-Null
-    }
-    Stop-ScheduledTask -TaskName "WebGPT-Elevated-Broker" -ErrorAction SilentlyContinue
-    Get-Process -Name "elevated-broker-launcher" -ErrorAction SilentlyContinue |
-        Stop-Process -Force -ErrorAction SilentlyContinue
-    $unlockDeadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
-    while ((Get-Process -Name "elevated-broker-launcher" -ErrorAction SilentlyContinue) -and
-           [DateTimeOffset]::UtcNow -lt $unlockDeadline) {
-        Start-Sleep -Milliseconds 100
-    }
-    if (Get-Process -Name "elevated-broker-launcher" -ErrorAction SilentlyContinue) {
-        throw "Could not stop the existing elevated broker launcher before service install."
-    }
-
-    & $csc /nologo /target:winexe /optimize+ /out:$brokerLauncherExe `
-        /reference:$automationRef `
-        $brokerLauncherSource
-    if ($LASTEXITCODE -ne 0) { throw "Could not build the windowless elevated broker launcher." }
-    $interactiveBrokerLauncherSource = Join-Path $templateRoot "InteractiveBrokerLauncher.cs"
-    $interactiveBrokerLauncherExe = Join-Path $serviceRoot "interactive-broker-launcher.exe"
-    $installedInteractiveBrokerManager = Join-Path $serviceRoot "manage-interactive-broker.ps1"
-    if (Test-Path -LiteralPath $installedInteractiveBrokerManager -PathType Leaf) {
-        & $windowsPowerShellForBuild -NoLogo -NoProfile -ExecutionPolicy Bypass `
-            -File $installedInteractiveBrokerManager -Action Stop 2>$null | Out-Null
-    }
-    Stop-ScheduledTask -TaskName "WebGPT-Interactive-Broker" -ErrorAction SilentlyContinue
-    Get-Process -Name "interactive-broker-launcher" -ErrorAction SilentlyContinue |
-        Stop-Process -Force -ErrorAction SilentlyContinue
-    & $csc /nologo /target:winexe /optimize+ /out:$interactiveBrokerLauncherExe `
-        /reference:$automationRef `
-        $interactiveBrokerLauncherSource
-    if ($LASTEXITCODE -ne 0) { throw "Could not build the windowless interactive broker launcher." }
-    & $csc /nologo /target:exe /optimize+ /out:$computerUseExe `
-        /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\System.Web.Extensions.dll" `
-        /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationClient.dll" `
-        /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationTypes.dll" `
-        /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\WindowsBase.dll" `
-        /reference:System.Drawing.dll /reference:System.Windows.Forms.dll $computerUseSource
-    if ($LASTEXITCODE -ne 0) { throw "Could not build Computer Use helper." }
-    $computerUseOverlaySource = Join-Path $templateRoot "ComputerUseOverlay.cs"
-    $computerUseOverlayExe = Join-Path $serviceRoot "computer-use-overlay.exe"
-    Get-Process -Name "computer-use-overlay" -ErrorAction SilentlyContinue |
-        Stop-Process -Force -ErrorAction SilentlyContinue
-    & $csc /nologo /target:winexe /optimize+ /out:$computerUseOverlayExe `
-        /reference:System.Drawing.dll /reference:System.Windows.Forms.dll $computerUseOverlaySource
-    if ($LASTEXITCODE -ne 0) { throw "Could not build Computer Use overlay." }
-    $activityLogViewerSource = Join-Path $templateRoot "ActivityLogViewer.cs"
-    $activityLogViewerExe = Join-Path $serviceRoot "activity-log-viewer.exe"
-    Get-Process -Name "activity-log-viewer" -ErrorAction SilentlyContinue |
-        Stop-Process -Force -ErrorAction SilentlyContinue
-    & $csc /nologo /target:winexe /optimize+ /out:$activityLogViewerExe `
-        /reference:System.Drawing.dll /reference:System.Windows.Forms.dll $activityLogViewerSource
-    if ($LASTEXITCODE -ne 0) { throw "Could not build Activity Log viewer." }
-    $mascotAssetSource = Join-Path $templateRoot "assets"
-    if (Test-Path -LiteralPath $mascotAssetSource -PathType Container) {
-        Copy-Item -LiteralPath $mascotAssetSource -Destination (Join-Path $serviceRoot "assets") -Recurse -Force
-    }
-    $brokerPath = Join-Path $serviceRoot "elevated-broker.ps1"
-    New-ElevatedActionManifest $brokerPath (Join-Path $serviceRoot "elevated-actions.manifest.json")
+    New-Item -ItemType Directory -Path $brokerStageRoot -Force | Out-Null
+    $brokerServiceStage = New-CodingToolsBrokerArtifactStage `
+        $brokerStageRoot `
+        $templateRoot `
+        (Join-Path $privateSource "computer-use-actions.json")
+    # Existing broker processes are stopped by Install-CodingToolsBrokerArtifacts.
     Copy-Item -LiteralPath $credentialSource -Destination (Join-Path $serviceRoot $credentialName) -Force
     Copy-Item -LiteralPath $winsw -Destination (Join-Path $serviceRoot "WebGPTCodingToolsMCP.exe") -Force
     Copy-Item -LiteralPath $winsw -Destination (Join-Path $serviceRoot "WebGPTCloudflareTunnel.exe") -Force
@@ -286,52 +206,18 @@ try {
         "${localServiceSid}:(OI)(CI)M" /C | Out-Host
     & icacls.exe (Join-Path $serviceRoot "logs") /grant `
         "${localServiceSid}:(OI)(CI)M" /C | Out-Host
-    & icacls.exe $elevatedQueueRoot /inheritance:r /remove:g "${currentAccount}" /C | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw "Removing signed-in user write access from elevated broker queue failed." }
-    & icacls.exe $elevatedQueueRoot /inheritance:r /grant:r `
-        "*S-1-5-18:(OI)(CI)F" `
-        "*S-1-5-32-544:(OI)(CI)F" `
-        "${localServiceSid}:(OI)(CI)M" /C | Out-Host
-    & icacls.exe $interactiveQueueRoot /inheritance:r /grant:r `
-        "*S-1-5-18:(OI)(CI)F" `
-        "*S-1-5-32-544:(OI)(CI)F" `
-        "${currentAccount}:(OI)(CI)M" `
-        "${localServiceSid}:(OI)(CI)M" /C | Out-Host
-    foreach ($privilegedFile in @(
-        "elevated-broker.ps1",
-        "elevated-broker-launcher.exe",
-        "elevated-actions.manifest.json",
-        "manage-elevated-broker.ps1",
-        "elevated-actions.manifest.json"
-    )) {
-        $privilegedPath = Join-Path $serviceRoot $privilegedFile
-        if (-not (Test-Path -LiteralPath $privilegedPath -PathType Leaf)) { continue }
-        & icacls.exe $privilegedPath /inheritance:r /grant:r `
-            "*S-1-5-18:F" `
-            "*S-1-5-32-544:F" `
-            "${currentAccount}:RX" `
-            "${localServiceSid}:RX" /C | Out-Host
-        if ($LASTEXITCODE -ne 0) { throw "Could not protect privileged broker file: $privilegedPath" }
-    }
     & icacls.exe $workspaceRoot /grant `
         "${localServiceSid}:(OI)(CI)M" /T /C | Out-Host
     & icacls.exe $pythonRoot /grant `
         "${localServiceSid}:(OI)(CI)RX" /C | Out-Host
 
-    Write-Host "Installing the interactive elevated action broker..."
-    $brokerManager = Join-Path $serviceRoot "manage-elevated-broker.ps1"
-    $windowsPowerShell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
-    & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $brokerManager -Action Install
-    if ($LASTEXITCODE -ne 0) { throw "Could not install the interactive elevated broker task." }
-    & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $brokerManager -Action Start
-    if ($LASTEXITCODE -ne 0) { throw "Could not start the interactive elevated broker." }
-
-    Write-Host "Installing the non-elevated signed-in desktop execution broker..."
-    $interactiveBrokerManager = Join-Path $serviceRoot "manage-interactive-broker.ps1"
-    & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $interactiveBrokerManager -Action Install
-    if ($LASTEXITCODE -ne 0) { throw "Could not install the non-elevated interactive broker task." }
-    & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $interactiveBrokerManager -Action Start
-    if ($LASTEXITCODE -ne 0) { throw "Could not start the non-elevated interactive broker." }
+    Install-CodingToolsBrokerArtifacts `
+        $brokerServiceStage `
+        $serviceRoot `
+        $managedServiceFiles `
+        $elevatedQueueRoot `
+        $interactiveQueueRoot `
+        $localServiceSid
 
     Write-Host "Stopping and removing the old scheduled supervisors..."
     foreach ($taskName in @("WebGPT-CodingTools-MCP", "WebGPT-Cloudflare-Tunnel")) {
@@ -381,18 +267,7 @@ try {
     & sc.exe config WebGPTCloudflareTunnel obj= "NT AUTHORITY\LocalService" | Out-Host
     & sc.exe config WebGPTCloudflareTunnel depend= WebGPTCodingToolsMCP | Out-Host
 
-    Start-Service -Name WebGPTCodingToolsMCP
-    $deadline = (Get-Date).AddSeconds(30)
-    do {
-        Start-Sleep -Milliseconds 500
-        $listener = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue
-    } until ($listener -or (Get-Date) -ge $deadline)
-    if (-not $listener) {
-        throw "MCP service started but port 8765 did not become ready."
-    }
-
-    Start-Service -Name WebGPTCloudflareTunnel
-    Start-Sleep -Seconds 3
+    Start-CodingToolsPrivateServices | Out-Null
 
     Get-Service -Name WebGPTCodingToolsMCP, WebGPTCloudflareTunnel |
         Select-Object Name, Status, StartType |
@@ -400,6 +275,7 @@ try {
     Write-Host "SERVICE_INSTALL_OK"
 }
 finally {
+    Remove-Item -LiteralPath $brokerStageRoot -Recurse -Force -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $oauthStateBackup) {
         Remove-Item -LiteralPath $oauthStateBackup -Force -ErrorAction SilentlyContinue
     }

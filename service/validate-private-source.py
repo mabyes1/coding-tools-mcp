@@ -142,19 +142,44 @@ def main() -> int:
         action_contract_source = package_parent / "coding_tools_mcp" / "computer-use-actions.json"
         elevated_install_text = Path(__file__).resolve().with_name("install-elevated-broker.ps1").read_text(encoding="utf-8")
         interactive_install_text = Path(__file__).resolve().with_name("install-interactive-broker.ps1").read_text(encoding="utf-8")
-        deploy_text = Path(__file__).resolve().parent.joinpath("internal", "deploy-coding-tools.ps1").read_text(encoding="utf-8")
+        internal_root = Path(__file__).resolve().parent / "internal"
+        deployment_common_text = internal_root.joinpath("deployment-common.ps1").read_text(encoding="utf-8")
+        deploy_text = internal_root.joinpath("deploy-coding-tools.ps1").read_text(encoding="utf-8")
+        install_text = internal_root.joinpath("install-coding-tools.ps1").read_text(encoding="utf-8")
+        repair_text = internal_root.joinpath("repair-coding-tools.ps1").read_text(encoding="utf-8")
         for label, script_text in (
             ("elevated installer", elevated_install_text),
-            ("deploy", deploy_text),
+            ("deployment common", deployment_common_text),
         ):
-            if '/remove:g "${currentAccount}"' not in script_text:
+            normalized_script_text = script_text.casefold()
+            if '/remove:g "${currentaccount}"' not in normalized_script_text:
                 raise RuntimeError(f"{label} stopped removing signed-in-user write access from the elevated queue")
             for acl_fragment in ("*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "${localServiceSid}:(OI)(CI)M"):
-                if acl_fragment not in script_text:
+                if acl_fragment.casefold() not in normalized_script_text:
                     raise RuntimeError(f"{label} elevated queue ACL contract lost {acl_fragment}")
         for acl_fragment in ("*S-1-5-18:(OI)(CI)F", "*S-1-5-32-544:(OI)(CI)F", "${localServiceSid}:(OI)(CI)M"):
             if acl_fragment not in interactive_install_text:
                 raise RuntimeError(f"interactive broker queue ACL contract lost {acl_fragment}")
+        common_consumers = {
+            "deploy": (deploy_text, ("New-CodingToolsBrokerArtifactStage", "Install-CodingToolsBrokerArtifacts", "Start-CodingToolsPrivateServices")),
+            "fresh install": (install_text, ("New-CodingToolsBrokerArtifactStage", "Install-CodingToolsBrokerArtifacts", "Start-CodingToolsPrivateServices")),
+            "repair": (repair_text, ("Start-CodingToolsPrivateServices",)),
+        }
+        for label, (script_text, required_calls) in common_consumers.items():
+            if "deployment-common.ps1" not in script_text:
+                raise RuntimeError(f"{label} stopped loading deployment-common.ps1")
+            for function_name in required_calls:
+                if function_name not in script_text:
+                    raise RuntimeError(f"{label} stopped using shared deployment primitive {function_name}")
+        for duplicated_name in (
+            "Build-BrokerArtifacts",
+            "Stop-PrivateServices",
+            "Start-PrivateServices",
+            "Set-InstalledBrokerPermissions",
+            "Install-StagedBrokerArtifacts",
+        ):
+            if f"function {duplicated_name}" in deploy_text or f"function {duplicated_name}" in install_text:
+                raise RuntimeError(f"deployment policy regressed to a local duplicate: {duplicated_name}")
         helper_refs = [
             windows_root / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "System.Web.Extensions.dll",
             windows_root / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "WPF" / "UIAutomationClient.dll",

@@ -25,89 +25,19 @@ $releaseRoot = Join-Path $serviceRoot "releases"
 $elevatedQueueRoot = Join-Path $serviceRoot "elevated-requests"
 $interactiveQueueRoot = Join-Path $serviceRoot "interactive-requests"
 $localServiceSid = "*S-1-5-19"
-$managedServiceFiles = @(
-    "elevated-broker.ps1",
-    "manage-elevated-broker.ps1",
-    "elevated-broker-launcher.exe",
-    "interactive-broker.ps1",
-    "manage-interactive-broker.ps1",
-    "install-interactive-broker.ps1",
-    "interactive-broker-launcher.exe",
-    "computer-use-helper.exe",
-    "computer-use-overlay.exe",
-    "activity-log-viewer.exe",
-    "computer-use-actions.json",
-    "elevated-actions.manifest.json"
-)
-
-function Assert-Path([string]$Path, [string]$Description) {
-    if (-not (Test-Path -LiteralPath $Path)) {
-        throw "$Description is missing: $Path"
-    }
-}
-
-function Build-BrokerArtifacts([string]$StageRoot) {
-    $serviceStage = Join-Path $StageRoot "service"
-    New-Item -ItemType Directory -Path $serviceStage -Force | Out-Null
-    foreach ($file in @(
-        "elevated-broker.ps1", "manage-elevated-broker.ps1",
-        "interactive-broker.ps1", "manage-interactive-broker.ps1", "install-interactive-broker.ps1"
-    )) {
-        $source = Join-Path $serviceSourceRoot $file
-        Assert-Path $source "Broker source"
-        Copy-Item -LiteralPath $source -Destination (Join-Path $serviceStage $file) -Force
-    }
-    $contractSource = Join-Path $StageRoot "app\coding_tools_mcp\computer-use-actions.json"
-    Assert-Path $contractSource "Computer Use action contract"
-    Copy-Item -LiteralPath $contractSource -Destination (Join-Path $serviceStage "computer-use-actions.json") -Force
-
-    $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
-    Assert-Path $csc "C# compiler"
-    $windowsPowerShell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
-    $automationRef = (& $windowsPowerShell -NoLogo -NoProfile -NonInteractive -Command "[System.Management.Automation.PowerShell].Assembly.Location").Trim()
-    Assert-Path $automationRef "Windows PowerShell automation assembly"
-
-    & $csc /nologo /target:winexe /optimize+ ("/out:" + (Join-Path $serviceStage "elevated-broker-launcher.exe")) `
-        /reference:$automationRef (Join-Path $serviceSourceRoot "ElevatedBrokerLauncher.cs")
-    if ($LASTEXITCODE -ne 0) { throw "Could not stage the elevated broker launcher." }
-    & $csc /nologo /target:winexe /optimize+ ("/out:" + (Join-Path $serviceStage "interactive-broker-launcher.exe")) `
-        /reference:$automationRef (Join-Path $serviceSourceRoot "InteractiveBrokerLauncher.cs")
-    if ($LASTEXITCODE -ne 0) { throw "Could not stage the interactive broker launcher." }
-    & $csc /nologo /target:exe /optimize+ ("/out:" + (Join-Path $serviceStage "computer-use-helper.exe")) `
-        /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\System.Web.Extensions.dll" `
-        /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationClient.dll" `
-        /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationTypes.dll" `
-        /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\WindowsBase.dll" `
-        /reference:System.Drawing.dll /reference:System.Windows.Forms.dll (Join-Path $serviceSourceRoot "ComputerUseHelper.cs")
-    if ($LASTEXITCODE -ne 0) { throw "Could not stage the Computer Use helper." }
-    & $csc /nologo /target:winexe /optimize+ ("/out:" + (Join-Path $serviceStage "computer-use-overlay.exe")) `
-        /reference:System.Drawing.dll /reference:System.Windows.Forms.dll (Join-Path $serviceSourceRoot "ComputerUseOverlay.cs")
-    if ($LASTEXITCODE -ne 0) { throw "Could not stage the Computer Use overlay." }
-    & $csc /nologo /target:winexe /optimize+ ("/out:" + (Join-Path $serviceStage "activity-log-viewer.exe")) `
-        /reference:System.Drawing.dll /reference:System.Windows.Forms.dll (Join-Path $serviceSourceRoot "ActivityLogViewer.cs")
-    if ($LASTEXITCODE -ne 0) { throw "Could not stage the Activity Log viewer." }
-
-    $assetsSource = Join-Path $serviceSourceRoot "assets"
-    if (Test-Path -LiteralPath $assetsSource -PathType Container) {
-        Copy-Item -LiteralPath $assetsSource -Destination (Join-Path $serviceStage "assets") -Recurse -Force
-    }
-    New-ElevatedActionManifest `
-        (Join-Path $serviceStage "elevated-broker.ps1") `
-        (Join-Path $serviceStage "elevated-actions.manifest.json")
-    return $serviceStage
-}
+$managedServiceFiles = Get-CodingToolsManagedServiceFiles
 
 function Get-PackageVersion([string]$PackageRoot) {
     $init = Join-Path $PackageRoot "__init__.py"
-    Assert-Path $init "Private package metadata"
+    Assert-DeploymentPath $init "Private package metadata"
     $match = Select-String -LiteralPath $init -Pattern '__version__\s*=\s*["'']([^"'']+)["'']' | Select-Object -First 1
     if (-not $match) { throw "Could not determine package version from $init" }
     return $match.Matches[0].Groups[1].Value
 }
 
 function Test-Package([string]$PackageRoot) {
-    Assert-Path $PackageRoot "Private package"
-    Assert-Path (Join-Path $PackageRoot "__main__.py") "Private package entrypoint"
+    Assert-DeploymentPath $PackageRoot "Private package"
+    Assert-DeploymentPath (Join-Path $PackageRoot "__main__.py") "Private package entrypoint"
     $version = Get-PackageVersion $PackageRoot
     & $serverPython -m compileall -q $PackageRoot
     if ($LASTEXITCODE -ne 0) { throw "Private package compile check failed." }
@@ -145,7 +75,7 @@ function Write-BuildIdentity([string]$PackageRoot, [string]$PackageVersion) {
 }
 
 function Test-SourceBehavior([string]$PackageParent) {
-    Assert-Path $sourceValidator "Private source validator"
+    Assert-DeploymentPath $sourceValidator "Private source validator"
     $previousPythonPath = $env:PYTHONPATH
     try {
         $env:PYTHONPATH = $PackageParent
@@ -155,22 +85,6 @@ function Test-SourceBehavior([string]$PackageParent) {
     finally {
         $env:PYTHONPATH = $previousPythonPath
     }
-}
-
-function Wait-McpHealth([int]$Seconds = 30) {
-    $deadline = (Get-Date).AddSeconds($Seconds)
-    do {
-        Start-Sleep -Milliseconds 500
-        try {
-            $health = Invoke-RestMethod "http://127.0.0.1:8766/healthz" -TimeoutSec 3
-        } catch {
-            $health = $null
-        }
-    } while ((-not $health) -and (Get-Date) -lt $deadline)
-    if (-not $health -or $health.status -ne "ok") {
-        throw "MCP health endpoint did not become ready."
-    }
-    return $health
 }
 
 function Assert-NoActiveMcpWork {
@@ -204,49 +118,6 @@ function Trim-ReleaseBackups([int]$Keep = 20) {
         Sort-Object LastWriteTime -Descending |
         Select-Object -Skip $Keep) |
         ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
-}
-
-function Stop-PrivateServices {
-    foreach ($name in @("WebGPTCloudflareTunnel", "WebGPTCodingToolsMCP")) {
-        $service = Get-Service -Name $name -ErrorAction SilentlyContinue
-        if ($service -and $service.Status -ne "Stopped") {
-            Stop-Service -Name $name -Force
-        }
-    }
-    $deadline = (Get-Date).AddSeconds(20)
-    do {
-        Start-Sleep -Milliseconds 250
-        $running = @(Get-Service -Name WebGPTCloudflareTunnel,WebGPTCodingToolsMCP |
-            Where-Object Status -ne "Stopped")
-    } while ($running.Count -gt 0 -and (Get-Date) -lt $deadline)
-    if ($running.Count -gt 0) { throw "Timed out stopping the private MCP services." }
-}
-
-function Start-PrivateServices([string]$ExpectedVersion) {
-    Start-Service -Name WebGPTCodingToolsMCP
-    $health = Wait-McpHealth
-    if ($health.version -ne $ExpectedVersion) {
-        throw "MCP started with version $($health.version), expected $ExpectedVersion."
-    }
-    Start-Service -Name WebGPTCloudflareTunnel
-    return $health
-}
-
-function Copy-PackageToStage([string]$PackageRoot, [string]$RunnerSource, [string]$StageRoot) {
-    New-Item -ItemType Directory -Path $StageRoot -Force | Out-Null
-    $stageApp = Join-Path $StageRoot "app"
-    $packageName = Split-Path -Leaf $PackageRoot
-    New-Item -ItemType Directory -Path $stageApp -Force | Out-Null
-    Copy-Item -LiteralPath $PackageRoot -Destination (Join-Path $stageApp $packageName) -Recurse -Force
-    Copy-Item -LiteralPath $RunnerSource -Destination (Join-Path $StageRoot "run-mcp-service.ps1") -Force
-}
-
-function Restore-Bundle([string]$BundlePath, [string]$StageRoot) {
-    Assert-Path (Join-Path $BundlePath "app") "Rollback app backup"
-    Assert-Path (Join-Path $BundlePath "run-mcp-service.ps1") "Rollback runner backup"
-    Assert-Path (Join-Path $BundlePath "service") "Rollback service-component backup"
-    Copy-PackageToStage (Join-Path $BundlePath "app\coding_tools_mcp") (Join-Path $BundlePath "run-mcp-service.ps1") $StageRoot
-    Copy-Item -LiteralPath (Join-Path $BundlePath "service") -Destination (Join-Path $StageRoot "service") -Recurse -Force
 }
 
 function Test-InstalledComputerUseE2E {
@@ -299,121 +170,6 @@ print("INTERACTIVE_EXEC_PARSE_E2E_OK")
     }
 }
 
-function Stop-BrokerProcesses {
-    $windowsPowerShell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
-    foreach ($pair in @(
-        @{ Manager = "manage-elevated-broker.ps1"; Task = "WebGPT-Elevated-Broker" },
-        @{ Manager = "manage-interactive-broker.ps1"; Task = "WebGPT-Interactive-Broker" }
-    )) {
-        $manager = Join-Path $serviceRoot $pair.Manager
-        if (Test-Path -LiteralPath $manager -PathType Leaf) {
-            & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-                -File $manager -Action Stop 2>$null | Out-Null
-        }
-        Stop-ScheduledTask -TaskName $pair.Task -ErrorAction SilentlyContinue
-    }
-    Get-Process -Name "elevated-broker-launcher","interactive-broker-launcher","computer-use-overlay","activity-log-viewer" -ErrorAction SilentlyContinue |
-        Stop-Process -Force -ErrorAction SilentlyContinue
-}
-
-function Set-InstalledBrokerPermissions {
-    New-Item -ItemType Directory -Path $elevatedQueueRoot,$interactiveQueueRoot -Force | Out-Null
-    $currentAccount = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    & icacls.exe $elevatedQueueRoot /inheritance:r /remove:g "${currentAccount}" /C | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Could not remove the signed-in user's write access from the elevated broker queue." }
-    & icacls.exe $elevatedQueueRoot /inheritance:r /grant:r `
-        "*S-1-5-18:(OI)(CI)F" `
-        "*S-1-5-32-544:(OI)(CI)F" `
-        "${localServiceSid}:(OI)(CI)M" /C | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Could not secure the elevated broker queue." }
-
-    & icacls.exe $interactiveQueueRoot /inheritance:r /grant:r `
-        "*S-1-5-18:(OI)(CI)F" `
-        "*S-1-5-32-544:(OI)(CI)F" `
-        "${currentAccount}:(OI)(CI)M" `
-        "${localServiceSid}:(OI)(CI)M" /C | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Could not secure the interactive broker queue." }
-
-    foreach ($file in @("elevated-broker.ps1", "elevated-broker-launcher.exe", "manage-elevated-broker.ps1", "elevated-actions.manifest.json")) {
-        $path = Join-Path $serviceRoot $file
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
-        & icacls.exe $path /inheritance:r /grant:r `
-            "*S-1-5-18:F" `
-            "*S-1-5-32-544:F" `
-            "${currentAccount}:RX" `
-            "${localServiceSid}:RX" /C | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "Could not protect privileged broker file: $path" }
-    }
-}
-
-function Backup-ServiceComponents([string]$Destination) {
-    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-    foreach ($file in $managedServiceFiles) {
-        $source = Join-Path $serviceRoot $file
-        if (Test-Path -LiteralPath $source -PathType Leaf) {
-            Copy-Item -LiteralPath $source -Destination (Join-Path $Destination $file) -Force
-        }
-    }
-    $assets = Join-Path $serviceRoot "assets"
-    if (Test-Path -LiteralPath $assets -PathType Container) {
-        Copy-Item -LiteralPath $assets -Destination (Join-Path $Destination "assets") -Recurse -Force
-    }
-}
-
-function Install-StagedBrokerArtifacts([string]$ServiceStage) {
-    Assert-Path $ServiceStage "Staged broker artifacts"
-    Stop-BrokerProcesses
-    foreach ($file in $managedServiceFiles) {
-        $source = Join-Path $ServiceStage $file
-        if (Test-Path -LiteralPath $source -PathType Leaf) {
-            Copy-Item -LiteralPath $source -Destination (Join-Path $serviceRoot $file) -Force
-        }
-    }
-    $stagedAssets = Join-Path $ServiceStage "assets"
-    if (Test-Path -LiteralPath $stagedAssets -PathType Container) {
-        Remove-Item -LiteralPath (Join-Path $serviceRoot "assets") -Recurse -Force -ErrorAction SilentlyContinue
-        Copy-Item -LiteralPath $stagedAssets -Destination (Join-Path $serviceRoot "assets") -Recurse -Force
-    }
-
-    Set-InstalledBrokerPermissions
-
-    $windowsPowerShell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
-    foreach ($managerName in @("manage-elevated-broker.ps1", "manage-interactive-broker.ps1")) {
-        $manager = Join-Path $serviceRoot $managerName
-        & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $manager -Action Install
-        if ($LASTEXITCODE -ne 0) { throw "Could not install broker task through $managerName" }
-        & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $manager -Action Start
-        if ($LASTEXITCODE -ne 0) { throw "Could not start broker task through $managerName" }
-    }
-}
-
-function Restore-ServiceComponents([string]$Source) {
-    if (-not (Test-Path -LiteralPath $Source -PathType Container)) { return }
-    Stop-BrokerProcesses
-    foreach ($file in $managedServiceFiles) {
-        $destination = Join-Path $serviceRoot $file
-        Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
-        $backup = Join-Path $Source $file
-        if (Test-Path -LiteralPath $backup -PathType Leaf) {
-            Copy-Item -LiteralPath $backup -Destination $destination -Force
-        }
-    }
-    $assetsDestination = Join-Path $serviceRoot "assets"
-    Remove-Item -LiteralPath $assetsDestination -Recurse -Force -ErrorAction SilentlyContinue
-    $assetsBackup = Join-Path $Source "assets"
-    if (Test-Path -LiteralPath $assetsBackup -PathType Container) {
-        Copy-Item -LiteralPath $assetsBackup -Destination $assetsDestination -Recurse -Force
-    }
-    Set-InstalledBrokerPermissions
-    $windowsPowerShell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
-    foreach ($managerName in @("manage-elevated-broker.ps1", "manage-interactive-broker.ps1")) {
-        $manager = Join-Path $serviceRoot $managerName
-        if (-not (Test-Path -LiteralPath $manager -PathType Leaf)) { continue }
-        & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $manager -Action Install 2>$null | Out-Null
-        & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $manager -Action Start 2>$null | Out-Null
-    }
-}
-
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator
 )
@@ -421,7 +177,7 @@ if (-not $ValidateOnly -and -not $isAdmin) {
     throw "Run this update or rollback as Administrator."
 }
 
-Assert-Path $serverPython "Service Python"
+Assert-DeploymentPath $serverPython "Service Python"
 
 if (-not $ValidateOnly) {
     Assert-NoActiveMcpWork
@@ -433,7 +189,7 @@ if (-not $ValidateOnly -and $StartDelaySeconds -gt 0) {
 }
 
 if ($ValidateOnly) {
-    Assert-Path $privateSource "Private source"
+    Assert-DeploymentPath $privateSource "Private source"
     $validationRoot = Join-Path ([IO.Path]::GetTempPath()) ("webgpt-mcp-validate-" + [Guid]::NewGuid().ToString("N"))
     try {
         $stageApp = Join-Path $validationRoot "app"
@@ -442,7 +198,10 @@ if ($ValidateOnly) {
         Copy-Item -LiteralPath $privateSource -Destination (Join-Path $stageApp "coding_tools_mcp") -Recurse -Force
         $version = Test-Package (Join-Path $stageApp "coding_tools_mcp")
         Test-SourceBehavior $stageApp
-        $validationService = Build-BrokerArtifacts $validationRoot
+        $validationService = New-CodingToolsBrokerArtifactStage `
+            $validationRoot `
+            $serviceSourceRoot `
+            (Join-Path $validationRoot "app\coding_tools_mcp\computer-use-actions.json")
         $validationBrokerLauncher = Join-Path $validationService "elevated-broker-launcher.exe"
         & $validationBrokerLauncher --self-test
         if ($LASTEXITCODE -ne 0) { throw "Elevated broker launcher runtime self-test failed." }
@@ -457,9 +216,9 @@ if ($ValidateOnly) {
     }
 }
 
-Assert-Path $serviceRoot "Service root"
-Assert-Path $appPath "Installed private app"
-Assert-Path $runnerPath "Installed service runner"
+Assert-DeploymentPath $serviceRoot "Service root"
+Assert-DeploymentPath $appPath "Installed private app"
+Assert-DeploymentPath $runnerPath "Installed service runner"
 New-Item -ItemType Directory -Path $releaseRoot -Force | Out-Null
 
 $stageRoot = Join-Path $serviceRoot ("update-stage-" + [Guid]::NewGuid().ToString("N"))
@@ -477,11 +236,11 @@ try {
         $bundlePath = Get-ChildItem -LiteralPath $releaseRoot -Directory -Filter "backup-*" |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
         if (-not $bundlePath) { throw "No private MCP backup is available for rollback." }
-        Restore-Bundle $bundlePath $stageRoot
+        Restore-CodingToolsBundleToStage $bundlePath $stageRoot
     }
     else {
-        Assert-Path $privateSource "Private source"
-        Copy-PackageToStage $privateSource $sourceRunner $stageRoot
+        Assert-DeploymentPath $privateSource "Private source"
+        Copy-CodingToolsPackageToStage $privateSource $sourceRunner $stageRoot
     }
 
     $expectedVersion = Test-Package (Join-Path $stageRoot "app\coding_tools_mcp")
@@ -495,9 +254,12 @@ try {
             Join-Path $stageRoot "service"
         }
         else {
-            Build-BrokerArtifacts $stageRoot
+            New-CodingToolsBrokerArtifactStage `
+                $stageRoot `
+                $serviceSourceRoot `
+                (Join-Path $stageRoot "app\coding_tools_mcp\computer-use-actions.json")
         }
-        Assert-Path $stagedServicePath "Staged broker bundle"
+        Assert-DeploymentPath $stagedServicePath "Staged broker bundle"
     }
     if ($Rollback) {
         Write-Host "Rolling back private MCP to $bundlePath (version $expectedVersion)..."
@@ -507,7 +269,7 @@ try {
     }
 
     Notify-ToolListChanged
-    Stop-PrivateServices
+    Stop-CodingToolsPrivateServices
     $servicesStopped = $true
     $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
     $newBackup = Join-Path $releaseRoot ("backup-" + $timestamp)
@@ -515,7 +277,7 @@ try {
     $oldAppPath = Join-Path $newBackup "app"
     $oldRunnerPath = Join-Path $newBackup "run-mcp-service.ps1"
     $oldServicePath = Join-Path $newBackup "service"
-    Backup-ServiceComponents $oldServicePath
+    Backup-CodingToolsServiceComponents $oldServicePath $serviceRoot $managedServiceFiles
     Move-Item -LiteralPath $appPath -Destination $oldAppPath
     Move-Item -LiteralPath $runnerPath -Destination $oldRunnerPath
     Move-Item -LiteralPath (Join-Path $stageRoot "app") -Destination $appPath
@@ -525,11 +287,17 @@ try {
     # the app/runner back instead of leaving a half-updated service behind.
     $swapped = $true
     if (-not $SkipBrokerRefresh) {
-        Install-StagedBrokerArtifacts $stagedServicePath
+        Install-CodingToolsBrokerArtifacts `
+            $stagedServicePath `
+            $serviceRoot `
+            $managedServiceFiles `
+            $elevatedQueueRoot `
+            $interactiveQueueRoot `
+            $localServiceSid
     }
     & icacls.exe $appPath /grant "${localServiceSid}:(OI)(CI)RX" /C | Out-Null
     & icacls.exe $runnerPath /grant "${localServiceSid}:RX" /C | Out-Null
-    $health = Start-PrivateServices $expectedVersion
+    $health = Start-CodingToolsPrivateServices $expectedVersion
     if (-not $SkipBrokerRefresh) {
         Test-InstalledComputerUseE2E
         Test-InstalledInteractiveExecE2E
@@ -541,7 +309,7 @@ catch {
     $failure = $_
     Write-Warning $failure.Exception.Message
     try {
-        Stop-PrivateServices
+        Stop-CodingToolsPrivateServices
     } catch { }
     if ($swapped -and $oldAppPath -and (Test-Path -LiteralPath $oldAppPath)) {
         Remove-Item -LiteralPath $appPath -Recurse -Force -ErrorAction SilentlyContinue
@@ -551,12 +319,21 @@ catch {
             Move-Item -LiteralPath $oldRunnerPath -Destination $runnerPath -Force
         }
         if ($oldServicePath) {
-            try { Restore-ServiceComponents $oldServicePath } catch { Write-Warning "Service-component rollback failed: $($_.Exception.Message)" }
+            try {
+                Restore-CodingToolsServiceComponents `
+                    $oldServicePath `
+                    $serviceRoot `
+                    $managedServiceFiles `
+                    $elevatedQueueRoot `
+                    $interactiveQueueRoot `
+                    $localServiceSid
+            }
+            catch { Write-Warning "Service-component rollback failed: $($_.Exception.Message)" }
         }
-        try { Start-PrivateServices (Get-PackageVersion (Join-Path $appPath "coding_tools_mcp")) | Out-Null } catch { }
+        try { Start-CodingToolsPrivateServices (Get-PackageVersion (Join-Path $appPath "coding_tools_mcp")) | Out-Null } catch { }
     }
     elseif ($servicesStopped -and $servicesWereRunning) {
-        try { Start-PrivateServices (Get-PackageVersion (Join-Path $appPath "coding_tools_mcp")) | Out-Null } catch { }
+        try { Start-CodingToolsPrivateServices (Get-PackageVersion (Join-Path $appPath "coding_tools_mcp")) | Out-Null } catch { }
     }
     throw $failure
 }

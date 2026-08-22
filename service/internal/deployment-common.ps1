@@ -31,3 +31,281 @@ function New-ElevatedActionManifest([string]$BrokerPath, [string]$OutputPath) {
     }
     [IO.File]::WriteAllText($OutputPath, ($payload | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
 }
+
+function Assert-DeploymentPath([string]$Path, [string]$Description) {
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "$Description is missing: $Path"
+    }
+}
+
+function Get-CodingToolsManagedServiceFiles {
+    return @(
+        "elevated-broker.ps1",
+        "manage-elevated-broker.ps1",
+        "elevated-broker-launcher.exe",
+        "interactive-broker.ps1",
+        "manage-interactive-broker.ps1",
+        "install-interactive-broker.ps1",
+        "interactive-broker-launcher.exe",
+        "computer-use-helper.exe",
+        "computer-use-overlay.exe",
+        "activity-log-viewer.exe",
+        "computer-use-actions.json",
+        "elevated-actions.manifest.json"
+    )
+}
+
+function New-CodingToolsBrokerArtifactStage(
+    [string]$StageRoot,
+    [string]$ServiceSourceRoot,
+    [string]$ContractSource
+) {
+    $serviceStage = Join-Path $StageRoot "service"
+    New-Item -ItemType Directory -Path $serviceStage -Force | Out-Null
+    foreach ($file in @(
+        "elevated-broker.ps1", "manage-elevated-broker.ps1",
+        "interactive-broker.ps1", "manage-interactive-broker.ps1", "install-interactive-broker.ps1"
+    )) {
+        $source = Join-Path $ServiceSourceRoot $file
+        Assert-DeploymentPath $source "Broker source"
+        Copy-Item -LiteralPath $source -Destination (Join-Path $serviceStage $file) -Force
+    }
+    Assert-DeploymentPath $ContractSource "Computer Use action contract"
+    Copy-Item -LiteralPath $ContractSource -Destination (Join-Path $serviceStage "computer-use-actions.json") -Force
+
+    $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+    Assert-DeploymentPath $csc "C# compiler"
+    $windowsPowerShell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+    $automationRef = (& $windowsPowerShell -NoLogo -NoProfile -NonInteractive -Command "[System.Management.Automation.PowerShell].Assembly.Location").Trim()
+    Assert-DeploymentPath $automationRef "Windows PowerShell automation assembly"
+
+    & $csc /nologo /target:winexe /optimize+ ("/out:" + (Join-Path $serviceStage "elevated-broker-launcher.exe")) `
+        /reference:$automationRef (Join-Path $ServiceSourceRoot "ElevatedBrokerLauncher.cs")
+    if ($LASTEXITCODE -ne 0) { throw "Could not stage the elevated broker launcher." }
+    & $csc /nologo /target:winexe /optimize+ ("/out:" + (Join-Path $serviceStage "interactive-broker-launcher.exe")) `
+        /reference:$automationRef (Join-Path $ServiceSourceRoot "InteractiveBrokerLauncher.cs")
+    if ($LASTEXITCODE -ne 0) { throw "Could not stage the interactive broker launcher." }
+    & $csc /nologo /target:exe /optimize+ ("/out:" + (Join-Path $serviceStage "computer-use-helper.exe")) `
+        /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\System.Web.Extensions.dll" `
+        /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationClient.dll" `
+        /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationTypes.dll" `
+        /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\WPF\WindowsBase.dll" `
+        /reference:System.Drawing.dll /reference:System.Windows.Forms.dll (Join-Path $ServiceSourceRoot "ComputerUseHelper.cs")
+    if ($LASTEXITCODE -ne 0) { throw "Could not stage the Computer Use helper." }
+    & $csc /nologo /target:winexe /optimize+ ("/out:" + (Join-Path $serviceStage "computer-use-overlay.exe")) `
+        /reference:System.Drawing.dll /reference:System.Windows.Forms.dll (Join-Path $ServiceSourceRoot "ComputerUseOverlay.cs")
+    if ($LASTEXITCODE -ne 0) { throw "Could not stage the Computer Use overlay." }
+    & $csc /nologo /target:winexe /optimize+ ("/out:" + (Join-Path $serviceStage "activity-log-viewer.exe")) `
+        /reference:System.Drawing.dll /reference:System.Windows.Forms.dll (Join-Path $ServiceSourceRoot "ActivityLogViewer.cs")
+    if ($LASTEXITCODE -ne 0) { throw "Could not stage the Activity Log viewer." }
+
+    $assetsSource = Join-Path $ServiceSourceRoot "assets"
+    if (Test-Path -LiteralPath $assetsSource -PathType Container) {
+        Copy-Item -LiteralPath $assetsSource -Destination (Join-Path $serviceStage "assets") -Recurse -Force
+    }
+    New-ElevatedActionManifest `
+        (Join-Path $serviceStage "elevated-broker.ps1") `
+        (Join-Path $serviceStage "elevated-actions.manifest.json")
+    return $serviceStage
+}
+
+function Wait-CodingToolsMcpHealth([int]$Seconds = 30) {
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    do {
+        Start-Sleep -Milliseconds 500
+        try {
+            $health = Invoke-RestMethod "http://127.0.0.1:8766/healthz" -TimeoutSec 3
+        }
+        catch {
+            $health = $null
+        }
+    } while ((-not $health) -and (Get-Date) -lt $deadline)
+    if (-not $health -or $health.status -ne "ok") {
+        throw "MCP health endpoint did not become ready."
+    }
+    return $health
+}
+
+function Stop-CodingToolsPrivateServices([int]$TimeoutSeconds = 20) {
+    foreach ($name in @("WebGPTCloudflareTunnel", "WebGPTCodingToolsMCP")) {
+        $service = Get-Service -Name $name -ErrorAction SilentlyContinue
+        if ($service -and $service.Status -ne "Stopped") {
+            Stop-Service -Name $name -Force
+        }
+    }
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        Start-Sleep -Milliseconds 250
+        $running = @(Get-Service -Name WebGPTCloudflareTunnel,WebGPTCodingToolsMCP -ErrorAction SilentlyContinue |
+            Where-Object Status -ne "Stopped")
+    } while ($running.Count -gt 0 -and (Get-Date) -lt $deadline)
+    if ($running.Count -gt 0) { throw "Timed out stopping the private MCP services." }
+}
+
+function Start-CodingToolsPrivateServices([string]$ExpectedVersion = "") {
+    Start-Service -Name WebGPTCodingToolsMCP
+    $health = Wait-CodingToolsMcpHealth
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedVersion) -and $health.version -ne $ExpectedVersion) {
+        throw "MCP started with version $($health.version), expected $ExpectedVersion."
+    }
+    Start-Service -Name WebGPTCloudflareTunnel
+    return $health
+}
+
+function Copy-CodingToolsPackageToStage([string]$PackageRoot, [string]$RunnerSource, [string]$StageRoot) {
+    New-Item -ItemType Directory -Path $StageRoot -Force | Out-Null
+    $stageApp = Join-Path $StageRoot "app"
+    $packageName = Split-Path -Leaf $PackageRoot
+    New-Item -ItemType Directory -Path $stageApp -Force | Out-Null
+    Copy-Item -LiteralPath $PackageRoot -Destination (Join-Path $stageApp $packageName) -Recurse -Force
+    Copy-Item -LiteralPath $RunnerSource -Destination (Join-Path $StageRoot "run-mcp-service.ps1") -Force
+}
+
+function Restore-CodingToolsBundleToStage([string]$BundlePath, [string]$StageRoot) {
+    Assert-DeploymentPath (Join-Path $BundlePath "app") "Rollback app backup"
+    Assert-DeploymentPath (Join-Path $BundlePath "run-mcp-service.ps1") "Rollback runner backup"
+    Assert-DeploymentPath (Join-Path $BundlePath "service") "Rollback service-component backup"
+    Copy-CodingToolsPackageToStage `
+        (Join-Path $BundlePath "app\coding_tools_mcp") `
+        (Join-Path $BundlePath "run-mcp-service.ps1") `
+        $StageRoot
+    Copy-Item -LiteralPath (Join-Path $BundlePath "service") -Destination (Join-Path $StageRoot "service") -Recurse -Force
+}
+
+function Stop-CodingToolsBrokerProcesses([string]$ServiceRoot) {
+    $windowsPowerShell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+    foreach ($pair in @(
+        @{ Manager = "manage-elevated-broker.ps1"; Task = "WebGPT-Elevated-Broker" },
+        @{ Manager = "manage-interactive-broker.ps1"; Task = "WebGPT-Interactive-Broker" }
+    )) {
+        $manager = Join-Path $ServiceRoot $pair.Manager
+        if (Test-Path -LiteralPath $manager -PathType Leaf) {
+            & $windowsPowerShell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+                -File $manager -Action Stop 2>$null | Out-Null
+        }
+        Stop-ScheduledTask -TaskName $pair.Task -ErrorAction SilentlyContinue
+    }
+    Get-Process -Name "elevated-broker-launcher","interactive-broker-launcher","computer-use-overlay","activity-log-viewer" -ErrorAction SilentlyContinue |
+        Stop-Process -Force -ErrorAction SilentlyContinue
+}
+
+function Set-CodingToolsBrokerPermissions(
+    [string]$ServiceRoot,
+    [string]$ElevatedQueueRoot,
+    [string]$InteractiveQueueRoot,
+    [string]$LocalServiceSid,
+    [string]$CurrentAccount = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+) {
+    New-Item -ItemType Directory -Path $ElevatedQueueRoot,$InteractiveQueueRoot -Force | Out-Null
+    & icacls.exe $ElevatedQueueRoot /inheritance:r /remove:g "${CurrentAccount}" /C | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Could not remove the signed-in user's write access from the elevated broker queue." }
+    & icacls.exe $ElevatedQueueRoot /inheritance:r /grant:r `
+        "*S-1-5-18:(OI)(CI)F" `
+        "*S-1-5-32-544:(OI)(CI)F" `
+        "${LocalServiceSid}:(OI)(CI)M" /C | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Could not secure the elevated broker queue." }
+
+    & icacls.exe $InteractiveQueueRoot /inheritance:r /grant:r `
+        "*S-1-5-18:(OI)(CI)F" `
+        "*S-1-5-32-544:(OI)(CI)F" `
+        "${CurrentAccount}:(OI)(CI)M" `
+        "${LocalServiceSid}:(OI)(CI)M" /C | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Could not secure the interactive broker queue." }
+
+    foreach ($file in @("elevated-broker.ps1", "elevated-broker-launcher.exe", "manage-elevated-broker.ps1", "elevated-actions.manifest.json")) {
+        $path = Join-Path $ServiceRoot $file
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
+        & icacls.exe $path /inheritance:r /grant:r `
+            "*S-1-5-18:F" `
+            "*S-1-5-32-544:F" `
+            "${CurrentAccount}:RX" `
+            "${LocalServiceSid}:RX" /C | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Could not protect privileged broker file: $path" }
+    }
+}
+
+function Backup-CodingToolsServiceComponents(
+    [string]$Destination,
+    [string]$ServiceRoot,
+    [string[]]$ManagedServiceFiles
+) {
+    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+    foreach ($file in $ManagedServiceFiles) {
+        $source = Join-Path $ServiceRoot $file
+        if (Test-Path -LiteralPath $source -PathType Leaf) {
+            Copy-Item -LiteralPath $source -Destination (Join-Path $Destination $file) -Force
+        }
+    }
+    $assets = Join-Path $ServiceRoot "assets"
+    if (Test-Path -LiteralPath $assets -PathType Container) {
+        Copy-Item -LiteralPath $assets -Destination (Join-Path $Destination "assets") -Recurse -Force
+    }
+}
+
+function Install-CodingToolsBrokerArtifacts(
+    [string]$ServiceStage,
+    [string]$ServiceRoot,
+    [string[]]$ManagedServiceFiles,
+    [string]$ElevatedQueueRoot,
+    [string]$InteractiveQueueRoot,
+    [string]$LocalServiceSid
+) {
+    Assert-DeploymentPath $ServiceStage "Staged broker artifacts"
+    Stop-CodingToolsBrokerProcesses $ServiceRoot
+    foreach ($file in $ManagedServiceFiles) {
+        $source = Join-Path $ServiceStage $file
+        if (Test-Path -LiteralPath $source -PathType Leaf) {
+            Copy-Item -LiteralPath $source -Destination (Join-Path $ServiceRoot $file) -Force
+        }
+    }
+    $stagedAssets = Join-Path $ServiceStage "assets"
+    if (Test-Path -LiteralPath $stagedAssets -PathType Container) {
+        Remove-Item -LiteralPath (Join-Path $ServiceRoot "assets") -Recurse -Force -ErrorAction SilentlyContinue
+        Copy-Item -LiteralPath $stagedAssets -Destination (Join-Path $ServiceRoot "assets") -Recurse -Force
+    }
+
+    Set-CodingToolsBrokerPermissions $ServiceRoot $ElevatedQueueRoot $InteractiveQueueRoot $LocalServiceSid
+
+    $windowsPowerShell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+    foreach ($managerName in @("manage-elevated-broker.ps1", "manage-interactive-broker.ps1")) {
+        $manager = Join-Path $ServiceRoot $managerName
+        & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $manager -Action Install
+        if ($LASTEXITCODE -ne 0) { throw "Could not install broker task through $managerName" }
+        & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $manager -Action Start
+        if ($LASTEXITCODE -ne 0) { throw "Could not start broker task through $managerName" }
+    }
+}
+
+function Restore-CodingToolsServiceComponents(
+    [string]$Source,
+    [string]$ServiceRoot,
+    [string[]]$ManagedServiceFiles,
+    [string]$ElevatedQueueRoot,
+    [string]$InteractiveQueueRoot,
+    [string]$LocalServiceSid
+) {
+    if (-not (Test-Path -LiteralPath $Source -PathType Container)) { return }
+    Stop-CodingToolsBrokerProcesses $ServiceRoot
+    foreach ($file in $ManagedServiceFiles) {
+        $destination = Join-Path $ServiceRoot $file
+        Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
+        $backup = Join-Path $Source $file
+        if (Test-Path -LiteralPath $backup -PathType Leaf) {
+            Copy-Item -LiteralPath $backup -Destination $destination -Force
+        }
+    }
+    $assetsDestination = Join-Path $ServiceRoot "assets"
+    Remove-Item -LiteralPath $assetsDestination -Recurse -Force -ErrorAction SilentlyContinue
+    $assetsBackup = Join-Path $Source "assets"
+    if (Test-Path -LiteralPath $assetsBackup -PathType Container) {
+        Copy-Item -LiteralPath $assetsBackup -Destination $assetsDestination -Recurse -Force
+    }
+    Set-CodingToolsBrokerPermissions $ServiceRoot $ElevatedQueueRoot $InteractiveQueueRoot $LocalServiceSid
+    $windowsPowerShell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"
+    foreach ($managerName in @("manage-elevated-broker.ps1", "manage-interactive-broker.ps1")) {
+        $manager = Join-Path $ServiceRoot $managerName
+        if (-not (Test-Path -LiteralPath $manager -PathType Leaf)) { continue }
+        & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $manager -Action Install 2>$null | Out-Null
+        & $windowsPowerShell -NoProfile -ExecutionPolicy Bypass -File $manager -Action Start 2>$null | Out-Null
+    }
+}

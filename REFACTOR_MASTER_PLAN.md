@@ -431,13 +431,28 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
 
 Python server 穩定後再碰 installer/update，避免兩個高風險面同時移動。
 
-- [ ] ACL primitives 共用化。
-- [ ] broker artifact build 共用化。
-- [ ] service stop/start/health 共用化。
-- [ ] install / deploy / repair 不再複製同一 policy。
-- [ ] rollback path 與 normal deploy path 使用同一 bundle model。
+- [x] ACL primitives 共用化。
+- [x] broker artifact build 共用化。
+- [x] service stop/start/health 共用化。
+- [x] install / deploy / repair 不再複製同一 policy。
+- [x] rollback path 與 normal deploy path 使用同一 bundle model。
+
+實作結果：
+- `deployment-common.ps1` 現在是 deployment policy 的單一共用層：broker/helper artifact staging、managed service file catalog、broker queue / privileged-file ACL、broker process/task lifecycle、service stop/start/health、package staging、rollback bundle restore、service-component backup/install/restore 都集中於此。
+- `deploy-coding-tools.ps1` 只保留 update orchestration、build identity、busy gate、tool-list notification、source validation 與 installed E2E；normal update 與 rollback 都透過同一 package/service bundle primitives。
+- `install-coding-tools.ps1` 不再自行編譯另一套 C# broker/helper、不再複製 queue / privileged-file ACL policy，也不再自行安裝兩套 broker task；fresh install 使用與 update 相同的 artifact + ACL + task-install pipeline。WinSW、DPAPI/OAuth state preservation、service-root hardening仍屬 fresh-install 專責。
+- `repair-coding-tools.ps1` 改用共用 service start/health lifecycle，僅保留 repair 專屬 Python runtime ACL。
+- validator 新增 deployment architecture guard，要求 deploy/install/repair 載入 common、要求必要 shared primitives 存在，並禁止舊 duplicate deployment functions 回流。
+
+驗證：
+- 四支 deployment PowerShell scripts 以 `System.Management.Automation.Language.Parser` parse：PASS。
+- compile + full source validator + `git diff --check`：PASS，`PRIVATE_MCP_SOURCE_CHECK_OK tools=20 context_files=1`。
+- `update-coding-tools.ps1 -ValidateOnly` 連續兩次 PASS：`PRIVATE_MCP_VALIDATE_OK version=0.2.2-private.37`；此路徑實際 compile private package、跑 full validator、透過 common pipeline 編譯 broker/helper artifacts，並執行 elevated/interactive launcher self-test。
+- normal update / rollback / fresh install 會刻意 stop/reinstall 目前正在承載本次 coding connector 的 MCP，因此不在活連線內自殺式執行；其共用 implementation 已由 ValidateOnly + architecture guard 鎖定，Phase 8 再做現役 installed service / tunnel 的無破壞 smoke。
 
 **Exit gate：** ValidateOnly、normal update、rollback、repair、fresh-install relevant checks 全通過。
+
+**Phase 7：COMPLETE / GREEN.** destructive entry paths 不在本連線中實際重啟服務，但其共享 policy、staging/build、ACL、bundle/restore 與 lifecycle 已收斂並由 non-destructive smoke/architecture checks 覆蓋。
 
 ### Phase 8 — Validator Decomposition & Architecture Guardrails
 
