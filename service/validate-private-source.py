@@ -844,6 +844,55 @@ def main() -> int:
         if not reconnect_runtime._closed:
             raise RuntimeError("RuntimeHTTPServer.server_close did not close reconnect session Runtimes")
 
+    # Freeze the pure command-policy parsing layer before moving it out of
+    # server.py. These checks intentionally stop before Runtime allow/deny
+    # decisions; they capture shell structure and path/script classification.
+    heredoc_command = "cat <<EOF > /etc/cron.d/evil\n</modelVersion>\nEOF\necho done\n"
+    heredoc_live = server.strip_heredoc_payloads(heredoc_command)
+    if "</modelVersion>" in heredoc_live:
+        raise RuntimeError("heredoc payload stripping stopped removing stdin body data")
+    if "> /etc/cron.d/evil" not in heredoc_live or "echo done" not in heredoc_live:
+        raise RuntimeError("heredoc payload stripping hid live redirection/commands")
+    quoted_heredoc = "printf '%s\\n' '<<EOF'\necho live\n"
+    if server.strip_heredoc_payloads(quoted_heredoc) != quoted_heredoc:
+        raise RuntimeError("quoted heredoc marker started being treated as a live heredoc")
+
+    parsed_tokens = server.shlex_split("FOO=1 echo hi | cat ./file.txt")
+    if server.command_executables(parsed_tokens) != ["echo", "cat"]:
+        raise RuntimeError("shell executable discovery contract drifted")
+    path_candidates = set(
+        server.explicit_command_path_candidates(
+            server.shlex_split("env -C ./sub FOO=1 python ./script.py > ./out.txt")
+        )
+    )
+    if path_candidates != {"./sub", "./script.py", "./out.txt"}:
+        raise RuntimeError("env-wrapped command path discovery contract drifted")
+    env_candidates, env_command, env_args = server.env_wrapped_command(
+        ["-C", "./sub", "FOO=1", "python", "./script.py"]
+    )
+    if env_candidates != ["./sub"] or env_command != "python" or env_args != ["./script.py"]:
+        raise RuntimeError("env wrapped-command parsing contract drifted")
+    if server.inline_script_command("env FOO=1 python -c 'print(1)'") != {
+        "command": "python",
+        "option": "-c",
+    }:
+        raise RuntimeError("inline-script detection contract drifted")
+
+    inspectable_cases = {
+        "file.txt": True,
+        "./file": True,
+        "../file": True,
+        "https://example.invalid/file.txt": False,
+        "bareword": False,
+    }
+    for candidate, expected in inspectable_cases.items():
+        if server.is_inspectable_path_argument(candidate) is not expected:
+            raise RuntimeError(f"inspectable path classification drifted for {candidate!r}")
+    if not server.is_literal_network_reference_command("echo https://example.invalid/path"):
+        raise RuntimeError("literal-network echo command stopped being classified as data-only")
+    if server.is_literal_network_reference_command("curl https://example.invalid/path"):
+        raise RuntimeError("network-capable curl command was misclassified as literal-only")
+
     context = load_project_context(workspace)
     scan_warnings = [warning for warning in context.warnings if "scan stopped" in warning.casefold()]
     if scan_warnings:

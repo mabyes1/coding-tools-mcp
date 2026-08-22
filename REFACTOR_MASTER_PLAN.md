@@ -320,9 +320,14 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
   - Characterization commit：`47dd522` (`test: freeze session process control`).
   - Production process-control layer relocated onto `ExecutionRegistry`：`poll_session`, `write_stdin`, `_session_has_new_output`, `_wait_for_session_exit`, `kill_session`, `cancel_session`; Runtime keeps thin wrappers and `cancel_request` remains Runtime-owned request glue.
   - All six moved methods are AST-identical to pre-relocation HEAD；compile + full validator + reverse-import check + `git diff --check` PASS. Current `server.py`：5372 → 5281（baseline 8353 → 5281）。
+  - Process-control extraction commit：`2390347` (`refactor: move session process control into registry`).
+  - Hidden inspection handlers (`list_sessions`, `process_tree`, `kill_tree`, `tail_output`, `find_output`) remain in `TOOL_REGISTRY` even though they are not on the public 20-tool surface, so they are **not dead code** and must keep callable Runtime handlers. Their relocation is deferred because `_session_metadata` currently depends on activity redaction and `find_output` depends on a filesystem text helper; avoid creating cross-layer imports just to reduce line count.
 - [ ] exec orchestration 與 command policy 分離：
   - `command_policy.py`：解析與 allow/deny 判斷
   - `execution.py`：spawn / active_user delegation / output formatting
+  - 2026-08-22 next boundary：extract the pure shell/path parsing layer first (`shlex_split`, heredoc stripping, executable/path candidate parsing, inline-script detection, env wrapping, literal-network command detection) plus only the constants they own. Runtime allow/deny decisions stay in place for this first command-policy commit.
+  - Add focused characterization for heredoc body stripping without hiding live redirections/commands, env-wrapped path discovery, inline script detection, inspectable path classification, and literal-network command classification before relocation.
+  - Pure parser characterization added and full validator PASS：heredoc body stripping preserves live redirection/commands and ignores quoted markers；shell executable discovery；env-wrapped path/command parsing；inline `python -c` detection；inspectable path classification；literal-only network command classification. Ready for tests-only freeze commit.
 - [ ] Runtime 只保留 request-to-service wiring。
 - [ ] 明確定義 registry ownership：誰 create、誰 close、HTTP reconnect 如何 share。
 
@@ -502,7 +507,10 @@ Python server 穩定後再碰 installer/update，避免兩個高風險面同時�
 - Process-control characterization now passes in the full validator, including a real 60-second child terminated through `kill_session`.
 - Process-control characterization commit：`47dd522` (`test: freeze session process control`).
 - Session-id process control is now relocated verbatim onto `ExecutionRegistry`; Runtime keeps thin wrappers, while `cancel_request` stays in Runtime. AST equivalence + full validator + reverse-import check + `git diff --check` PASS；`server.py` is 5281 lines.
-- **Next：** staged review + commit of process-control relocation. Then map the remaining session inspection helpers (`_session_metadata`, list/process-tree/tail/find) before deciding whether they belong in the registry or a separate diagnostics facade.
+- Process-control extraction commit：`2390347` (`refactor: move session process control into registry`)；post-commit worktree returned to only the excluded ADHD note.
+- Hidden session inspection methods are registry-backed hidden handlers, not dead code. Their move is deferred until activity/text-helper boundaries can be cleaned without reverse dependencies.
+- Pure command parser characterization now passes in the full validator.
+- **Next：** commit this parser freeze separately, then relocate pure helpers/constants to `command_policy.py` without changing Runtime policy decisions.
 
 ### 2026-08-21 end-of-session handoff
 
