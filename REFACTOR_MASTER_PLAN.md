@@ -456,11 +456,20 @@ Python server 穩定後再碰 installer/update，避免兩個高風險面同時�
 
 ### Phase 8 — Validator Decomposition & Architecture Guardrails
 
-- [ ] 把 600+ 行 validator 拆成按 domain 的 checks，但保留單一入口。
-- [ ] 加 architecture guard：禁止低階 module import `server.py`。
-- [ ] 加 tool catalog consistency guard。
-- [ ] 加容易再次膨脹的 size / dependency warning（警告即可，不以行數粗暴 fail build）。
+- [~] 把 600+ 行 validator 拆成按 domain 的 checks，但保留單一入口。
+- [x] 加 architecture guard：禁止低階 module import `server.py`。
+- [x] 加 tool catalog consistency guard。
+- [x] 加容易再次膨脹的 size / dependency warning（警告即可，不以行數粗暴 fail build）。
 - [ ] 最終 full regression + installed service smoke + tunnel smoke。
+
+Phase 8 checkpoint：
+- 新增 `service/validation/architecture_checks.py`：AST 掃描 production package，除 `server.py` facade 與 `__main__.py` entry 外禁止任何 module import `server.py`；目前 reverse-import violation = 0。
+- architecture guard 同時檢查 `TOOL_REGISTRY` / `input_schemas()` key 完全一致、public catalog 必須為 registry 子集且無 duplicate、每個 public `tool_definition` 的 schema 必須回指同一 registry schema。
+- growth guard 為 warning-only：`server.py` facade > 800 lines、一般 module > 1500 lines、非 facade import statements > 45 才輸出 `ARCH_WARNING`；目前 warning = 0，不拿行數當粗暴 build gate。
+- 新增 `service/validation/catalog_checks.py`，搬出 20-tool budget、固定 public contract SHA256、elevated-action/ordinary-permission boundary、tool schema/action contract、ExceptionGroup diagnostics。
+- 新增 `service/validation/windows_deployment_checks.py`，搬出 Windows broker/helper build inputs、deployment architecture/ACL contract、C# compile/self-test 與 Computer Use smoke。
+- 單一入口 `service/validate-private-source.py` 仍保留；目前 1828 → 1488 lines，compile + full validator + `git diff --check` PASS。
+- 下一刀：runtime/session lifecycle、output paging、process-control characterization 依 domain 拆分；避免重新製造一個肥 `session_checks.py`。
 
 ---
 
