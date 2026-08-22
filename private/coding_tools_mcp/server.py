@@ -72,6 +72,7 @@ from .processes import (
     terminate_process_group,
     truncate_output_bytes_tail,
 )
+from .session_store import ExecutionRegistry, PermissionGrant
 from .protocol import (
     PROTOCOL_VERSION,
     STATELESS_PROTOCOL_VERSION,
@@ -1059,52 +1060,6 @@ def process_group_popen_kwargs() -> dict[str, Any]:
         if creation_flag:
             return {"creationflags": creation_flag}
     return {}
-
-
-@dataclass(frozen=True)
-class PermissionGrant:
-    grant_id: str
-    owner: str
-    workspace: str
-    tool_name: str
-    permission: str
-    arguments_digest: str
-    scope: str
-    expires_at: float
-
-
-class ExecutionRegistry:
-    """Process/output registry shared by reconnecting HTTP runtimes."""
-
-    def __init__(self) -> None:
-        self.sessions: dict[str, ExecSession] = {}
-        self.output_sessions: dict[str, ExecSession] = {}
-        self.sessions_lock = threading.Lock()
-        self.state_lock = threading.Lock()
-        self.owner_default_cwds: dict[tuple[str, str], Path] = {}
-        self.permission_grants: dict[str, PermissionGrant] = {}
-        self.starting_sessions = 0
-        self.closed = False
-        self.runtime_dir: Path | None = None
-        self.fallback_runtime_dir: Path | None = None
-        self.http_session_stats_provider: Callable[[], dict[str, int | float]] | None = None
-
-    def close(self) -> None:
-        with self.sessions_lock:
-            if self.closed:
-                return
-            self.closed = True
-            sessions = list(self.sessions.values())
-            self.sessions.clear()
-            self.output_sessions.clear()
-        for session in sessions:
-            session.refresh_status()
-            if session.process.poll() is None:
-                # Service/runtime shutdown must not leave Chrome, CDP, or other
-                # descendants behind.  Windows uses taskkill /T /F here;
-                # POSIX still receives the process-group hard kill.
-                terminate_process_group(session.process, HARD_KILL_SIGNAL, force=True)
-            session.drain_readers()
 
 
 class SlidingWindowRateLimiter:

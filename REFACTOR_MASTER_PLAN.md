@@ -292,6 +292,10 @@ Current `server.py`：5686 lines（baseline 8353 → 5686）。
   - Relocation rule：move the registry as-is to `session_store.py`; do not split those historical shared-state fields during this extraction. Move `PermissionGrant` with it only as a data type so `session_store.py` does not import `server.py`; Phase 4 may later separate permission ownership.
   - Existing Phase 0 characterization already freezes owning-vs-shared Runtime close semantics and HTTP reconnect sharing. Add one missing close characterization for a live child process: registry close must clear maps, hard-kill the child, drain readers, and remain idempotent.
   - Live-child close characterization added on 2026-08-22 and full validator PASS：a spawned 60-second child is terminated by `ExecutionRegistry.close()`, maps are cleared, `closed=True`, and repeated close is harmless. Ready for a tests-only freeze commit.
+  - Characterization commit：`e63d563` (`test: freeze execution registry close`).
+  - Production relocation completed in worktree：`PermissionGrant` + `ExecutionRegistry` moved verbatim to `session_store.py`; `server.py` re-exports them via import. AST equivalence PASS for both classes versus pre-relocation HEAD.
+  - Compile + full validator PASS；`session_store.py` has no reverse import of `server.py`；`git diff --check` PASS.
+  - Current pre-commit line count：`server.py` 5686 → 5641（baseline 8353 → 5641）。
 - [ ] session retention / output snapshot / prune / cancel / stdin lifecycle 收斂成單一 session service。
 - [ ] exec orchestration 與 command policy 分離：
   - `command_policy.py`：解析與 allow/deny 判斷
@@ -459,7 +463,9 @@ Python server 穩定後再碰 installer/update，避免兩個高風險面同時�
 - **Phase 2 close decision：** low-risk tool-domain extraction is complete. `server_info_payload()` remains intentionally in Runtime because it composes execution/session ownership; that remaining work is reclassified into Phase 3 rather than keeping Phase 2 artificially open.
 - Phase 3 map confirms `ExecutionRegistry` also carries owner cwd / permission grant shared state. This impurity is preserved intentionally for the relocation; splitting it now would combine architecture change with movement.
 - Live-child registry close characterization now passes in the full validator.
-- **Next：Phase 3 / ExecutionRegistry extraction only.** Commit the close characterization separately, then relocate `PermissionGrant` + `ExecutionRegistry` to `session_store.py`. Do not mix exec orchestration or command-policy changes into the registry extraction commit.
+- Registry close characterization commit：`e63d563` (`test: freeze execution registry close`).
+- `PermissionGrant` + `ExecutionRegistry` are now relocated verbatim to `session_store.py`; AST equivalence + full validator + reverse-import check all PASS.
+- **Next：** staged review and commit of the registry relocation only. After that, map the remaining session lifecycle methods before moving any of them; do not jump straight into exec orchestration.
 
 ### 2026-08-21 end-of-session handoff
 
