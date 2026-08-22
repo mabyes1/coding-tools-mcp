@@ -7,12 +7,12 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .errors import ToolFailure
+from .permissions import PermissionStore
 from .processes import (
     HARD_KILL_SIGNAL,
     SESSION_BUFFER_BYTES,
@@ -56,18 +56,6 @@ def read_output_action(output_ref: str, *, offset: int = 0, limit: int | None = 
     }
 
 
-@dataclass(frozen=True)
-class PermissionGrant:
-    grant_id: str
-    owner: str
-    workspace: str
-    tool_name: str
-    permission: str
-    arguments_digest: str
-    scope: str
-    expires_at: float
-
-
 class ExecutionRegistry:
     """Process/output registry shared by reconnecting HTTP runtimes."""
 
@@ -77,7 +65,9 @@ class ExecutionRegistry:
         self.sessions_lock = threading.Lock()
         self.state_lock = threading.Lock()
         self.owner_default_cwds: dict[tuple[str, str], Path] = {}
-        self.permission_grants: dict[str, PermissionGrant] = {}
+        # Shared across reconnect runtimes for backwards-compatible owner
+        # continuity, but grant behavior/data now belongs to permissions.py.
+        self.permission_store = PermissionStore()
         self.starting_sessions = 0
         self.closed = False
         self.runtime_dir: Path | None = None
@@ -668,5 +658,4 @@ __all__ = [
     "ExecutionRegistry",
     "MAX_RETAINED_OUTPUT_SESSIONS",
     "MAX_RUNTIME_OUTPUT_BYTES",
-    "PermissionGrant",
 ]

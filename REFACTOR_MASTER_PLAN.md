@@ -369,7 +369,10 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
 
 這階段不是重寫 privilege architecture，而是把已經安全的 contract 從 Runtime 中抽出，並避免未來散掉。
 
-- [ ] permission grants / digest / owner binding 抽成 permission service。
+- [x] permission grants / digest / owner binding 抽成 permission service。
+  - `permissions.py` now owns `PermissionGrant`, reconnect-shared `PermissionStore`, arguments digest, owner/workspace/tool/permission matching, TTL expiry, once-grant consumption, session-grant reuse, approval response construction, and request cleanup.
+  - `ExecutionRegistry` no longer owns grant dictionaries or grant semantics; it carries only the shared `PermissionStore` anchor so existing reconnect construction that shares only the execution registry preserves behavior.
+  - Runtime `_permission_*` and `request_permissions()` are compatibility facades. Existing once/session/different-owner/dangerous/privileged-boundary characterization remains PASS；`server.py`：4168 → 4057（baseline 8353 → 4057）。
 - [ ] normal approval 與 true elevation 的 API 名稱與型別保持清楚區隔。
 - [ ] Elevated Action 仍只能透過 manifest-defined actions。
 - [ ] Interactive broker 與 Elevated broker 的 queue / identity / ACL regression checks 補齊。

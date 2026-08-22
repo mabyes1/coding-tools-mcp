@@ -111,12 +111,12 @@ from .processes import (
     process_tree_for_pid,
     truncate_output_bytes_tail,
 )
+from .permissions import PermissionGrant, PermissionService
 from .session_store import (
     COMPLETED_SESSION_TTL_SECONDS,
     MAX_RETAINED_OUTPUT_SESSIONS,
     MAX_RUNTIME_OUTPUT_BYTES,
     ExecutionRegistry,
-    PermissionGrant,
     read_output_action,
 )
 from .protocol import (
@@ -1255,56 +1255,25 @@ class Runtime:
     def _permission_owner(self) -> str:
         return self.state_owner or f"mcp-session:{self.http_session_id}"
 
+    def _permission_service(self) -> PermissionService:
+        return PermissionService(
+            store=self.execution_registry.permission_store,
+            workspace_root=lambda: self.workspace.root,
+            owner=self._permission_owner,
+            dangerously_skip_all_permissions=self.dangerously_skip_all_permissions,
+            request_context=self.request_context,
+            request_approval=request_permission_approval,
+        )
+
     @staticmethod
     def _permission_arguments_digest(arguments: dict[str, Any]) -> str:
-        canonical = json.dumps(arguments, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return PermissionService.arguments_digest(arguments)
 
     def _permission_granted(self, permission: str) -> bool:
-        if self.dangerously_skip_all_permissions:
-            return True
-        claimed = getattr(self.request_context, "claimed_permission_grants", None)
-        if isinstance(claimed, set) and permission in claimed:
-            return True
-        tool_name = str(getattr(self.request_context, "tool_name", ""))
-        arguments = getattr(self.request_context, "arguments", {})
-        if not tool_name or not isinstance(arguments, dict):
-            return False
-        owner = self._permission_owner()
-        workspace = os.path.normcase(str(self.workspace.root))
-        digest = self._permission_arguments_digest(arguments)
-        now = time.time()
-        matched: PermissionGrant | None = None
-        matched_id: str | None = None
-        with self.execution_registry.state_lock:
-            expired = [grant_id for grant_id, grant in self.execution_registry.permission_grants.items() if grant.expires_at <= now]
-            for grant_id in expired:
-                self.execution_registry.permission_grants.pop(grant_id, None)
-            for grant_id, grant in self.execution_registry.permission_grants.items():
-                if (
-                    grant.owner == owner
-                    and grant.workspace == workspace
-                    and grant.tool_name == tool_name
-                    and grant.permission == permission
-                    and (grant.scope == "session" or grant.arguments_digest == digest)
-                ):
-                    matched = grant
-                    matched_id = grant_id
-                    break
-            if matched is not None and matched.scope == "once" and matched_id is not None:
-                self.execution_registry.permission_grants.pop(matched_id, None)
-        if matched is None:
-            return False
-        if matched.scope == "once":
-            claimed = getattr(self.request_context, "claimed_permission_grants", None)
-            if not isinstance(claimed, set):
-                claimed = set()
-                self.request_context.claimed_permission_grants = claimed
-            claimed.add(permission)
-        return True
+        return self._permission_service().granted(permission)
 
     def _finish_permission_grants(self) -> None:
-        self.request_context.claimed_permission_grants = set()
+        self._permission_service().finish_request()
 
     def effective_default_cwd(self) -> Path:
         key = self._owner_cwd_key()
@@ -2008,87 +1977,7 @@ class Runtime:
         return self._git_tools().blame(args)
 
     def request_permissions(self, args: dict[str, Any]) -> dict[str, Any]:
-        if self.dangerously_skip_all_permissions:
-            return {
-                "ok": True,
-                "status": "granted",
-                "grant_id": "dangerously-skip-all-permissions",
-                "expires_at": None,
-                "constraints": {
-                    "mode": "dangerously_skip_all_permissions",
-                    "workspace": str(self.workspace.root),
-                    "requested": args,
-                },
-                "warnings": [
-                    "dangerously-skip-all-permissions is enabled; permission-gated operations are auto-granted"
-                ],
-            }
-        tool_name = str(args.get("tool_name", ""))
-        permission = str(args.get("permission", ""))
-        reason = str(args.get("reason", ""))
-        requested_arguments = args.get("arguments")
-        if not isinstance(requested_arguments, dict):
-            raise ToolFailure("INVALID_ARGUMENT", "arguments must be an object.", category="validation")
-        scope = str(args.get("scope", "once"))
-        ttl_seconds = int(args.get("ttl_seconds", 300))
-        approval_timeout_seconds = int(args.get("approval_timeout_seconds", 75))
-        approval = request_permission_approval(
-            tool_name=tool_name,
-            permission=permission,
-            reason=reason,
-            arguments=requested_arguments,
-            scope=scope,
-            ttl_seconds=ttl_seconds,
-            timeout_seconds=approval_timeout_seconds,
-        )
-        if not bool(approval.get("granted")):
-            return {
-                "ok": False,
-                "status": "denied",
-                "grant_id": None,
-                "expires_at": None,
-                "error": {
-                    "code": "PERMISSION_DENIED",
-                    "message": "The signed-in user denied the permission request.",
-                    "category": "permission",
-                    "retryable": True,
-                    "details": {"tool_name": tool_name, "permission": permission},
-                },
-            }
-        grant_id = "grant_" + secrets.token_urlsafe(18)
-        expires_at = time.time() + ttl_seconds
-        grant = PermissionGrant(
-            grant_id=grant_id,
-            owner=self._permission_owner(),
-            workspace=os.path.normcase(str(self.workspace.root)),
-            tool_name=tool_name,
-            permission=permission,
-            arguments_digest=self._permission_arguments_digest(requested_arguments),
-            scope=scope,
-            expires_at=expires_at,
-        )
-        with self.execution_registry.state_lock:
-            self.execution_registry.permission_grants[grant_id] = grant
-        return {
-            "ok": True,
-            "status": "granted",
-            "grant_id": grant_id,
-            "expires_at": datetime.fromtimestamp(expires_at, tz=timezone.utc).isoformat(),
-            "constraints": {
-                "tool_name": tool_name,
-                "permission": permission,
-                "scope": scope,
-                "workspace": str(self.workspace.root),
-                "same_arguments_required": scope == "once",
-                "os_privileges": "unchanged; this grant only relaxes an MCP policy gate",
-                "privileged_executable_effect": (
-                    "allows only the MCP setuid/setgid executable gate where applicable; it never grants Administrator, root, UAC, or ACL access"
-                    if permission == "privileged_executable"
-                    else None
-                ),
-            },
-            "warnings": (["Session grant applies to this OAuth owner until expiry."] if scope == "session" else []),
-        }
+        return self._permission_service().request(args)
 
     def request_elevated_action(self, args: dict[str, Any]) -> dict[str, Any]:
         action = str(args.get("action", ""))
