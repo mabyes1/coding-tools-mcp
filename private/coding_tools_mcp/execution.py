@@ -27,6 +27,161 @@ from .workspace import ResolvedPath
 MAX_ACTIVE_EXEC_SESSIONS = 16
 
 
+def base_command_env(
+    shell_env_policy: Any,
+    *,
+    is_core_command_env_name: Callable[[str], bool],
+) -> dict[str, str]:
+    if shell_env_policy.inherit == "none":
+        return {}
+    if shell_env_policy.inherit == "all":
+        return {str(key): str(value) for key, value in os.environ.items()}
+    return {
+        str(key): str(value)
+        for key, value in os.environ.items()
+        if is_core_command_env_name(str(key))
+    }
+
+
+def command_env(
+    extra: Any,
+    *,
+    shell_env_policy: Any,
+    base_env: Callable[[], dict[str, str]],
+    dangerously_skip_all_permissions: bool,
+    permission_granted: Callable[[str], bool],
+    is_filtered_env_var: Callable[[str, str], bool],
+    ecosystem_cache_env_names: set[str],
+    env_pattern_matches: Callable[[str, tuple[str, ...]], bool],
+    ensure_runtime_dirs: Callable[[], None],
+    command_tmp_dir: Callable[[], Path],
+    command_home_dir: Callable[[], Path],
+    cache_dir: Callable[[], Path],
+) -> dict[str, str]:
+    env = base_env()
+    filter_sensitive = not dangerously_skip_all_permissions and not permission_granted("sensitive_env")
+    if filter_sensitive:
+        env = {key: value for key, value in env.items() if not is_filtered_env_var(key, value)}
+        env = {key: value for key, value in env.items() if key not in ecosystem_cache_env_names}
+    if shell_env_policy.exclude:
+        env = {
+            key: value
+            for key, value in env.items()
+            if not env_pattern_matches(key, shell_env_policy.exclude)
+        }
+    if shell_env_policy.include_only:
+        env = {
+            key: value
+            for key, value in env.items()
+            if env_pattern_matches(key, shell_env_policy.include_only)
+        }
+    env.update({str(key): str(value) for key, value in shell_env_policy.set.items()})
+    ensure_runtime_dirs()
+    tmp_dir = command_tmp_dir()
+    env["HOME"] = str(command_home_dir())
+    env["TMPDIR"] = str(tmp_dir)
+    if os.name == "nt":
+        home_dir = command_home_dir()
+        appdata_dir = home_dir / "AppData" / "Roaming"
+        localappdata_dir = home_dir / "AppData" / "Local"
+        nuget_packages_dir = cache_dir() / "nuget" / "packages"
+        for path in (appdata_dir, localappdata_dir, nuget_packages_dir):
+            path.mkdir(parents=True, mode=0o700, exist_ok=True)
+        env["TEMP"] = str(tmp_dir)
+        env["TMP"] = str(tmp_dir)
+        env["USERPROFILE"] = str(home_dir)
+        env["APPDATA"] = str(appdata_dir)
+        env["LOCALAPPDATA"] = str(localappdata_dir)
+        env["HOMEDRIVE"] = home_dir.drive
+        env["HOMEPATH"] = str(home_dir)[len(home_dir.drive) :] or "\\"
+        env["DOTNET_CLI_HOME"] = str(home_dir)
+        env["NUGET_PACKAGES"] = str(nuget_packages_dir)
+        env.setdefault("DOTNET_NOLOGO", "1")
+        env.setdefault("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
+    if isinstance(extra, dict):
+        for key, value in extra.items():
+            key_text = str(key)
+            value_text = str(value)
+            if filter_sensitive and is_filtered_env_var(key_text, value_text):
+                continue
+            env[key_text] = value_text
+    return env
+
+
+def interactive_command_env(
+    extra: Any,
+    *,
+    shell_env_policy: Any,
+    dangerously_skip_all_permissions: bool,
+    permission_granted: Callable[[str], bool],
+    is_filtered_env_var: Callable[[str, str], bool],
+    windows_core_env_names: set[str],
+) -> tuple[dict[str, str], dict[str, Any]]:
+    filter_sensitive = not dangerously_skip_all_permissions and not permission_granted("sensitive_env")
+    overrides: dict[str, str] = {}
+    if isinstance(extra, dict):
+        for key, value in extra.items():
+            key_text = str(key)
+            value_text = str(value)
+            if filter_sensitive and is_filtered_env_var(key_text, value_text):
+                continue
+            overrides[key_text] = value_text
+    interactive_core = windows_core_env_names | {
+        "USERPROFILE",
+        "USERNAME",
+        "USERDOMAIN",
+        "USERDOMAIN_ROAMINGPROFILE",
+        "SESSIONNAME",
+        "COMPUTERNAME",
+        "LOGONSERVER",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "OS",
+        "PROCESSOR_ARCHITECTURE",
+        "NUMBER_OF_PROCESSORS",
+        "TEMP",
+        "TMP",
+    }
+    policy = {
+        "inherit": shell_env_policy.inherit,
+        "include_only": list(shell_env_policy.include_only),
+        "exclude": list(shell_env_policy.exclude),
+        "set": {str(key): str(value) for key, value in shell_env_policy.set.items()},
+        "core_names": sorted(interactive_core),
+    }
+    return overrides, policy
+
+
+def add_exec_diagnostics(
+    payload: dict[str, Any],
+    *,
+    session: ExecSession | None = None,
+    exec_output_diagnostics: Callable[[dict[str, Any]], list[dict[str, Any]]],
+) -> None:
+    if session is not None and not payload.get("stdout") and not payload.get("stderr"):
+        retained = session.retained_output_bytes().decode("utf-8", errors="replace")
+        if retained:
+            payload["_diagnostic_output"] = retained
+    diagnostics = exec_output_diagnostics(payload)
+    payload.pop("_diagnostic_output", None)
+    if diagnostics:
+        payload["diagnostics"] = diagnostics
+    if payload.get("timed_out") or payload.get("status") == "timeout":
+        payload["error_kind"] = "timeout"
+    elif payload.get("exit_code") not in (None, 0):
+        diagnostic_codes = {str(item.get("code")) for item in diagnostics}
+        payload["error_kind"] = (
+            "tool_not_found" if "EXECUTABLE_NOT_FOUND" in diagnostic_codes else "process_exit"
+        )
+        payload["process_error"] = {
+            "kind": payload["error_kind"],
+            "exit_code": payload.get("exit_code"),
+            "signal": payload.get("signal"),
+        }
+
+
 class ExecutionService:
     """Managed and active-user command execution with explicit Runtime hooks."""
 
@@ -427,4 +582,11 @@ class ExecutionService:
         )
 
 
-__all__ = ["ExecutionService", "MAX_ACTIVE_EXEC_SESSIONS"]
+__all__ = [
+    "ExecutionService",
+    "MAX_ACTIVE_EXEC_SESSIONS",
+    "add_exec_diagnostics",
+    "base_command_env",
+    "command_env",
+    "interactive_command_env",
+]

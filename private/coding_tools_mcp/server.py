@@ -69,7 +69,14 @@ from .command_policy import (
 from .envutils import ENV_PREFIX, truthy_env
 from .errors import JsonRpcError, ToolFailure
 from .elevated_actions import ELEVATED_ACTIONS, request_elevated_action, request_permission_approval
-from .execution import ExecutionService, MAX_ACTIVE_EXEC_SESSIONS
+from .execution import (
+    ExecutionService,
+    MAX_ACTIVE_EXEC_SESSIONS,
+    add_exec_diagnostics,
+    base_command_env,
+    command_env,
+    interactive_command_env,
+)
 from .interactive_exec import (
     interactive_broker_status,
     interactive_queue_path,
@@ -1800,26 +1807,11 @@ class Runtime:
         self._command_policy_service().check(cmd, args)
 
     def _add_exec_diagnostics(self, payload: dict[str, Any], *, session: ExecSession | None = None) -> None:
-        if session is not None and not payload.get("stdout") and not payload.get("stderr"):
-            retained = session.retained_output_bytes().decode("utf-8", errors="replace")
-            if retained:
-                payload["_diagnostic_output"] = retained
-        diagnostics = exec_output_diagnostics(payload)
-        payload.pop("_diagnostic_output", None)
-        if diagnostics:
-            payload["diagnostics"] = diagnostics
-        if payload.get("timed_out") or payload.get("status") == "timeout":
-            payload["error_kind"] = "timeout"
-        elif payload.get("exit_code") not in (None, 0):
-            diagnostic_codes = {str(item.get("code")) for item in diagnostics}
-            payload["error_kind"] = (
-                "tool_not_found" if "EXECUTABLE_NOT_FOUND" in diagnostic_codes else "process_exit"
-            )
-            payload["process_error"] = {
-                "kind": payload["error_kind"],
-                "exit_code": payload.get("exit_code"),
-                "signal": payload.get("signal"),
-            }
+        add_exec_diagnostics(
+            payload,
+            session=session,
+            exec_output_diagnostics=exec_output_diagnostics,
+        )
 
     def _check_command_paths(self, cmd: str) -> None:
         self._command_policy_service().check_paths(cmd)
@@ -1831,97 +1823,30 @@ class Runtime:
         self._command_policy_service().reject_setuid_executable(executable)
 
     def _command_env(self, extra: Any) -> dict[str, str]:
-        env = self._base_command_env()
-        filter_sensitive = not self.dangerously_skip_all_permissions and not self._permission_granted("sensitive_env")
-        if filter_sensitive:
-            env = {key: value for key, value in env.items() if not is_filtered_env_var(key, value)}
-            env = {key: value for key, value in env.items() if key not in ECOSYSTEM_CACHE_ENV_NAMES}
-        if self.shell_env_policy.exclude:
-            env = {
-                key: value
-                for key, value in env.items()
-                if not env_pattern_matches(key, self.shell_env_policy.exclude)
-            }
-        if self.shell_env_policy.include_only:
-            env = {
-                key: value
-                for key, value in env.items()
-                if env_pattern_matches(key, self.shell_env_policy.include_only)
-            }
-        env.update({str(key): str(value) for key, value in self.shell_env_policy.set.items()})
-        self._ensure_runtime_dirs()
-        tmp_dir = self.command_tmp_dir()
-        env["HOME"] = str(self.command_home_dir())
-        env["TMPDIR"] = str(tmp_dir)
-        if os.name == "nt":
-            home_dir = self.command_home_dir()
-            appdata_dir = home_dir / "AppData" / "Roaming"
-            localappdata_dir = home_dir / "AppData" / "Local"
-            nuget_packages_dir = self.cache_dir / "nuget" / "packages"
-            for path in (appdata_dir, localappdata_dir, nuget_packages_dir):
-                path.mkdir(parents=True, mode=0o700, exist_ok=True)
-            env["TEMP"] = str(tmp_dir)
-            env["TMP"] = str(tmp_dir)
-            env["USERPROFILE"] = str(home_dir)
-            env["APPDATA"] = str(appdata_dir)
-            env["LOCALAPPDATA"] = str(localappdata_dir)
-            env["HOMEDRIVE"] = home_dir.drive
-            env["HOMEPATH"] = str(home_dir)[len(home_dir.drive) :] or "\\"
-            env["DOTNET_CLI_HOME"] = str(home_dir)
-            env["NUGET_PACKAGES"] = str(nuget_packages_dir)
-            env.setdefault("DOTNET_NOLOGO", "1")
-            env.setdefault("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
-        if isinstance(extra, dict):
-            for key, value in extra.items():
-                key_text = str(key)
-                value_text = str(value)
-                if filter_sensitive and is_filtered_env_var(key_text, value_text):
-                    continue
-                env[key_text] = value_text
-        return env
+        return command_env(
+            extra,
+            shell_env_policy=self.shell_env_policy,
+            base_env=self._base_command_env,
+            dangerously_skip_all_permissions=self.dangerously_skip_all_permissions,
+            permission_granted=self._permission_granted,
+            is_filtered_env_var=is_filtered_env_var,
+            ecosystem_cache_env_names=ECOSYSTEM_CACHE_ENV_NAMES,
+            env_pattern_matches=env_pattern_matches,
+            ensure_runtime_dirs=self._ensure_runtime_dirs,
+            command_tmp_dir=self.command_tmp_dir,
+            command_home_dir=self.command_home_dir,
+            cache_dir=lambda: self.cache_dir,
+        )
 
     def _interactive_command_env(self, extra: Any) -> tuple[dict[str, str], dict[str, Any]]:
-        """Return explicit overrides + filtering policy for the desktop broker.
-
-        The broker intentionally inherits the signed-in user's environment,
-        not LocalService's synthetic HOME/APPDATA.  The normal shell-env policy
-        is applied inside that broker before the child process starts.
-        """
-        filter_sensitive = not self.dangerously_skip_all_permissions and not self._permission_granted("sensitive_env")
-        overrides: dict[str, str] = {}
-        if isinstance(extra, dict):
-            for key, value in extra.items():
-                key_text = str(key)
-                value_text = str(value)
-                if filter_sensitive and is_filtered_env_var(key_text, value_text):
-                    continue
-                overrides[key_text] = value_text
-        interactive_core = WINDOWS_CORE_ENV_NAMES | {
-            "USERPROFILE",
-            "USERNAME",
-            "USERDOMAIN",
-            "USERDOMAIN_ROAMINGPROFILE",
-            "SESSIONNAME",
-            "COMPUTERNAME",
-            "LOGONSERVER",
-            "APPDATA",
-            "LOCALAPPDATA",
-            "HOMEDRIVE",
-            "HOMEPATH",
-            "OS",
-            "PROCESSOR_ARCHITECTURE",
-            "NUMBER_OF_PROCESSORS",
-            "TEMP",
-            "TMP",
-        }
-        policy = {
-            "inherit": self.shell_env_policy.inherit,
-            "include_only": list(self.shell_env_policy.include_only),
-            "exclude": list(self.shell_env_policy.exclude),
-            "set": {str(key): str(value) for key, value in self.shell_env_policy.set.items()},
-            "core_names": sorted(interactive_core),
-        }
-        return overrides, policy
+        return interactive_command_env(
+            extra,
+            shell_env_policy=self.shell_env_policy,
+            dangerously_skip_all_permissions=self.dangerously_skip_all_permissions,
+            permission_granted=self._permission_granted,
+            is_filtered_env_var=is_filtered_env_var,
+            windows_core_env_names=WINDOWS_CORE_ENV_NAMES,
+        )
 
     def _exec_command_active_user(
         self,
@@ -1956,15 +1881,10 @@ class Runtime:
         return self._git_tools().git_repo_scope(args)
 
     def _base_command_env(self) -> dict[str, str]:
-        if self.shell_env_policy.inherit == "none":
-            return {}
-        if self.shell_env_policy.inherit == "all":
-            return {str(key): str(value) for key, value in os.environ.items()}
-        return {
-            str(key): str(value)
-            for key, value in os.environ.items()
-            if is_core_command_env_name(str(key))
-        }
+        return base_command_env(
+            self.shell_env_policy,
+            is_core_command_env_name=is_core_command_env_name,
+        )
 
     def _make_session(
         self,

@@ -346,7 +346,11 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
   - Execution extraction compile + full validator + reverse-import check + `git diff --check` PASS；`server.py`：4660 → 4370（baseline 8353 → 4370）。
   - Execution extraction commit：`00aedff` (`refactor: extract execution service`).
   - Next boundary：move command-environment construction and execution diagnostics into execution-owned helpers while preserving the existing Runtime compatibility methods used by Git and validators.
-  - Diagnostic characterization added：missing-executable exit classification remains `tool_not_found` with process metadata；timeout classification remains `timeout`. Existing Windows command-env and interactive-env characterization remains green. Ready for tests-only freeze commit.
+  - Diagnostic characterization added：missing-executable exit classification remains `tool_not_found` with process metadata；timeout classification remains `timeout`. Existing Windows command-env and interactive-env characterization remains green.
+  - Env/diagnostic characterization commit：`d0d4da5` (`test: freeze execution env diagnostics`).
+  - `_base_command_env`, `_command_env`, `_interactive_command_env`, and `_add_exec_diagnostics` are now Runtime compatibility wrappers over execution-owned helpers. GitTools still receives the same Runtime callback contract; no consumer API changed.
+  - Env/diagnostic extraction compile + full validator + `git diff --check` PASS；`server.py`：4370 → 4284（baseline 8353 → 4284）。
+  - Next boundary：finish session-domain hidden inspection ownership and move `server_info_payload()` composition once the registry/execution split can supply its data without reverse dependencies.
 - [ ] Runtime 只保留 request-to-service wiring。
 - [ ] 明確定義 registry ownership：誰 create、誰 close、HTTP reconnect 如何 share。
 
