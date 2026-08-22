@@ -8,11 +8,19 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .errors import ToolFailure
-from .processes import HARD_KILL_SIGNAL, SESSION_BUFFER_BYTES, ExecSession, terminate_process_group
+from .processes import (
+    HARD_KILL_SIGNAL,
+    SESSION_BUFFER_BYTES,
+    ExecSession,
+    process_tree_for_pid,
+    terminate_process_group,
+    truncate_output_bytes_tail,
+)
 
 
 EXEC_PREVIEW_BYTES = 4096
@@ -377,6 +385,165 @@ class ExecutionRegistry:
                 str(result["stream_output_ref"]), offset=next_offset, limit=limit
             )
         return result
+
+    def session_metadata(
+        self,
+        session: ExecSession,
+        *,
+        include_process_tree: bool = False,
+        redact_command: Callable[[Any], Any],
+    ) -> dict[str, Any]:
+        session.refresh_status()
+        with session.lock:
+            cursor = {"stdout": session.stdout_total_bytes, "stderr": session.stderr_total_bytes}
+            retained = len(session.stdout) + len(session.stderr)
+        now = time.time()
+        item: dict[str, Any] = {
+            "session_id": session.session_id,
+            "pid": session.process.pid,
+            "status": (
+                "timeout"
+                if session.timed_out
+                else "running"
+                if session.process.poll() is None
+                else "terminated"
+                if session.signal_name
+                else "exited"
+            ),
+            "exit_code": session.exit_code,
+            "signal": session.signal_name,
+            "started_at": datetime.fromtimestamp(session.started_at, timezone.utc).isoformat(),
+            "completed_at": (
+                datetime.fromtimestamp(session.completed_at, timezone.utc).isoformat()
+                if session.completed_at is not None
+                else None
+            ),
+            "elapsed_ms": int(((session.completed_at or now) - session.started_at) * 1000),
+            "timeout_at": session.timeout_at,
+            "cwd": session.cwd,
+            "scratch_dir": session.scratch_dir or None,
+            "command": redact_command(session.command_preview),
+            "retained_output_bytes": retained,
+            "cursor": cursor,
+            "output_refs": {
+                "stdout": f"session:{session.session_id}:stdout",
+                "stderr": f"session:{session.session_id}:stderr",
+            },
+        }
+        if include_process_tree:
+            item["process_tree"] = process_tree_for_pid(session.process.pid)
+        return item
+
+    def list_sessions(
+        self,
+        args: dict[str, Any],
+        *,
+        redact_command: Callable[[Any], Any],
+    ) -> dict[str, Any]:
+        self._prune_sessions()
+        include_completed = bool(args.get("include_completed", True))
+        include_tree = bool(args.get("include_process_tree", False))
+        with self.sessions_lock:
+            sessions = list(self.sessions.values())
+            if include_completed:
+                sessions += list(self.output_sessions.values())
+        sessions.sort(key=lambda item: item.started_at)
+        return {
+            "sessions": [
+                self.session_metadata(
+                    session,
+                    include_process_tree=include_tree,
+                    redact_command=redact_command,
+                )
+                for session in sessions
+            ],
+            "active": sum(1 for session in sessions if session.process.poll() is None),
+            "completed": sum(1 for session in sessions if session.process.poll() is not None),
+        }
+
+    def process_tree(self, args: dict[str, Any]) -> dict[str, Any]:
+        session = self._get_output_session(str(args.get("session_id", "")))
+        return {
+            "session_id": session.session_id,
+            "pid": session.process.pid,
+            "process_tree": process_tree_for_pid(session.process.pid),
+        }
+
+    def kill_tree(self, args: dict[str, Any]) -> dict[str, Any]:
+        kill_args = dict(args)
+        kill_args["signal"] = "KILL" if bool(args.get("force", True)) else "TERM"
+        kill_args.setdefault("output_mode", "summary")
+        return self.kill_session(kill_args)
+
+    def tail_output(self, args: dict[str, Any]) -> dict[str, Any]:
+        session = self._get_output_session(str(args.get("session_id", "")))
+        session.refresh_status()
+        stream = str(args.get("stream", "stdout"))
+        lines = max(1, min(int(args.get("lines", 20)), 1000))
+        max_bytes = max(1, min(int(args.get("max_bytes", 16384)), SESSION_BUFFER_BYTES))
+        data, start_offset, total_bytes, dropped_bytes = session.retained_stream_bytes(stream)
+        truncation = truncate_output_bytes_tail(data, max_bytes, max_lines=lines)
+        return {
+            "session_id": session.session_id,
+            "stream": stream,
+            "content": truncation.content,
+            "lines": lines,
+            "truncated": truncation.truncated,
+            "truncated_by": truncation.truncated_by,
+            "retained_start_offset": start_offset,
+            "total_stream_bytes": total_bytes,
+            "dropped_bytes": dropped_bytes,
+            "cursor": {"stdout": session.stdout_total_bytes, "stderr": session.stderr_total_bytes},
+            "ok": True,
+        }
+
+    def find_output(
+        self,
+        args: dict[str, Any],
+        *,
+        truncate_line_chars: Callable[[str, int], tuple[str, bool]],
+    ) -> dict[str, Any]:
+        session = self._get_output_session(str(args.get("session_id", "")))
+        session.refresh_status()
+        query = str(args.get("query", ""))
+        stream = str(args.get("stream", "both"))
+        case_sensitive = bool(args.get("case_sensitive", False))
+        use_regex = bool(args.get("regex", False))
+        max_results = max(1, min(int(args.get("max_results", 100)), 1000))
+        streams = [stream] if stream in {"stdout", "stderr"} else ["stdout", "stderr"]
+        flags = 0 if case_sensitive else re.IGNORECASE
+        try:
+            pattern = re.compile(query if use_regex else re.escape(query), flags)
+        except re.error as exc:
+            raise ToolFailure("INVALID_ARGUMENT", f"Invalid regex: {exc}", category="validation") from exc
+        matches: list[dict[str, Any]] = []
+        for stream_name in streams:
+            data, _start, _total, _dropped = session.retained_stream_bytes(stream_name)
+            text = data.decode("utf-8", errors="replace")
+            for line_number, line in enumerate(text.splitlines(), 1):
+                match = pattern.search(line)
+                if not match:
+                    continue
+                matches.append(
+                    {
+                        "stream": stream_name,
+                        "line": line_number,
+                        "column": match.start() + 1,
+                        "preview": truncate_line_chars(line, 500)[0],
+                    }
+                )
+                if len(matches) >= max_results:
+                    break
+            if len(matches) >= max_results:
+                break
+        return {
+            "session_id": session.session_id,
+            "query": query,
+            "matches": matches,
+            "truncated": len(matches) >= max_results,
+            "max_results": max_results,
+            "ok": True,
+        }
 
     def poll_session(self, args: dict[str, Any]) -> dict[str, Any]:
         """Poll without opening stdin, preserving an explicit reconnect cursor."""

@@ -352,7 +352,11 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
   - Env/diagnostic extraction compile + full validator + `git diff --check` PASS；`server.py`：4370 → 4284（baseline 8353 → 4284）。
   - Env/diagnostic extraction commit：`d89241f` (`refactor: move execution env diagnostics`).
   - Next boundary：finish session-domain hidden inspection ownership and move `server_info_payload()` composition once the registry/execution split can supply its data without reverse dependencies.
-  - Hidden inspection characterization added and full validator PASS：completed-session list/count metadata, tail output, find-output line/column match, and process-tree empty result for an exited synthetic PID. Ready for tests-only freeze commit.
+  - Hidden inspection characterization added and full validator PASS：completed-session list/count metadata, tail output, find-output line/column match, and process-tree empty result for an exited synthetic PID.
+  - Hidden inspection characterization commit：`248a628` (`test: freeze hidden session inspection`).
+  - Hidden handlers `_session_metadata`, `list_sessions`, `process_tree`, `kill_tree`, `tail_output`, and `find_output` now delegate to `ExecutionRegistry`; command redaction and line preview are injected callbacks, so `session_store.py` has no reverse dependency on `server.py` or filesystem helpers.
+  - Hidden inspection extraction compile + full validator + `git diff --check` PASS；`server.py`：4284 → 4170（baseline 8353 → 4170）。
+  - Next boundary：move/refactor `server_info_payload()` composition and document registry ownership/close semantics as the Phase 3 exit step.
 - [ ] Runtime 只保留 request-to-service wiring。
 - [ ] 明確定義 registry ownership：誰 create、誰 close、HTTP reconnect 如何 share。
 
