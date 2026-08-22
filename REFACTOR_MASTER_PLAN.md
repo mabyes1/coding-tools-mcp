@@ -317,6 +317,9 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
   - Next process-control boundary：move `poll_session`, `write_stdin`, `_session_has_new_output`, `_wait_for_session_exit`, `kill_session`, `cancel_session` onto `ExecutionRegistry`. Keep `cancel_request` in Runtime because request-id → session-id mapping belongs to MCP request wiring; keep `_make_session` with later spawn orchestration.
   - Existing validator has no direct process-control characterization. Freeze completed-session poll, stdin-write rejection after exit, explicit-cursor new-output detection, forced live-child kill/eviction, and cancel-session registry removal before relocation.
   - Process-control characterization added：completed-session poll output, closed-session stdin rejection (`SESSION_CLOSED` / runtime), explicit-cursor new-output detection, real live-child forced `SIGKILL` + eviction, and cancel-session active-map removal. Full validator PASS; ready for tests-only freeze commit.
+  - Characterization commit：`47dd522` (`test: freeze session process control`).
+  - Production process-control layer relocated onto `ExecutionRegistry`：`poll_session`, `write_stdin`, `_session_has_new_output`, `_wait_for_session_exit`, `kill_session`, `cancel_session`; Runtime keeps thin wrappers and `cancel_request` remains Runtime-owned request glue.
+  - All six moved methods are AST-identical to pre-relocation HEAD；compile + full validator + reverse-import check + `git diff --check` PASS. Current `server.py`：5372 → 5281（baseline 8353 → 5281）。
 - [ ] exec orchestration 與 command policy 分離：
   - `command_policy.py`：解析與 allow/deny 判斷
   - `execution.py`：spawn / active_user delegation / output formatting
@@ -497,7 +500,9 @@ Python server 穩定後再碰 installer/update，避免兩個高風險面同時�
 - Output extraction commit：`d883250` (`refactor: move session output paging into registry`)；post-commit worktree returned to only the excluded ADHD note.
 - Process-control map is complete: session-id control moves to registry, request-id cancellation stays in Runtime, session construction stays with later spawn orchestration.
 - Process-control characterization now passes in the full validator, including a real 60-second child terminated through `kill_session`.
-- **Next：** commit this process-control freeze separately, then relocate only the mapped methods.
+- Process-control characterization commit：`47dd522` (`test: freeze session process control`).
+- Session-id process control is now relocated verbatim onto `ExecutionRegistry`; Runtime keeps thin wrappers, while `cancel_request` stays in Runtime. AST equivalence + full validator + reverse-import check + `git diff --check` PASS；`server.py` is 5281 lines.
+- **Next：** staged review + commit of process-control relocation. Then map the remaining session inspection helpers (`_session_metadata`, list/process-tree/tail/find) before deciding whether they belong in the registry or a separate diagnostics facade.
 
 ### 2026-08-21 end-of-session handoff
 

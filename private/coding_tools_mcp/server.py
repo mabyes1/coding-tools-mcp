@@ -2640,113 +2640,22 @@ class Runtime:
         }
 
     def poll_session(self, args: dict[str, Any]) -> dict[str, Any]:
-        """Poll without opening stdin, preserving an explicit reconnect cursor."""
-        poll_args = dict(args)
-        poll_args["chars"] = ""
-        return self.write_stdin(poll_args)
+        return self.execution_registry.poll_session(args)
 
     def write_stdin(self, args: dict[str, Any]) -> dict[str, Any]:
-        session_id = str(args.get("session_id", ""))
-        session = self._get_session(session_id)
-        session.refresh_status()
-        chars = str(args.get("chars", ""))
-        if session.process.poll() is not None:
-            if chars:
-                raise ToolFailure("SESSION_CLOSED", "Session is closed; stdin write blocked.", category="runtime")
-            payload = self._snapshot_session(session, args, int(args.get("max_output_bytes", 65536)))
-            return self._format_session_output(session, payload, args)
-        if chars:
-            session.write_input(chars.encode("utf-8"))
-        wait_until = time.time() + (int(args.get("yield_time_ms", 10000)) / 1000.0)
-        first_output_at: float | None = None
-        while time.time() < wait_until and session.process.poll() is None:
-            time.sleep(0.02)
-            has_new_output = self._session_has_new_output(session, args)
-            if has_new_output:
-                if not chars:
-                    break
-                if first_output_at is None:
-                    first_output_at = time.time()
-                if time.time() - first_output_at >= 0.05:
-                    break
-        payload = self._snapshot_session(session, args, int(args.get("max_output_bytes", 65536)))
-        return self._format_session_output(session, payload, args)
+        return self.execution_registry.write_stdin(args)
 
     def _session_has_new_output(self, session: ExecSession, args: dict[str, Any]) -> bool:
-        raw_cursor = args.get("after_cursor", args.get("cursor"))
-        if isinstance(raw_cursor, dict):
-            try:
-                stdout_cursor = max(0, int(raw_cursor.get("stdout", 0)))
-                stderr_cursor = max(0, int(raw_cursor.get("stderr", 0)))
-            except (TypeError, ValueError):
-                stdout_cursor = stderr_cursor = 0
-        else:
-            stdout_cursor = session.stdout_cursor
-            stderr_cursor = session.stderr_cursor
-        with session.lock:
-            return session.stdout_total_bytes > stdout_cursor or session.stderr_total_bytes > stderr_cursor
+        return self.execution_registry._session_has_new_output(session, args)
 
     def _wait_for_session_exit(self, session: ExecSession, wait_seconds: float) -> bool:
-        try:
-            session.process.wait(timeout=max(0.0, wait_seconds))
-        except subprocess.TimeoutExpired:
-            pass
-        session.refresh_status()
-        session.drain_readers()
-        return session.process.poll() is not None
+        return self.execution_registry._wait_for_session_exit(session, wait_seconds)
 
     def kill_session(self, args: dict[str, Any]) -> dict[str, Any]:
-        session_id = str(args.get("session_id", ""))
-        session = self._get_session(session_id)
-        signal_name = str(args.get("signal", "TERM"))
-        force = signal_name == "KILL"
-        signum = {"TERM": signal.SIGTERM, "KILL": HARD_KILL_SIGNAL, "INT": signal.SIGINT}.get(
-            signal_name,
-            signal.SIGTERM,
-        )
-        evict = True
-        if session.process.poll() is None:
-            session.terminating = True
-            terminate_process_group(session.process, signum, force=force)
-            exited = self._wait_for_session_exit(session, int(args.get("wait_ms", 5000)) / 1000.0)
-            if not exited and not force:
-                force = True
-                terminate_process_group(session.process, HARD_KILL_SIGNAL, force=True)
-                exited = self._wait_for_session_exit(session, int(args.get("kill_wait_ms", 2000)) / 1000.0)
-            if exited:
-                killed = True
-                status = "killed" if force else "terminated"
-            else:
-                killed = False
-                evict = False
-                status = "terminating"
-        else:
-            killed = False
-            status = "exited"
-        signal_sent = "SIGKILL" if force else signal.Signals(signum).name
-        payload = self._snapshot_session(session, args, int(args.get("max_output_bytes", 65536)))
-        payload.update({"killed": killed, "status": status, "evicted": evict, "signal_sent": signal_sent})
-        payload = self._format_session_output(session, payload, args)
-        if status == "terminating":
-            warnings = list(payload.get("warnings", []))
-            warnings.append("Process did not exit after TERM/SIGKILL; session retained for retry or watchdog cleanup.")
-            payload["warnings"] = warnings
-            payload["next_action"] = "retry kill_session or wait for watchdog cleanup"
-        if evict:
-            with self.sessions_lock:
-                self.sessions.pop(session_id, None)
-                self.output_sessions.pop(session_id, None)
-            self._cleanup_session_scratch(session)
-        return payload
+        return self.execution_registry.kill_session(args)
 
     def cancel_session(self, session_id: str) -> None:
-        with self.sessions_lock:
-            session = self.sessions.pop(session_id, None)
-        if session is None:
-            return
-        session.refresh_status()
-        if session.process.poll() is None:
-            terminate_process_group(session.process, signal.SIGTERM)
+        self.execution_registry.cancel_session(session_id)
 
     def cancel_request(self, request_id: str | int) -> None:
         with self.request_sessions_lock:
