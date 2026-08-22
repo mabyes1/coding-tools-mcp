@@ -5,6 +5,7 @@ import json
 import os
 import threading
 import time
+from collections import deque
 import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -132,6 +133,32 @@ class SessionCapacityError(RuntimeError):
     """Raised only when every bounded session slot is currently in use."""
 
     retry_after = 5
+
+
+class SlidingWindowRateLimiter:
+    """Small process-local limiter for a single public personal endpoint."""
+
+    def __init__(self) -> None:
+        self._events: dict[str, deque[float]] = {}
+        self._lock = threading.Lock()
+        self.rejected = 0
+
+    def allow(self, key: str, *, limit: int, window_seconds: float) -> bool:
+        now = time.time()
+        cutoff = now - window_seconds
+        with self._lock:
+            events = self._events.setdefault(key, deque())
+            while events and events[0] <= cutoff:
+                events.popleft()
+            if len(events) >= limit:
+                self.rejected += 1
+                return False
+            events.append(now)
+            if len(self._events) > 1024:
+                self._events = {
+                    name: values for name, values in self._events.items() if values and values[-1] > cutoff
+                }
+            return True
 
 
 @dataclass(frozen=True)

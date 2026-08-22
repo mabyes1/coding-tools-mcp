@@ -393,8 +393,16 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
   - Current `server.py`：4057 → 3233（baseline 8353 → 3233）。
 - [ ] MCP HTTP request parsing / session acquisition / dispatch / response lifecycle 收斂到 `http_server.py`。
 - [x] OAuth HTTP glue 移到 `oauth_http.py`，domain logic 繼續使用既有 `oauth.py`。
-- [ ] `RuntimeHTTPServer` / health handler / tool-list notification lifecycle 整理。
-- [ ] 保持 stdio transport 與 HTTP transport 共用同一 Runtime contract。
+- [x] `RuntimeHTTPServer` / health handler / tool-list notification lifecycle 整理。
+  - `http_server.py` now owns server-card composition, `MCPHandler`, `MCPHealthHandler`, and `RuntimeHTTPServer`; `transport_http.py` owns bounded HTTP session storage, request/body/origin helpers, and the process-local rate limiter.
+  - `MCPHandler`, `MCPHealthHandler`, and `RuntimeHTTPServer` method bodies are AST-identical to pre-relocation HEAD after review; no transport module imports `server.py`.
+  - Stable server identity/build metadata moved to `runtime_meta.py`, and ExceptionGroup leaf summarization moved to `errors.py`, both re-exported by `server.py` for compatibility so the HTTP layer needs no reverse dependency.
+  - Compile + full validator + `git diff --check` PASS；HTTP reconnect/shared-registry ownership, server close, idle/in-flight TTL/watchdog, bounded capacity, and disconnect handling remain exercised by validator.
+  - Current `server.py`：3233 → 2495（baseline 8353 → 2495）。
+- [x] 保持 stdio transport 與 HTTP transport 共用同一 Runtime contract。
+  - HTTP runtime factory still constructs the same `Runtime` type and shares only the explicit `ExecutionRegistry`; stdio continues to call the same Runtime dispatch contract through `serve_stdio`.
+
+**Phase 5：COMPLETE / GREEN.** OAuth endpoint glue and MCP/health/session HTTP lifecycle are outside `server.py`; public tool/schema hash remains unchanged and full validator is green.
 
 **Exit gate：** OAuth on/off、auth token、CORS、metadata、MCP session reconnect、disconnect、TTL/watchdog 全綠。
 
