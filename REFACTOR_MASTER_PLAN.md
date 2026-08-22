@@ -386,9 +386,13 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
 
 ### Phase 5 — HTTP / MCP / OAuth Transport Split
 
-- [ ] `MCPHandler` 拆掉 OAuth endpoint glue。
+- [x] `MCPHandler` 拆掉 OAuth endpoint glue。
+  - Shared HTTP primitives (`MCP_ENDPOINT_PATH`, request-body cap, safe body write, forwarded/host parsing, CORS origin validation, loopback detection, JSON payload helper) moved to `transport_http.py` and remain compatibility imports in `server.py`.
+  - OAuth endpoint methods moved verbatim to `OAuthHTTPMixin` in `oauth_http.py`; `MCPHandler` now composes the mixin with `BaseHTTPRequestHandler` instead of owning authorize/token/register/metadata implementation.
+  - All 13 moved OAuth methods are AST-identical to pre-relocation HEAD；`oauth_http.py` / `transport_http.py` do not import `server.py`；compile + full validator + `git diff --check` PASS.
+  - Current `server.py`：4057 → 3233（baseline 8353 → 3233）。
 - [ ] MCP HTTP request parsing / session acquisition / dispatch / response lifecycle 收斂到 `http_server.py`。
-- [ ] OAuth HTTP glue 移到 `oauth_http.py`，domain logic 繼續使用既有 `oauth.py`。
+- [x] OAuth HTTP glue 移到 `oauth_http.py`，domain logic 繼續使用既有 `oauth.py`。
 - [ ] `RuntimeHTTPServer` / health handler / tool-list notification lifecycle 整理。
 - [ ] 保持 stdio transport 與 HTTP transport 共用同一 Runtime contract。
 

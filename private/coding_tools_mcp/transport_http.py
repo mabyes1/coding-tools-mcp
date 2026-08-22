@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import functools
+import json
 import os
 import threading
 import time
+import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+
+from .envutils import ENV_PREFIX
 
 
 # These defaults are intentionally tuned for ChatGPT Web's reconnect pattern:
@@ -19,6 +24,94 @@ MAX_HTTP_SESSIONS = 256
 HTTP_SESSION_TTL_SECONDS = 5 * 60
 HTTP_IN_FLIGHT_TTL_SECONDS = 90
 MAX_HTTP_SESSIONS_PER_OWNER = 64
+MCP_ENDPOINT_PATH = "/mcp"
+MAX_HTTP_REQUEST_BYTES = 1_048_576
+
+
+def http_base_for_bind_host(host: str, port: int) -> str:
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{port}"
+
+
+def write_http_body_safely(handler: Any, body: bytes) -> bool:
+    """Treat a client disappearing mid-response as a normal disconnect."""
+    try:
+        handler.wfile.write(body)
+        return True
+    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+        handler.close_connection = True
+        return False
+
+
+def first_header_value(value: str | None) -> str:
+    return (value or "").split(",", 1)[0].strip()
+
+
+def first_form_value(params: dict[str, list[str]], key: str) -> str:
+    values = params.get(key)
+    return values[0] if values else ""
+
+
+def forwarded_header_param(value: str | None, name: str) -> str:
+    first = first_header_value(value)
+    for part in first.split(";"):
+        key, sep, raw = part.strip().partition("=")
+        if sep and key.lower() == name:
+            return raw.strip().strip('"')
+    return ""
+
+
+def safe_external_host(host: str) -> str:
+    host = host.strip()
+    if not host or any(ch.isspace() or ch in "/\\@?#" for ch in host):
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(f"//{host}")
+        _ = parsed.port
+    except ValueError:
+        return ""
+    if not parsed.hostname or parsed.username is not None or parsed.password is not None:
+        return ""
+    return host
+
+
+def json_response_payload(payload: Any) -> bytes:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+@functools.lru_cache(maxsize=8)
+def _configured_allowed_origins(raw: str) -> frozenset[str]:
+    return frozenset(item.strip().rstrip("/") for item in raw.split(",") if item.strip())
+
+
+def is_allowed_origin(origin: str) -> bool:
+    try:
+        parsed = urllib.parse.urlparse(origin)
+    except ValueError:
+        return False
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path not in {"", "/"}
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        return False
+    try:
+        _ = parsed.port
+    except ValueError:
+        return False
+    normalized = origin.rstrip("/")
+    configured = _configured_allowed_origins(os.environ.get(f"{ENV_PREFIX}_ALLOWED_ORIGINS", ""))
+    return parsed.hostname in {"localhost", "127.0.0.1", "::1"} or normalized in configured
+
+
+def is_loopback_bind_host(host: str) -> bool:
+    return host in {"localhost", "127.0.0.1", "::1", ""}
 
 
 def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
