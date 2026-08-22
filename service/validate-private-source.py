@@ -533,6 +533,34 @@ def main() -> int:
         if runtime_dir.exists():
             raise RuntimeError("the owning Runtime did not clean up its isolated runtime directory")
 
+    # ExecutionRegistry.close is the last-resort owner shutdown path. Freeze
+    # its live-child behavior before relocating the registry out of server.py:
+    # active sessions must be cleared, the process group must be hard-killed,
+    # reader cleanup must run, and a repeated close must remain harmless.
+    close_registry = server.ExecutionRegistry()
+    close_process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        **server.process_group_popen_kwargs(),
+    )
+    close_session = server.ExecSession("registry-close-contract", close_process)
+    close_registry.sessions[close_session.session_id] = close_session
+    try:
+        close_registry.close()
+        if not close_registry.closed:
+            raise RuntimeError("ExecutionRegistry.close did not mark the registry closed")
+        if close_registry.sessions or close_registry.output_sessions:
+            raise RuntimeError("ExecutionRegistry.close did not clear session maps")
+        if close_process.poll() is None:
+            raise RuntimeError("ExecutionRegistry.close did not terminate a live child process")
+        close_registry.close()
+    finally:
+        if close_process.poll() is None:
+            close_process.kill()
+            close_process.wait(timeout=5)
+
     with tempfile.TemporaryDirectory(prefix="coding-tools-http-lifecycle-") as temporary:
         http_workspace = Path(temporary)
         control_runtime = server.Runtime(http_workspace, enable_view_image=False)

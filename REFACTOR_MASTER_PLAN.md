@@ -247,7 +247,7 @@ processes / patching / oauth / protocol / transport_* 等既有低階 modules
   - Compile + full source validator PASS；four pure helpers (`parse_branch_line`, `validate_git_ref`, `parse_git_blame_porcelain`, `parse_diff_files`) are AST-identical to pre-extraction HEAD.
   - Final review：dead `_git_*` wrappers removed except `_git_repo_scope`, which remains only because the frozen validator calls it directly；staged `git diff --check` PASS.
   - `server.py`：6273 → 5802 lines（baseline 8353 → 5802）。
-- [ ] apply_patch tool
+- [x] apply_patch tool
   - 2026-08-22 dependency map：the orchestration is localized to workspace/default-cwd resolution, symlink-write rejection, `patch_lock`, `AtomicPatchCommitter`, `patch_baselines`, and result formatting. It does **not** directly own permission-grant logic.
   - Decision：treat this as the final Phase 2 tool-domain extraction rather than carrying it into Phase 3. Keep low-level parsing/atomic commit primitives in existing `patching.py`; extract Runtime orchestration only.
   - Existing characterization only proves relative-path update from persistent default cwd, so add add/dry-run/move/delete + baseline semantics before production relocation.
@@ -257,6 +257,7 @@ processes / patching / oauth / protocol / transport_* 等既有低階 modules
   - Production orchestration moved to `tools/patch_tools.py`; `Runtime.apply_patch()` is now a thin explicit-dependency delegation. `patching.py` remained untouched.
   - Compile + expanded full validator PASS；repository search confirms no stale Runtime-only patch helpers and no reverse import of `server.py` from the new module；`git diff --check` PASS.
   - Current pre-commit line count：`server.py` 5802 → 5686（baseline 8353 → 5686）。
+  - Extraction commit：`514542a` (`refactor: extract patch tool orchestration`).
 - [x] image tool
   - Characterization commit：`7fbf68f` (`test: freeze image tool behavior`)
   - Extraction commit：`01e2b5c` (`refactor: extract image tool domain`)
@@ -276,7 +277,7 @@ processes / patching / oauth / protocol / transport_* 等既有低階 modules
   - `human_help_me` / computer/browser argument mapping moved to `tools/desktop.py` with explicit interactive-broker callbacks；broker protocol unchanged。
   - Full source validator PASS；old Runtime bodies and extracted helper bodies AST-identical after signature/docstring normalization。
 
-Current `server.py`：5802 lines（baseline 8353 → 5802）。
+Current `server.py`：5686 lines（baseline 8353 → 5686）。
 
 優先採「service object / plain functions + explicit dependencies」，避免把一個 God Class 切成六個互相拿整個 Runtime 的小 God Class。
 
@@ -287,6 +288,10 @@ Current `server.py`：5802 lines（baseline 8353 → 5802）。
 這是高風險區，獨立成自己的工程。
 
 - [ ] `ExecutionRegistry` 從 server.py 移出。
+  - 2026-08-22 map：registry currently owns active/completed execution maps and locks, **plus** reconnect-shared owner cwd / permission grants / runtime-dir metadata / HTTP session stats provider.
+  - Relocation rule：move the registry as-is to `session_store.py`; do not split those historical shared-state fields during this extraction. Move `PermissionGrant` with it only as a data type so `session_store.py` does not import `server.py`; Phase 4 may later separate permission ownership.
+  - Existing Phase 0 characterization already freezes owning-vs-shared Runtime close semantics and HTTP reconnect sharing. Add one missing close characterization for a live child process: registry close must clear maps, hard-kill the child, drain readers, and remain idempotent.
+  - Live-child close characterization added on 2026-08-22 and full validator PASS：a spawned 60-second child is terminated by `ExecutionRegistry.close()`, maps are cleared, `closed=True`, and repeated close is harmless. Ready for a tests-only freeze commit.
 - [ ] session retention / output snapshot / prune / cancel / stdin lifecycle 收斂成單一 session service。
 - [ ] exec orchestration 與 command policy 分離：
   - `command_policy.py`：解析與 allow/deny 判斷
@@ -432,7 +437,7 @@ Python server 穩定後再碰 installer/update，避免兩個高風險面同時�
 
 ## 9. Current Checkpoint
 
-**狀態：PHASE 2 IN PROGRESS / GREEN CHECKPOINT**
+**狀態：PHASE 2 COMPLETE / PHASE 3 STARTING / GREEN CHECKPOINT**
 
 ### 2026-08-22 checkpoint — Git extraction complete
 
@@ -450,7 +455,11 @@ Python server 穩定後再碰 installer/update，避免兩個高風險面同時�
 - Characterization now covers add/dry-run/move/delete, patch-baseline registration, and staged validation failure without partial commit；full validator PASS before any production relocation.
 - Characterization freeze commit：`027ad52` (`test: freeze apply patch orchestration`).
 - Production orchestration is now in `tools/patch_tools.py`; `Runtime.apply_patch()` is a thin delegation and `patching.py` remains unchanged. Expanded validator + `git diff --check` PASS.
-- **Next：** staged review of only `server.py` + `tools/patch_tools.py` + this plan, commit extraction, then reassess whether Phase 2 can close and Phase 3 can start.
+- Extraction commit：`514542a` (`refactor: extract patch tool orchestration`)；post-commit worktree again contains only the excluded ADHD note.
+- **Phase 2 close decision：** low-risk tool-domain extraction is complete. `server_info_payload()` remains intentionally in Runtime because it composes execution/session ownership; that remaining work is reclassified into Phase 3 rather than keeping Phase 2 artificially open.
+- Phase 3 map confirms `ExecutionRegistry` also carries owner cwd / permission grant shared state. This impurity is preserved intentionally for the relocation; splitting it now would combine architecture change with movement.
+- Live-child registry close characterization now passes in the full validator.
+- **Next：Phase 3 / ExecutionRegistry extraction only.** Commit the close characterization separately, then relocate `PermissionGrant` + `ExecutionRegistry` to `session_store.py`. Do not mix exec orchestration or command-policy changes into the registry extraction commit.
 
 ### 2026-08-21 end-of-session handoff
 
