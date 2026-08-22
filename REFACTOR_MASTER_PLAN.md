@@ -334,7 +334,11 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
   - Current pre-commit `server.py`：5281 → 4811（baseline 8353 → 4811）。
   - Pure-parser extraction commit：`9f639cf` (`refactor: extract command policy parsers`).
   - Next boundary：freeze and extract Runtime allow/deny command-policy orchestration without moving process spawn/active-user execution in the same commit.
-  - Decision characterization added and full validator PASS：first-gate semantics are frozen for `interactive_session`, `sensitive_env`, inline script, shell expansion, destructive command, network, and filesystem escape；literal-network data-only commands remain allowed. Ready for tests-only freeze commit.
+  - Decision characterization added and full validator PASS：first-gate semantics are frozen for `interactive_session`, `sensitive_env`, inline script, shell expansion, destructive command, network, and filesystem escape；literal-network data-only commands remain allowed.
+  - Decision characterization commit：`238a542` (`test: freeze command policy decisions`).
+  - Runtime allow/deny orchestration moved to `CommandPolicy` with explicit dependencies only：workspace, permission callback, capability booleans, env filter, tmp-path rule, external-executable allowlist rule, and special-device list. Runtime keeps thin compatibility wrappers for `_check_command_policy`, `_check_command_paths`, `_check_command_path_candidate`, and `_reject_setuid_executable`.
+  - Decision extraction full validator + reverse-import check + `git diff --check` PASS；`server.py`：4811 → 4660（baseline 8353 → 4660）。
+  - Next boundary：freeze execution/spawn behavior, then move managed service execution and active-user result formatting without mixing permission-policy changes.
 - [ ] Runtime 只保留 request-to-service wiring。
 - [ ] 明確定義 registry ownership：誰 create、誰 close、HTTP reconnect 如何 share。
 

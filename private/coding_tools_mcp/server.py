@@ -27,11 +27,13 @@ from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, cast
 
 from . import __version__
 from .command_policy import (
+    CommandPolicy,
+    DESTRUCTIVE_RE,
     ENV_FLAG_OPTIONS,
     ENV_LONG_OPTIONS_WITH_ARGUMENT,
     ENV_LONG_OPTIONS_WITH_OPTIONAL_ARGUMENT,
@@ -39,10 +41,12 @@ from .command_policy import (
     ENV_SHORT_OPTIONS_WITH_ATTACHED_ARGUMENT,
     HEREDOC_TOKENS,
     NETWORK_LITERAL_COMMANDS,
+    NETWORK_RE,
     PATH_ARGUMENT_COMMANDS,
     PATTERN_THEN_PATH_COMMANDS,
     REDIRECTION_TOKENS,
     SCRIPT_COMMANDS,
+    SHELL_EXPANSION_RE,
     SHELL_CONTROL_TOKENS,
     command_argument_path_candidates,
     command_executables,
@@ -388,19 +392,10 @@ WINDOWS_CORE_ENV_NAMES = {
     "PROGRAMDATA",
     "ALLUSERSPROFILE",
 }
-NETWORK_RE = re.compile(
-    r"(https?://|urllib\.request|urllib3|requests\.|http\.client|\bHTTPConnection\b|\bHTTPSConnection\b|socket\.|aiohttp|httpx|\bcurl\b|\bwget\b|\bnc\b|\bnetcat\b|\bssh\b|\bscp\b|\bftp\b)",
-    re.I,
-)
-SHELL_EXPANSION_RE = re.compile(r"(`|\$\(|\$\{)")
 LITERAL_DIRECTORY_CHANGE_RE = re.compile(
     r"^\s*(?:cd|chdir|set-location|sl)\s+"
     r"(?:(?:/d|-literalpath|-path)\s+)?"
     r'''(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^;&|\r\n]+?))\s*$''',
-    re.I,
-)
-DESTRUCTIVE_RE = re.compile(
-    r"(^|\s)(sudo|su|chmod\s+-R|chown\s+-R|mkfs|mount|umount|find\b[^;&|]*\s-delete\b|git\b[^;&|]*\breset\s+--hard\b|git\b[^;&|]*\bclean\s+-[^\s]*[fx][^\s]*|rm\s+-[^\s]*r[^\s]*f|rm\s+-[^\s]*f[^\s]*r)\b",
     re.I,
 )
 MAX_HTTP_REQUEST_BYTES = 1_048_576
@@ -2006,74 +2001,23 @@ class Runtime:
                 return finish()
             time.sleep(0.02)
 
+    def _command_policy_service(self) -> CommandPolicy:
+        return CommandPolicy(
+            workspace=self.workspace,
+            permission_granted=self._permission_granted,
+            dangerously_skip_all_permissions=self.dangerously_skip_all_permissions,
+            allow_network=self.allow_network,
+            inline_script_allowed=self.capabilities.inline_script,
+            shell_expansion_allowed=self.capabilities.shell_expansion,
+            inline_script_permission=INLINE_SCRIPT_PERMISSION,
+            is_filtered_env_var=is_filtered_env_var,
+            is_allowed_tmp_path=self.is_allowed_command_tmp_path,
+            is_allowed_external_executable=is_allowed_external_executable,
+            special_device_paths=SPECIAL_DEVICE_PATHS,
+        )
+
     def _check_command_policy(self, cmd: str, args: dict[str, Any]) -> None:
-        execution_context = str(args.get("execution_context", "service") or "service").strip().lower()
-        if (
-            execution_context == "active_user"
-            and not self.dangerously_skip_all_permissions
-            and not self._permission_granted("interactive_session")
-        ):
-            raise ToolFailure(
-                "PERMISSION_REQUIRED",
-                "Running a command in the signed-in user's interactive desktop requires explicit permission.",
-                category="permission",
-                details={
-                    "permission": "interactive_session",
-                    "execution_context": "active_user",
-                    "os_privileges": "signed-in user, non-elevated",
-                },
-            )
-        if self.dangerously_skip_all_permissions:
-            return
-        self._check_command_paths(cmd)
-        env = args.get("env", {})
-        if isinstance(env, dict) and any(
-            is_filtered_env_var(str(key), str(value)) for key, value in env.items()
-        ) and not self._permission_granted("sensitive_env"):
-            raise ToolFailure(
-                "PERMISSION_REQUIRED",
-                "Sensitive or loader/startup environment variables require explicit permission.",
-                category="permission",
-                details={"permission": "sensitive_env", "env_keys": sorted(str(key) for key in env)},
-            )
-        if not self.capabilities.inline_script and not self._permission_granted(INLINE_SCRIPT_PERMISSION):
-            inline_script = inline_script_command(cmd)
-            if inline_script is not None:
-                raise ToolFailure(
-                    "PERMISSION_REQUIRED",
-                    "Inline interpreter or shell code requires explicit permission because network and filesystem effects cannot be verified statically.",
-                    category="permission",
-                    details={"permission": INLINE_SCRIPT_PERMISSION, **inline_script},
-                )
-        compact = " ".join(cmd.split()).lower()
-        if not self.capabilities.shell_expansion and SHELL_EXPANSION_RE.search(cmd) and not self._permission_granted("shell_expansion"):
-            raise ToolFailure(
-                "PERMISSION_REQUIRED",
-                "Shell command substitution and parameter expansion require explicit permission.",
-                category="permission",
-                details={"permission": "shell_expansion", "command": compact},
-            )
-        if re.search(r"(^|[;&|]\s*)rm\s+(-[^\s]*r[^\s]*f|-?[^\s]*f[^\s]*r)\s+/", compact) and not self._permission_granted("destructive_command"):
-            raise ToolFailure(
-                "PERMISSION_REQUIRED",
-                "Destructive commands are blocked without explicit permission.",
-                category="permission",
-                details={"permission": "destructive_command", "command": compact},
-            )
-        if DESTRUCTIVE_RE.search(cmd) and not self._permission_granted("destructive_command"):
-            raise ToolFailure(
-                "PERMISSION_REQUIRED",
-                "Destructive commands are blocked without explicit permission.",
-                category="permission",
-                details={"permission": "destructive_command", "command": compact},
-            )
-        if not self.allow_network and NETWORK_RE.search(cmd) and not is_literal_network_reference_command(cmd) and not self._permission_granted("network"):
-            raise ToolFailure(
-                "PERMISSION_REQUIRED",
-                "Network access is denied by default.",
-                category="permission",
-                details={"permission": "network", "command": compact},
-            )
+        self._command_policy_service().check(cmd, args)
 
     def _add_exec_diagnostics(self, payload: dict[str, Any], *, session: ExecSession | None = None) -> None:
         if session is not None and not payload.get("stdout") and not payload.get("stderr"):
@@ -2098,108 +2042,13 @@ class Runtime:
             }
 
     def _check_command_paths(self, cmd: str) -> None:
-        scannable = strip_heredoc_payloads(cmd)
-        try:
-            tokens = shlex_split(scannable)
-        except ValueError:
-            tokens = scannable.split()
-        for executable in command_executables(tokens):
-            self._reject_setuid_executable(executable)
-            normalized_executable = executable.replace("\\", "/")
-            if normalized_executable.startswith("/") or re.match(r"^[A-Za-z]:/", normalized_executable):
-                self._check_command_path_candidate(executable)
-        for candidate in explicit_command_path_candidates(tokens):
-            self._check_command_path_candidate(candidate)
+        self._command_policy_service().check_paths(cmd)
 
     def _check_command_path_candidate(self, candidate: str) -> None:
-        candidate = candidate.strip()
-        if not candidate or candidate in {"-", "--"}:
-            return
-        if self._permission_granted("filesystem_escape"):
-            return
-
-        def escape_failure() -> ToolFailure:
-            return ToolFailure(
-                "PERMISSION_REQUIRED",
-                "Command path escapes the workspace and is blocked.",
-                category="permission",
-                details={"permission": "filesystem_escape", "path": candidate},
-            )
-
-        if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", candidate):
-            return
-        normalized = candidate.replace("\\", "/")
-        if normalized in SPECIAL_DEVICE_PATHS:
-            return
-        if self.is_allowed_command_tmp_path(normalized):
-            return
-        absolute_candidate = (
-            normalized.startswith("/")
-            or normalized.startswith("~")
-            or re.match(r"^[A-Za-z]:/", normalized)
-        )
-        if absolute_candidate:
-            # Absolute paths that resolve inside the workspace are normalized
-            # to a safe relative path; external paths are handled by the
-            # explicit executable allowlist below.
-            try:
-                self.workspace.resolve_existing(normalized)
-                return
-            except ToolFailure as exc:
-                if exc.code == "NOT_FOUND":
-                    try:
-                        self.workspace.resolve_for_write(normalized)
-                        return
-                    except ToolFailure as write_exc:
-                        if write_exc.code not in {"PATH_OUTSIDE_WORKSPACE", "ABSOLUTE_PATH_DENIED", "SYMLINK_ESCAPE"}:
-                            return
-                if is_allowed_external_executable(candidate):
-                    return
-                raise escape_failure() from exc
-        if any(part == ".." for part in PurePosixPath(normalized).parts):
-            raise escape_failure()
-        try:
-            self.workspace.resolve_existing(normalized)
-        except OSError as exc:
-            raise ToolFailure(
-                "INVALID_ARGUMENT",
-                "Command path could not be inspected safely.",
-                category="validation",
-                details={"path": candidate[:200], "errno": exc.errno, "reason": exc.strerror},
-            ) from exc
-        except ToolFailure as exc:
-            if exc.code == "NOT_FOUND":
-                try:
-                    self.workspace.resolve_for_write(normalized)
-                except ToolFailure as write_exc:
-                    if write_exc.code == "NOT_FOUND":
-                        return
-                    if write_exc.code in {"PATH_OUTSIDE_WORKSPACE", "ABSOLUTE_PATH_DENIED", "SYMLINK_ESCAPE"}:
-                        raise escape_failure() from write_exc
-                    raise
-                return
-            if exc.code in {"PATH_OUTSIDE_WORKSPACE", "ABSOLUTE_PATH_DENIED", "SYMLINK_ESCAPE"}:
-                raise escape_failure() from exc
+        self._command_policy_service().check_path_candidate(candidate)
 
     def _reject_setuid_executable(self, executable: str) -> None:
-        if not executable:
-            return
-        executable_path = Path(executable) if "/" in executable else Path(shutil.which(executable) or "")
-        if not str(executable_path):
-            return
-        try:
-            stat = executable_path.stat()
-        except OSError:
-            return
-        if stat.st_mode & 0o6000:
-            if self._permission_granted("privileged_executable"):
-                return
-            raise ToolFailure(
-                "PERMISSION_REQUIRED",
-                "Setuid/setgid executables are denied because they can bypass runtime process guards.",
-                category="permission",
-                details={"permission": "privileged_executable", "path": str(executable_path)},
-            )
+        self._command_policy_service().reject_setuid_executable(executable)
 
     def _command_env(self, extra: Any) -> dict[str, str]:
         env = self._base_command_env()
