@@ -22,6 +22,7 @@ from .runtime_config import (
     runtime_policy_from_args,
 )
 from .runtime_meta import SERVER_NAME
+from .runtime import Runtime
 from .session_store import ExecutionRegistry
 from .transport_http import http_base_for_bind_host, is_loopback_bind_host
 from .transport_stdio import serve_stdio
@@ -42,8 +43,6 @@ def build_runtime(
     transport: str = "stdio",
     execution_registry: ExecutionRegistry | None = None,
 ) -> Any:
-    from .server import Runtime
-
     workspace = Path(args.workspace or os.environ.get(f"{ENV_PREFIX}_WORKSPACE") or os.getcwd())
     workspace_allowlist = validate_workspace_selection(workspace)
     runtime = Runtime(

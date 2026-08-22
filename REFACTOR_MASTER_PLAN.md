@@ -415,9 +415,13 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
   - Runtime/CLI policy parsing moved verbatim to `runtime_config.py` (`ModeCapabilities`, permission modes, `ShellEnvPolicy`, `RuntimePolicy`, env/CLI parsing); all 10 moved class/function ASTs match pre-relocation HEAD.
   - `bootstrap.py` now owns `build_runtime`, HTTP/stdIO launch, OAuth/auth bootstrap, dual tunnel listener setup, parser, SIGTERM handling, and `main`; `server.py` re-exports these entry points.
   - Compile + full validator + `git diff --check` PASS；current `server.py`：2495 → 1974（baseline 8353 → 1974）。
-  - Temporary bridge：`bootstrap.build_runtime()` lazily imports `Runtime` from `server.py` only because the Runtime class has not yet been relocated. Phase 6 is **not complete** until Runtime moves to `runtime.py` and this reverse dependency disappears.
+  - `Runtime` moved verbatim to `runtime.py`; full-class AST matches pre-relocation HEAD exactly. `bootstrap.py` now imports Runtime normally and the temporary reverse dependency is gone.
+  - Remaining Runtime-local support was split by responsibility instead of creating a new god-utils file：`runtime_support.py` owns runtime paths/env/executable/structured diagnostics, `activity.py` owns redaction/activity logging, and `sandbox.py` owns Landlock/system-read-root primitives.
+  - `server.py` was rebuilt as a compatibility/entry facade only. It re-exports the established private symbols used by validator/integrations and delegates CLI entry to `bootstrap.py`; no production implementation lives there anymore.
+  - Runtime/support/bootstrap modules have **zero imports of `server.py`**. Full compile + full validator + `git diff --check` PASS after updating architecture-aware private monkeypatch targets from `server.*` to `runtime_module.*`.
+  - Final Phase 6 `server.py`：1974 → **348 lines**（baseline 8353 → 348，-95.8%）。
 
-**Phase 6 status：IN PROGRESS / GREEN CHECKPOINT.** Bootstrap is extracted, but the remaining ~2k-line `server.py` still proves the Runtime/helper boundary needs one more structural pass.
+**Phase 6：COMPLETE / GREEN.** `server.py` is now an intentionally thin compatibility facade; Runtime, bootstrap, transport, policy, session, permissions, activity, sandbox, and tool domains have explicit module ownership.
 
 移到 `bootstrap.py` 後，`server.py` 只留下 compatibility exports 與極薄 entry facade。
 

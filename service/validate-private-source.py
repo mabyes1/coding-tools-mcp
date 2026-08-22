@@ -24,6 +24,7 @@ def main() -> int:
 
     from coding_tools_mcp import server
     from coding_tools_mcp import elevated_actions
+    from coding_tools_mcp import runtime as runtime_module
     from coding_tools_mcp.patching import find_subsequence_all
     from coding_tools_mcp.project_context import load_project_context
     from coding_tools_mcp.transport_http import (
@@ -396,14 +397,14 @@ def main() -> int:
     # metadata while letting the facade move out of Runtime safely.
     with tempfile.TemporaryDirectory(prefix="coding-tools-desktop-contract-") as temporary:
         desktop_runtime = server.Runtime(Path(temporary), enable_view_image=False)
-        original_computer_use = server.request_computer_use
+        original_computer_use = runtime_module.request_computer_use
         desktop_calls: list[dict[str, object]] = []
 
         def fake_computer_use(**kwargs: object) -> dict[str, object]:
             desktop_calls.append(dict(kwargs))
             return {"ok": True, "action": kwargs.get("action")}
 
-        server.request_computer_use = fake_computer_use
+        runtime_module.request_computer_use = fake_computer_use
         try:
             windows_result = desktop_runtime.computer_use(
                 {
@@ -441,7 +442,7 @@ def main() -> int:
             if browser_call.get("text") != "https://example.invalid/path" or browser_call.get("process_name") != "chrome":
                 raise RuntimeError("browser_use navigate URL mapping drifted")
         finally:
-            server.request_computer_use = original_computer_use
+            runtime_module.request_computer_use = original_computer_use
             desktop_runtime.close()
 
     # Refactor characterization contracts. These intentionally exercise private
@@ -1047,7 +1048,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="coding-tools-exec-contract-") as temporary:
         exec_workspace = Path(temporary)
         exec_runtime = server.Runtime(exec_workspace, enable_view_image=False, permission_mode="dangerous")
-        original_interactive_exec = server.request_interactive_exec
+        original_interactive_exec = runtime_module.request_interactive_exec
         try:
             quick_command = "Write-Output EXEC_CONTRACT" if os.name == "nt" else "printf 'EXEC_CONTRACT\\n'"
             quick = exec_runtime.exec_command(
@@ -1105,7 +1106,7 @@ def main() -> int:
                     "process_id": 4242,
                 }
 
-            server.request_interactive_exec = fake_interactive_exec
+            runtime_module.request_interactive_exec = fake_interactive_exec
             active = exec_runtime._exec_command_active_user(
                 cmd="echo active",
                 workdir=exec_workspace,
@@ -1144,7 +1145,7 @@ def main() -> int:
             if timeout_payload.get("error_kind") != "timeout":
                 raise RuntimeError("exec diagnostic timeout classification drifted")
         finally:
-            server.request_interactive_exec = original_interactive_exec
+            runtime_module.request_interactive_exec = original_interactive_exec
             exec_runtime.close()
 
     context = load_project_context(workspace)
@@ -1602,8 +1603,8 @@ def main() -> int:
                 if isolated.default_cwd_display() != ".":
                     raise RuntimeError("default cwd leaked across owners")
 
-                original_approval = server.request_permission_approval
-                server.request_permission_approval = lambda **_kwargs: {"ok": True, "granted": True}
+                original_approval = runtime_module.request_permission_approval
+                runtime_module.request_permission_approval = lambda **_kwargs: {"ok": True, "granted": True}
                 try:
                     blocked_arguments = {"cmd": "curl https://example.invalid"}
                     once = primary.request_permissions(
@@ -1660,7 +1661,7 @@ def main() -> int:
                     reconnect.request_context.claimed_permission_grants = set()
                     reconnect._check_command_policy(changed_arguments["cmd"], changed_arguments)
                 finally:
-                    server.request_permission_approval = original_approval
+                    runtime_module.request_permission_approval = original_approval
 
                 dangerous = server.Runtime(
                     cwd_workspace,
