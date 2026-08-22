@@ -10,6 +10,10 @@ internal sealed class ComputerUseOverlayForm : Form
     private const int WsExNoActivate = 0x08000000;
     private const int WsExToolWindow = 0x00000080;
     private const int WsExTransparent = 0x00000020;
+    // Browser/Computer Use is implemented as a sequence of short helper calls.
+    // Keep the indicator alive briefly between calls so one logical AI-control
+    // flow does not look like a series of flashing toasts.
+    private const int IdleGraceMilliseconds = 10000;
     private readonly string _leasesRoot;
     private readonly string _pidPath;
     private readonly Timer _timer;
@@ -25,6 +29,10 @@ internal sealed class ComputerUseOverlayForm : Form
     {
         _leasesRoot = leasesRoot;
         _pidPath = pidPath;
+        // The helper that launches us can finish very quickly. Starting the grace
+        // window here also covers the race where the first lease disappears just
+        // before the overlay process gets its first timer tick.
+        _lastLeaseUtc = DateTime.UtcNow;
         FormBorderStyle = FormBorderStyle.None;
         Text = "Coding Tools Computer Use";
         ShowInTaskbar = false;
@@ -163,7 +171,10 @@ internal sealed class ComputerUseOverlayForm : Form
             }
             if (newest != null)
             {
-                _lastLeaseUtc = newest.LastWriteTimeUtc;
+                // This is an activity lease, not a file-age timer. While a lease
+                // is still present, refresh the last-active time on every poll so
+                // long-running UI actions remain visibly "active" until they end.
+                _lastLeaseUtc = now;
                 var raw = File.ReadAllText(newest.FullName).Trim();
                 var parts = raw.Split('|');
                 if (parts.Length > 0 && !String.IsNullOrWhiteSpace(parts[0])) _mode = parts[0].Trim().ToLowerInvariant();
@@ -204,7 +215,8 @@ internal sealed class ComputerUseOverlayForm : Form
         if (!_fadingOut && Opacity < 0.96)
             Opacity = Math.Min(0.96, Opacity + 0.12);
 
-        _fadingOut = !hasActiveLease && (DateTime.UtcNow - _lastLeaseUtc).TotalMilliseconds > 250;
+        _fadingOut = !hasActiveLease
+            && (DateTime.UtcNow - _lastLeaseUtc).TotalMilliseconds > IdleGraceMilliseconds;
 
         if (_fadingOut)
         {
