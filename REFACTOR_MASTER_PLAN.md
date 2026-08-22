@@ -310,6 +310,9 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
   - Next sub-phase boundary：move output snapshot/format/read paging only (`_snapshot_session`, `_session_output_summary`, `_format_session_output`, `read_output`) plus their pure output-ref helpers into the same session service. Keep stdin/poll/kill and metadata/list/process-tree out of this commit.
   - Existing validator has no direct output cursor/paging characterization. Before relocation, freeze explicit-cursor delta snapshot, truncated output-ref/next-action formatting, read-output paging, invalid output mode, and stream/output-ref mismatch rejection.
   - Output characterization added：explicit byte-cursor delta/cursor totals, invalid output-mode rejection, truncated terminal `output_ref` + `read_output` continuation action, byte-offset paging + next offset/action, and stream/output-ref mismatch rejection. Full validator PASS; ready for tests-only freeze commit.
+  - Characterization commit：`a188a67` (`test: freeze session output paging`).
+  - Production output layer relocated onto `ExecutionRegistry`：`_format_session_output`, `_snapshot_session`, `_session_output_summary`, `read_output`; pure `truncate_bytes` / `read_output_action` and `EXEC_PREVIEW_BYTES` moved to `session_store.py` and remain re-exported by `server.py` for compatibility.
+  - All four methods + two helpers are AST-identical to pre-relocation HEAD；compile + full validator + reverse-import check + `git diff --check` PASS. Current `server.py`：5598 → 5372（baseline 8353 → 5372）。
 - [ ] exec orchestration 與 command policy 分離：
   - `command_policy.py`：解析與 allow/deny 判斷
   - `execution.py`：spawn / active_user delegation / output formatting
@@ -485,7 +488,9 @@ Python server 穩定後再碰 installer/update，避免兩個高風險面同時�
 - Retention/store extraction commit：`feadb6d` (`refactor: move session retention into registry`)；post-commit worktree returned to only the excluded ADHD note.
 - Output snapshot/read-output is the next isolated session sub-phase. It will not include stdin/poll/kill or session metadata/list/process-tree.
 - Output snapshot/read-output characterization now passes in the full validator, including reconnect-safe explicit cursors and continuation refs/actions.
-- **Next：** commit this output contract freeze separately, then relocate only this output layer.
+- Output characterization commit：`a188a67` (`test: freeze session output paging`).
+- Output snapshot/format/read paging is now relocated verbatim onto `ExecutionRegistry`; Runtime keeps thin wrappers and `server.py` is 5372 lines. AST equivalence + full validator + reverse-import check + `git diff --check` PASS.
+- **Next：** staged review + commit of output relocation. Then map stdin/poll/kill/cancel-session as the next process-control sub-phase; `cancel_request` remains Runtime request glue.
 
 ### 2026-08-21 end-of-session handoff
 
