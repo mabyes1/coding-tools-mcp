@@ -408,10 +408,16 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
 
 ### Phase 6 — Bootstrap / server.py Reduction
 
-- [ ] `build_runtime`
-- [ ] `run_http`
-- [ ] `run_stdio`
-- [ ] parser / signal handling
+- [x] `build_runtime`
+- [x] `run_http`
+- [x] `run_stdio`
+- [x] parser / signal handling
+  - Runtime/CLI policy parsing moved verbatim to `runtime_config.py` (`ModeCapabilities`, permission modes, `ShellEnvPolicy`, `RuntimePolicy`, env/CLI parsing); all 10 moved class/function ASTs match pre-relocation HEAD.
+  - `bootstrap.py` now owns `build_runtime`, HTTP/stdIO launch, OAuth/auth bootstrap, dual tunnel listener setup, parser, SIGTERM handling, and `main`; `server.py` re-exports these entry points.
+  - Compile + full validator + `git diff --check` PASS；current `server.py`：2495 → 1974（baseline 8353 → 1974）。
+  - Temporary bridge：`bootstrap.build_runtime()` lazily imports `Runtime` from `server.py` only because the Runtime class has not yet been relocated. Phase 6 is **not complete** until Runtime moves to `runtime.py` and this reverse dependency disappears.
+
+**Phase 6 status：IN PROGRESS / GREEN CHECKPOINT.** Bootstrap is extracted, but the remaining ~2k-line `server.py` still proves the Runtime/helper boundary needs one more structural pass.
 
 移到 `bootstrap.py` 後，`server.py` 只留下 compatibility exports 與極薄 entry facade。
 
