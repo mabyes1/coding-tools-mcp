@@ -893,6 +893,74 @@ def main() -> int:
     if server.is_literal_network_reference_command("curl https://example.invalid/path"):
         raise RuntimeError("network-capable curl command was misclassified as literal-only")
 
+    # Freeze Runtime command-policy decisions separately from the pure parser
+    # layer. Each case checks the first policy gate and permission detail that
+    # callers currently receive; extraction must not reorder these decisions.
+    with tempfile.TemporaryDirectory(prefix="coding-tools-command-policy-") as temporary:
+        policy_workspace = Path(temporary)
+        policy_runtime = server.Runtime(policy_workspace, enable_view_image=False, permission_mode="safe")
+        try:
+            policy_cases = [
+                (
+                    "active_user",
+                    "echo hi",
+                    {"execution_context": "active_user"},
+                    "interactive_session",
+                ),
+                (
+                    "sensitive_env",
+                    "echo hi",
+                    {"env": {"LD_PRELOAD": "./hook.so"}},
+                    "sensitive_env",
+                ),
+                (
+                    "inline_script",
+                    "python -c 'print(1)'",
+                    {},
+                    server.INLINE_SCRIPT_PERMISSION,
+                ),
+                (
+                    "shell_expansion",
+                    "echo $(whoami)",
+                    {},
+                    "shell_expansion",
+                ),
+                (
+                    "destructive_command",
+                    "git reset --hard HEAD",
+                    {},
+                    "destructive_command",
+                ),
+                (
+                    "network",
+                    "curl https://example.invalid/path",
+                    {},
+                    "network",
+                ),
+                (
+                    "filesystem_escape",
+                    "cat ../outside.txt",
+                    {},
+                    "filesystem_escape",
+                ),
+            ]
+            for label, command, arguments, permission in policy_cases:
+                try:
+                    policy_runtime._check_command_policy(command, arguments)
+                except server.ToolFailure as exc:
+                    if exc.code != "PERMISSION_REQUIRED" or exc.category != "permission":
+                        raise RuntimeError(f"{label} command-policy error contract drifted") from exc
+                    if exc.details.get("permission") != permission:
+                        raise RuntimeError(f"{label} command-policy permission detail drifted") from exc
+                else:
+                    raise RuntimeError(f"{label} command-policy gate stopped rejecting the operation")
+
+            # Literal URLs used only as data must remain allowed even when the
+            # network capability itself is disabled.
+            policy_runtime._check_command_policy("echo https://example.invalid/path", {})
+        finally:
+            policy_runtime.close()
+
     context = load_project_context(workspace)
     scan_warnings = [warning for warning in context.warnings if "scan stopped" in warning.casefold()]
     if scan_warnings:

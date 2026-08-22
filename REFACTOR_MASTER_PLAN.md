@@ -332,7 +332,9 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
   - Production pure-parser relocation completed：17 shell/path parser functions plus their token/command constants moved to `command_policy.py`; `server.py` re-exports the compatibility names and Runtime allow/deny decisions are unchanged.
   - All 17 moved functions are AST-identical to pre-relocation HEAD；`command_policy.py` has no reverse import of `server.py`；compile + full validator + `git diff --check` PASS using the service venv interpreter (`C:\\ProgramData\\WebGPTCodingToolsMCPService\\venv\\Scripts\\python.exe`).
   - Current pre-commit `server.py`：5281 → 4811（baseline 8353 → 4811）。
+  - Pure-parser extraction commit：`9f639cf` (`refactor: extract command policy parsers`).
   - Next boundary：freeze and extract Runtime allow/deny command-policy orchestration without moving process spawn/active-user execution in the same commit.
+  - Decision characterization added and full validator PASS：first-gate semantics are frozen for `interactive_session`, `sensitive_env`, inline script, shell expansion, destructive command, network, and filesystem escape；literal-network data-only commands remain allowed. Ready for tests-only freeze commit.
 - [ ] Runtime 只保留 request-to-service wiring。
 - [ ] 明確定義 registry ownership：誰 create、誰 close、HTTP reconnect 如何 share。
 
