@@ -19,6 +19,16 @@ SESSION_BUFFER_BYTES = 524_288
 HARD_KILL_SIGNAL = getattr(signal, "SIGKILL", signal.SIGTERM)
 
 
+def process_group_popen_kwargs() -> dict[str, Any]:
+    if hasattr(os, "setsid"):
+        return {"start_new_session": True}
+    if os.name == "nt":
+        creation_flag = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        if creation_flag:
+            return {"creationflags": creation_flag}
+    return {}
+
+
 def terminate_process_group(
     process: subprocess.Popen[bytes],
     signum: signal.Signals,

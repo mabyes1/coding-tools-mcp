@@ -340,7 +340,11 @@ Current `server.py`：5641 lines（baseline 8353 → 5641）。
   - Decision extraction full validator + reverse-import check + `git diff --check` PASS；`server.py`：4811 → 4660（baseline 8353 → 4660）。
   - Decision extraction commit：`d338253` (`refactor: extract command policy service`).
   - Next boundary：freeze execution/spawn behavior, then move managed service execution and active-user result formatting without mixing permission-policy changes.
-  - Execution characterization added and full validator PASS：real managed terminal execution, `yield_time_ms=0` running-session + poll continuation + cleanup, and active-user one-shot result metadata/summary through a broker stub. Ready for tests-only freeze commit.
+  - Execution characterization added and full validator PASS：real managed terminal execution, `yield_time_ms=0` running-session + poll continuation + cleanup, and active-user one-shot result metadata/summary through a broker stub.
+  - Execution characterization commit：`2a9100d` (`test: freeze execution orchestration`).
+  - Managed spawn/session registration/initial wait and active-user one-shot result formatting moved to `execution.py` via `ExecutionService`; Runtime retains request-id registration and provides explicit policy/env/landlock/diagnostic hooks. `process_group_popen_kwargs` moved to `processes.py` as a process primitive and remains re-exported by `server.py`.
+  - Execution extraction compile + full validator + reverse-import check + `git diff --check` PASS；`server.py`：4660 → 4370（baseline 8353 → 4370）。
+  - Next boundary：move command-environment construction and execution diagnostics into execution-owned helpers while preserving the existing Runtime compatibility methods used by Git and validators.
 - [ ] Runtime 只保留 request-to-service wiring。
 - [ ] 明確定義 registry ownership：誰 create、誰 close、HTTP reconnect 如何 share。
 
