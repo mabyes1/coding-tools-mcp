@@ -460,7 +460,7 @@ Python server 穩定後再碰 installer/update，避免兩個高風險面同時�
 - [x] 加 architecture guard：禁止低階 module import `server.py`。
 - [x] 加 tool catalog consistency guard。
 - [x] 加容易再次膨脹的 size / dependency warning（警告即可，不以行數粗暴 fail build）。
-- [~] 最終 full regression + installed service smoke + tunnel smoke。
+- [x] 最終 full regression + installed service smoke + tunnel smoke。
 
 Phase 8 checkpoint：
 - 新增 `service/validation/architecture_checks.py`：AST 掃描 production package，除 `server.py` facade 與 `__main__.py` entry 外禁止任何 module import `server.py`；目前 reverse-import violation = 0。
@@ -474,7 +474,19 @@ Phase 8 checkpoint：
 - compile + full source validator + `git diff --check` PASS；目前 `ARCH_WARNING = 0`，`PRIVATE_MCP_SOURCE_CHECK_OK tools=20 context_files=1`。
 - `update-coding-tools.ps1 -ValidateOnly` 在 validator 完整拆分後再次 PASS：`PRIVATE_MCP_VALIDATE_OK version=0.2.2-private.37`，確認 deployment temp-copy 路徑也能正確攜帶/載入 `service/validation/*`。
 
-**Validator decomposition：COMPLETE / GREEN.** Phase 8 剩最後 installed service / tunnel smoke 與最終 worktree/contract review。
+最終 installed / tunnel smoke：
+- deployment 前 live service 仍是 `0.2.2-private.36-dev+57f020cdd9e0`；installed elevated-action manifest 對已修改的 `deploy-coding-tools.ps1` 正確出現 hash mismatch，證明 mutable admin script 無法繞過 pinning。經標準 UAC `install-elevated-broker.ps1` refresh 後，manifest pin 與 source SHA-256 對齊。
+- 第一次 full `update-coding-tools` 在 broker refresh 階段失敗，deployment 自動 rollback 到 `.36` 並恢復 MCP + Tunnel；新增 `backup-20260822-173204`，實證 failure path 可回到 healthy service，而不是只靠 source inspection 推論。
+- 隨後以同一 canonical deploy script 的 `-SkipBrokerRefresh -Force` 路徑先更新 app/runner，live service 成功切到 **`0.2.2-private.37` / `git_sha=01aa40d8de81` / `dirty=false`**。
+- installed exact broker E2E 再驗：Computer Use `list_windows` PASS；active-user PowerShell syntax-error contract PASS；non-elevated `active_user` exec PASS。
+- 再執行一次完整 fixed elevated `update-coding-tools`（含 broker refresh）後成功；`elevated-actions.manifest.json.generated_at` 由 `2026-08-22 17:31:22` 更新到 `17:38:46`，live build 仍為 `.37 / 01aa40d8de81`，證明不是 rollback。
+- final services：`WebGPTCodingToolsMCP` / `WebGPTCloudflareTunnel` 均 `Running / Automatic`；`/healthz status=ok version=0.2.2-private.37`；loopback `8765 / 8766 / 8767` 均 listening。
+- Tunnel connector 在兩次 service restart 後均自動重新連線，`server_info` 可正常取得 `.37` build identity；full refresh 後 broker heartbeat 重建的短暫窗口曾令第一個 Computer Use / active_user probe transient fail，heartbeat 就緒後重試皆 PASS，`interactive_broker_status.available=true`。
+- live HUMAN HELP public path PASS（structured `human_action_required` handoff）；live `request_permissions` public path PASS，dangerous mode 明確回報 `dangerously_skip_all_permissions` auto-grant；fixed elevated action 已由真正的 `update-coding-tools` 實際執行。
+
+**Phase 8：COMPLETE / GREEN.** Source regression、architecture guards、ValidateOnly、installed MCP、Tunnel、broker refresh、Computer Use、active_user、HUMAN HELP、permission request、elevated action、update failure rollback 與 successful update 全部已有實際證據。
+
+**整體鬼之重構：COMPLETE / GREEN.** 後續工作不再是本計畫的 extraction phase；任何新 architecture change 都應從目前 green architecture guards 與 frozen public contract 開新計畫。
 
 ---
 
@@ -560,9 +572,58 @@ Phase 8 checkpoint：
 
 ## 9. Current Checkpoint
 
-**狀態：PHASE 2 COMPLETE / PHASE 3 STARTING / GREEN CHECKPOINT**
+**狀態：REFACTOR COMPLETE / PHASE 8 COMPLETE / GREEN CHECKPOINT**
 
-### 2026-08-22 checkpoint — Git extraction complete
+### 2026-08-22 final checkpoint
+
+- Stable refactor baseline：`29121c4`；final source checkpoint：`01aa40d` (`test: decompose source validator`) plus this final documentation closeout。
+- Public MCP contract unchanged：**20 tools / SHA-256 `10a6219c4dd9a739f3ad6d05572f449d0800f8ad9bce16184851d10413b65392`**。
+- `server.py`：baseline **8353 → 354 lines**（約 -95.8%）；現在是 compatibility / entry facade，不再承載 production domain implementation。
+- `Runtime` 已移至 `runtime.py`；tool、execution/session、permission、workspace、HTTP/OAuth、bootstrap、activity/sandbox/runtime support 均有獨立 ownership；production low-level modules 對 `server.py` reverse import = 0。
+- `service/validate-private-source.py`：**1828 → 104 lines**；現在只負責 validator orchestration，domain checks 已拆成 `service/validation/*` 共 19 個 modules。
+- Final source regression：compile + full validator + `git diff --check` PASS；`ARCH_WARNING = 0`；`PRIVATE_MCP_SOURCE_CHECK_OK tools=20 context_files=1`。
+- Final `update-coding-tools.ps1 -ValidateOnly` PASS：`PRIVATE_MCP_VALIDATE_OK version=0.2.2-private.37`，包含 broker/helper artifact compile 與 launcher self-test。
+- Elevated hash pinning 實證有效：舊 installed manifest 正確拒絕已變更的 deploy script hash；經標準 UAC broker refresh 後才允許 fixed `update-coding-tools` action。
+- Failure rollback 實證：第一次 full update 在 broker refresh 階段失敗後，自動回復 `.36` healthy service 並建立 `backup-20260822-173204`；不是只靠 code review 宣稱 rollback 可用。
+- Final installed build：**`0.2.2-private.37` / `git_sha=01aa40d8de81` / `dirty=false`**；完整 broker refresh 後 manifest `generated_at=2026-08-22 17:38:46`，證明 successful update 沒有 rollback。
+- Final live health：`WebGPTCodingToolsMCP` / `WebGPTCloudflareTunnel` 均 `Running / Automatic`；`/healthz status=ok version=0.2.2-private.37`；loopback `8765 / 8766 / 8767` listening；Tunnel connector restart/reconnect PASS。
+- Final public/broker smoke：Computer Use `list_windows` PASS、non-elevated `active_user` exec PASS、interactive syntax-error E2E PASS、HUMAN HELP structured handoff PASS、`request_permissions` public path PASS、fixed elevated `update-coding-tools` action PASS。
+- Full broker refresh 後存在短暫 heartbeat reconstruction window：第一個 Computer Use / active_user probe 曾 transient fail；`interactive_broker_status.available=true` 且 heartbeat ready 後立即重試 PASS。後續 deployment smoke 應等待 broker readiness，不把 startup window 誤判成 steady-state failure。
+
+### Final module responsibility map
+
+- `server.py`：compatibility exports + entry facade。
+- `bootstrap.py` / `runtime_config.py`：CLI、service bootstrap、runtime policy/config composition。
+- `runtime.py`：Runtime composition / request dispatch glue，不再內建各 domain 完整實作。
+- `workspace.py`：workspace allowlist、path resolution / write boundary。
+- `tool_catalog.py` / `tool_schemas.py`：tool registry、schemas、annotations contract。
+- `tools/*`：filesystem、git、patch、images、desktop、diagnostics 等 tool domains。
+- `command_policy.py`：command parsing + execution policy service。
+- `execution.py` / `processes.py` / `session_store.py`：spawn/orchestration、process primitives、session ownership/retention/output/control。
+- `permissions.py` / `elevated_actions.py`：ordinary MCP permission grants 與 fixed elevated-action boundary。
+- `transport_http.py` / `http_server.py` / `oauth_http.py` / `transport_stdio.py`：transport/session lifecycle、HTTP server、OAuth HTTP glue、stdio。
+- `runtime_support.py` / `activity.py` / `sandbox.py` / `runtime_meta.py`：runtime environment/diagnostics、activity/redaction、sandbox/system roots、build/server metadata。
+- `service/internal/deployment-common.ps1`：shared artifacts、ACL、broker/service lifecycle、bundle/rollback primitives；install/deploy/repair 只負責各自 orchestration。
+- `service/validation/*`：domain regression / architecture checks；`validate-private-source.py` 只負責 orchestrate。
+
+### 後續維護規則
+
+1. 新功能先找對應 domain module；不要把 implementation 塞回 `server.py` 或 `Runtime`。
+2. Public tool/schema 變更必須先 review 20-tool contract 與固定 SHA baseline，不得為了讓 validator 過而「順手」更新 hash。
+3. 新 low-level module 不得 import `server.py`；architecture guard 若報 reverse import，先修 dependency direction，不准新增例外掩蓋。
+4. deployment policy 優先改 `deployment-common.ps1`；install/deploy/repair 不得重新複製 ACL/build/service lifecycle。
+5. deploy script 內容變更後，installed manifest hash mismatch 是預期安全行為；需走標準 broker refresh/UAC repin，不得繞過 pinning。
+6. Architecture change 至少跑 compile、full source validator、`git diff --check`；碰 deployment 再跑 `update-coding-tools.ps1 -ValidateOnly`。
+7. deploy/restart 後驗 `/healthz`、`server_info`、Tunnel reconnect，並等待 broker heartbeat ready 後再驗 Computer Use / active_user。
+8. `ADHD_ASSESSMENT_NOTES_2026-08-21.md` 仍屬使用者私人筆記，禁止修改、stage、commit。
+
+### 若未來再開新 Session
+
+只需：讀本 final checkpoint → `git status` → `server_info` → full validator。除非新需求明確要求 architecture change，**不要重做 Phase 0–8，也不要把下面的歷史 extraction 紀錄當成待辦。**
+
+### 歷史施工紀錄：2026-08-22 Git extraction（已封存，不是待辦）
+
+> 以下內容只保留重構過程的考古價值；其中的「Next」「尚未對齊」「下一個 Session」等文字都已失效，不得覆蓋上面的 final checkpoint。
 
 - Resumed from `ec31adb` (`docs: finalize refactor handoff`) with the Git characterization commit `9849017` already present.
 - Found an interrupted/uncommitted Git extraction: modified `server.py` + new `tools/git_tools.py`; no unrelated tracked changes were present. Existing `ADHD_ASSESSMENT_NOTES_2026-08-21.md` remains excluded.
@@ -603,7 +664,7 @@ Phase 8 checkpoint：
 - Pure command parser characterization now passes in the full validator.
 - **Next：** commit this parser freeze separately, then relocate pure helpers/constants to `command_policy.py` without changing Runtime policy decisions.
 
-### 2026-08-21 end-of-session handoff
+### 歷史施工紀錄：2026-08-21 end-of-session handoff（已失效）
 
 - Stable project baseline remains `29121c4`；所有重構都建立在 Phase 0 frozen contracts 上。
 - Latest verified production extraction：`4453e9e` (`refactor: extract filesystem read and search tools`)。
@@ -614,7 +675,7 @@ Phase 8 checkpoint：
 - 新抽出的低階 modules 目前沒有反向 import `server.py`。
 - Worktree 收尾時只有既有 `ADHD_ASSESSMENT_NOTES_2026-08-21.md` untracked；它是使用者私人筆記，**禁止修改、stage、commit**。
 
-### 已完成
+### 歷史當時進度（已失效）
 
 - [x] Phase 0：Contract Freeze & Characterization。
 - [x] Phase 1：`workspace.py` extraction。
@@ -630,7 +691,7 @@ Phase 8 checkpoint：
   - Production implementation 已移至 `tools/git_tools.py`；Runtime public handlers 為薄 delegation；full validator PASS。
 - [ ] Phase 2：剩餘 diagnostics / `server_info_payload()`；**刻意延後**，因為它仍與 execution/session ownership 相連，應與 Phase 3 邊界一起處理。
 
-### 重要：今晚的 shutdown interruption
+### 歷史事件：shutdown interruption（已結束）
 
 使用者曾誤按關機後取消。結果：
 
@@ -640,7 +701,7 @@ Phase 8 checkpoint：
 - 不需要為這次中斷做 source rollback；Git 已回到 clean green checkpoint。
 - 下次電腦重新開機後，**先用 `server_info` / `git status` 確認服務與 repo 狀態即可**，不要假設今晚的 connector session 還存在。
 
-### Live build identity 尚未對齊
+### 歷史狀態：Live build identity 尚未對齊（已解決）
 
 目前 installed service 最後觀察到的 build identity 仍是舊的：
 
@@ -648,7 +709,7 @@ Phase 8 checkpoint：
 
 這在目前 source-only extraction 階段是**已知且接受的 ambiguity**。不要為了對齊版本在每一刀之間 deploy/restart，否則會一直切斷施工 connector。第一次真正進入 **installed-service smoke checkpoint** 前，再把 live build 對齊當時的 green commit，並驗證 `/healthz`、`server_info`、connector tool calls。
 
-### 下一個新 Session 必做順序
+### 歷史 handoff：下一個新 Session 必做順序（禁止照做）
 
 1. **先讀完整 `REFACTOR_MASTER_PLAN.md`，尤其 Phase 2、SOP、Current Checkpoint。**
 2. `server_info`，確認 MCP service 可用；若 Tunnel 不可用但 `coding-tools` 可用，可直接用後者，不需要先修 Tunnel 才能讀 repo。
@@ -669,7 +730,7 @@ Phase 8 checkpoint：
    - deployment scripts：Phase 7。
 9. Git domain 完成後，再重新評估 Phase 2 是否先拆 `apply_patch` domain，或直接宣告低風險 handler extraction 完成並進 Phase 3。**先更新計畫，再做決定。**
 
-### 新 Session 可直接貼給 AI 的一句話
+### 歷史 prompt（禁止照做）
 
 > 繼續 `D:\coding-tools-mcp\coding-tools-mcp\REFACTOR_MASTER_PLAN.md` 的鬼之重構；先讀 Current Checkpoint、確認 git/validator green，然後照 handoff 從 Phase 2 Git tools extraction 開始，不要重做已完成的 Workspace / schema / image / desktop / diagnostics / filesystem，也不要提前碰 Execution/HTTP/deployment。
 
@@ -679,13 +740,13 @@ Phase 8 checkpoint：
 
 鬼之重構完成時，必須同時滿足：
 
-- [ ] `server.py` 不再承載多個獨立 domain implementation。
-- [ ] Runtime 不再是 tool implementation God Object。
-- [ ] transport / runtime / tool / execution / permission / workspace dependency direction 清楚。
-- [ ] 每個公開 capability 有可找到的 contract + regression coverage。
-- [ ] installed MCP、Tunnel、Computer Use、HUMAN HELP、active_user exec、permission approval、elevated action 全部仍可用。
-- [ ] update / rollback 仍可回到 healthy service。
-- [ ] 沒有以「功能看起來能跑」掩蓋 permission/security regression。
-- [ ] 本文件最後 checkpoint 能清楚描述新架構與後續維護方式。
+- [x] `server.py` 不再承載多個獨立 domain implementation。
+- [x] Runtime 不再是 tool implementation God Object。
+- [x] transport / runtime / tool / execution / permission / workspace dependency direction 清楚。
+- [x] 每個公開 capability 有可找到的 contract + regression coverage。
+- [x] installed MCP、Tunnel、Computer Use、HUMAN HELP、active_user exec、permission approval、elevated action 全部仍可用。
+- [x] update / rollback 仍可回到 healthy service。
+- [x] 沒有以「功能看起來能跑」掩蓋 permission/security regression。
+- [x] 本文件最後 checkpoint 能清楚描述新架構與後續維護方式。
 
 到這裡才算真的把鬼抓完，不是把鬼從 `server.py` 搬去別的房間。
