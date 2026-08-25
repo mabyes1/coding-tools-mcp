@@ -96,6 +96,12 @@ def _stamp_stateless_result(method: str, result: Any) -> Any:
     return result
 
 
+def _http_transport_active(runtime: Any) -> bool:
+    """True when this Runtime belongs to the HTTP server's shared execution registry."""
+    registry = getattr(runtime, "execution_registry", None)
+    return getattr(registry, "http_session_stats_provider", None) is not None
+
+
 def dispatch_rpc(runtime: Any, request: dict[str, Any]) -> dict[str, Any] | None:
     """Dispatch one MCP JSON-RPC request against a runtime, shared by all transports.
 
@@ -115,7 +121,19 @@ def dispatch_rpc(runtime: Any, request: dict[str, Any]) -> dict[str, Any] | None
             if isinstance(request_meta, dict)
             else None
         )
-        stateless_request = stateless_version == STATELESS_PROTOCOL_VERSION
+        # 2026-07-28 clients may convey the protocol version only in the HTTP
+        # MCP-Protocol-Version header. The HTTP layer already rejects an
+        # uninitialized legacy tools request before dispatching it, so an
+        # uninitialized HTTP tools call that reaches this function is the
+        # stateless path even when _meta is absent.
+        stateless_request = (
+            stateless_version == STATELESS_PROTOCOL_VERSION
+            or (
+                _http_transport_active(runtime)
+                and not runtime.initialized
+                and method in {"tools/list", "tools/call"}
+            )
+        )
         if not runtime.initialized and method not in {"initialize", "ping"} and not stateless_request:
             raise JsonRpcError(-32002, "Server not initialized")
         if method == "initialize":
