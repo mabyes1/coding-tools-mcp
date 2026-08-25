@@ -300,7 +300,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                     "description": "Short user-facing description of why this edit is being made. Used by the Web Console activity UI.",
                 },
             },
-            ["patch"],
+            ["patch", "intent"],
         ),
         "exec_command": object_schema(
             {
@@ -325,7 +325,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "tty": {**boolean, "default": False},
                 "env": {"type": "object", "additionalProperties": {"type": "string"}, "default": {}},
             },
-            ["cmd"],
+            ["cmd", "intent"],
         ),
         "write_stdin": object_schema(
             {
