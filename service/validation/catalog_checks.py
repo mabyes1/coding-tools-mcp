@@ -5,10 +5,10 @@ import json
 from typing import Any
 
 
-EXPECTED_PUBLIC_CONTRACT_SHA256 = "d19aff6981187d6fac72c920f5d7751e60da59f05f3ee04f2d1bc80a00e55c33"
+EXPECTED_PUBLIC_CONTRACT_SHA256 = "c8e1eae942b00f8752ebc9e8dee6e944af462d218b325cf174a3021498910419"
 
 
-def run_catalog_checks(server: Any, elevated_actions: Any) -> dict[str, tuple[str, ...]]:
+def run_catalog_checks(server: Any, elevated_actions: Any, activity_module: Any) -> dict[str, tuple[str, ...]]:
     # Importing server already executes the public-catalog invariants. Keep a
     # few explicit assertions here so failures explain what contract broke.
     if len(server.PUBLIC_TOOL_NAMES) > 20:
@@ -77,10 +77,51 @@ def run_catalog_checks(server: Any, elevated_actions: Any) -> dict[str, tuple[st
         raise RuntimeError("exec_command execution_context schema drifted from service/active_user")
     for intent_tool in ("exec_command", "apply_patch"):
         intent_schema = schemas[intent_tool].get("properties", {}).get("intent", {})
-        if intent_schema.get("type") != "string" or intent_schema.get("maxLength") != 160:
+        if (
+            intent_schema.get("type") != "string"
+            or intent_schema.get("minLength") != 1
+            or intent_schema.get("maxLength") != 160
+        ):
             raise RuntimeError(f"{intent_tool} lost its short user-facing activity intent contract")
         if "intent" not in schemas[intent_tool].get("required", []):
             raise RuntimeError(f"{intent_tool} must require a user-facing activity intent")
+        try:
+            server.validate_arguments(intent_tool, {"cmd" if intent_tool == "exec_command" else "patch": "x", "intent": "   "})
+        except server.JsonRpcError as exc:
+            if exc.code != -32602 or "user-facing description" not in exc.message:
+                raise RuntimeError(f"{intent_tool} blank intent validation returned the wrong error") from exc
+        else:
+            raise RuntimeError(f"{intent_tool} accepted a blank user-facing activity intent")
+
+    activity_intent = "review intent visibility"
+    exec_start = activity_module._activity_start_lines(
+        "exec_command",
+        {"cmd": "echo test", "intent": activity_intent, "execution_context": "service"},
+    )
+    exec_done = activity_module._activity_log_lines(
+        "exec_command",
+        {"cmd": "echo test", "intent": activity_intent, "execution_context": "service"},
+        {"ok": True, "exit_code": 0, "stdout": "test"},
+        12,
+    )
+    patch_start = activity_module._activity_start_lines(
+        "apply_patch",
+        {"patch": "*** Begin Patch", "intent": activity_intent},
+    )
+    patch_done = activity_module._activity_log_lines(
+        "apply_patch",
+        {"patch": "*** Begin Patch", "intent": activity_intent},
+        {"ok": True, "additions": 1, "removals": 0},
+        12,
+    )
+    for label, lines in (
+        ("exec start", exec_start),
+        ("exec done", exec_done),
+        ("patch start", patch_start),
+        ("patch done", patch_done),
+    ):
+        if not any(activity_intent in line for line in lines):
+            raise RuntimeError(f"Web Console activity intent disappeared from {label} rendering")
     permission_schema = schemas["request_permissions"]["properties"]["permission"]
     if "interactive_session" not in permission_schema.get("enum", []):
         raise RuntimeError("interactive_session permission is missing from request_permissions schema")

@@ -35,6 +35,7 @@ def main() -> int:
     sys.path.insert(0, str(package_parent))
 
     from coding_tools_mcp import server
+    from coding_tools_mcp import activity as activity_module
     from coding_tools_mcp import elevated_actions
     from coding_tools_mcp import runtime as runtime_module
     from coding_tools_mcp.patching import find_subsequence_all
@@ -48,7 +49,7 @@ def main() -> int:
     for architecture_warning in run_architecture_checks(package_parent, server):
         print(f"ARCH_WARNING: {architecture_warning}", file=sys.stderr)
 
-    action_contract = run_catalog_checks(server, elevated_actions)
+    action_contract = run_catalog_checks(server, elevated_actions, activity_module)
 
     run_windows_deployment_checks(package_parent, action_contract)
 

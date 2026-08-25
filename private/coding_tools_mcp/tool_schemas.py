@@ -49,6 +49,14 @@ def validate_arguments(tool_name: str, args: dict[str, Any]) -> None:
     schema = input_schemas()[tool_name]
     try:
         validate_schema_value(args, schema, path="arguments")
+        if tool_name in {"exec_command", "apply_patch"}:
+            intent = args.get("intent")
+            if not isinstance(intent, str) or not intent.strip():
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    "arguments.intent must contain a user-facing description.",
+                    category="validation",
+                )
     except ToolFailure as exc:
         raise JsonRpcError(-32602, exc.message, {"reason": "invalid_arguments", "code": exc.code}) from exc
 
@@ -296,6 +304,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "dry_run": {**boolean, "default": False},
                 "intent": {
                     **string,
+                    "minLength": 1,
                     "maxLength": 160,
                     "description": "Short user-facing description of why this edit is being made. Used by the Web Console activity UI.",
                 },
@@ -307,6 +316,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "cmd": {**string, "minLength": 1},
                 "intent": {
                     **string,
+                    "minLength": 1,
                     "maxLength": 160,
                     "description": "Short user-facing description of why this command is being run. Used by the Web Console activity UI.",
                 },
