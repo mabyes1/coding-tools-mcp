@@ -63,6 +63,11 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
     interactive_e2e_text = deploy_text[interactive_e2e_start:interactive_e2e_end if interactive_e2e_end >= 0 else None]
     if "AddSeconds(35)" not in interactive_e2e_text or "Start-Sleep -Milliseconds 500" not in interactive_e2e_text:
         raise RuntimeError("interactive exec deployment E2E must tolerate the broker heartbeat reconstruction window")
+
+    drain_index = deploy_text.find('Write-Host "Waiting $StartDelaySeconds second(s) before restarting MCP')
+    busy_check_index = deploy_text.find("Assert-NoActiveMcpWork", deploy_text.find("if (-not $ValidateOnly"))
+    if drain_index < 0 or busy_check_index < 0 or drain_index > busy_check_index:
+        raise RuntimeError("deployment must drain the triggering MCP call before checking for active work")
     for label, (script_text, required_calls) in common_consumers.items():
         if "deployment-common.ps1" not in script_text:
             raise RuntimeError(f"{label} stopped loading deployment-common.ps1")

@@ -187,13 +187,13 @@ if (-not $ValidateOnly -and -not $isAdmin) {
 
 Assert-DeploymentPath $serverPython "Service Python"
 
-if (-not $ValidateOnly) {
-    Assert-NoActiveMcpWork
-}
-
 if (-not $ValidateOnly -and $StartDelaySeconds -gt 0) {
     Write-Host "Waiting $StartDelaySeconds second(s) before restarting MCP so pending connector responses can drain..."
     Start-Sleep -Seconds $StartDelaySeconds
+}
+
+if (-not $ValidateOnly) {
+    Assert-NoActiveMcpWork
 }
 
 if ($ValidateOnly) {
