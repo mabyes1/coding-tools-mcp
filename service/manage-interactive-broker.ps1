@@ -62,15 +62,37 @@ function Stop-BrokerInstance {
     Stop-WebConsoleInstance
 }
 
-function Wait-ForInteractiveBroker([int]$TimeoutSeconds = 8) {
+function Wait-ForInteractiveBroker([int]$TimeoutSeconds = 15) {
+    $statusPath = Join-Path $queueRoot "broker.status.json"
+    $heartbeatPath = Join-Path $queueRoot "broker.heartbeat"
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
         Start-Sleep -Milliseconds 250
         $brokerProcess = Get-BrokerProcess
         if ($brokerProcess -and $brokerProcess.SessionId -gt 0) {
-            Start-Sleep -Milliseconds 500
-            $stable = Get-BrokerProcess
-            if ($stable -and $stable.Id -eq $brokerProcess.Id -and $stable.SessionId -gt 0) { return $stable }
+            $status = $null
+            try {
+                $status = [IO.File]::ReadAllText($statusPath, [Text.UTF8Encoding]::new($false)) | ConvertFrom-Json
+            }
+            catch { }
+            $heartbeatFresh = $false
+            try {
+                $heartbeatAge = [DateTime]::UtcNow - (Get-Item -LiteralPath $heartbeatPath -ErrorAction Stop).LastWriteTimeUtc
+                $heartbeatFresh = $heartbeatAge.TotalSeconds -le 3
+            }
+            catch { }
+            $statusMatches = $status `
+                -and [int]$status.pid -eq $brokerProcess.Id `
+                -and [int]$status.session_id -eq $brokerProcess.SessionId `
+                -and [bool]$status.user_interactive `
+                -and -not [bool]$status.elevated
+            if ($statusMatches -and $heartbeatFresh) {
+                Start-Sleep -Milliseconds 500
+                $stable = Get-BrokerProcess
+                if ($stable -and $stable.Id -eq $brokerProcess.Id -and $stable.SessionId -eq $brokerProcess.SessionId) {
+                    return $stable
+                }
+            }
         }
     } while ((Get-Date) -lt $deadline)
     return $null

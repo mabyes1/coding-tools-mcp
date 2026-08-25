@@ -126,11 +126,11 @@ function Test-InstalledComputerUseE2E {
         $env:PYTHONPATH = $appPath
         $code = @'
 from coding_tools_mcp.interactive_exec import request_computer_use
-r = request_computer_use(action="list_windows", include_screenshot=False, include_text=False, timeout_seconds=10)
+r = request_computer_use(action="list_windows", include_screenshot=False, include_text=False, timeout_seconds=20)
 assert r.get("ok") and r.get("action") == "list_windows", r
 print("COMPUTER_USE_E2E_OK")
 '@
-        $deadline = [DateTimeOffset]::UtcNow.AddSeconds(20)
+        $deadline = [DateTimeOffset]::UtcNow.AddSeconds(35)
         do {
             & $serverPython -c $code
             if ($LASTEXITCODE -eq 0) { return }
@@ -299,8 +299,8 @@ try {
     & icacls.exe $runnerPath /grant "${localServiceSid}:RX" /C | Out-Null
     $health = Start-CodingToolsPrivateServices $expectedVersion
     if (-not $SkipBrokerRefresh) {
-        Test-InstalledComputerUseE2E
         Test-InstalledInteractiveExecE2E
+        Test-InstalledComputerUseE2E
     }
     Trim-ReleaseBackups 20
     Write-Host "PRIVATE_MCP_UPDATE_OK version=$($health.version) backup=$newBackup"
