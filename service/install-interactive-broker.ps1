@@ -63,6 +63,19 @@ $viewerExe = Join-Path $serviceRoot "activity-log-viewer.exe"
     /reference:System.Drawing.dll /reference:System.Windows.Forms.dll $viewerSource
 if ($LASTEXITCODE -ne 0) { throw "Could not build Activity Log viewer." }
 
+$bridgeSource = Join-Path $sourceRoot "WebConsoleBridge.cs"
+if (-not (Test-Path -LiteralPath $bridgeSource -PathType Leaf)) { throw "Web Console bridge source is missing: $bridgeSource" }
+$bridgeExe = Join-Path $serviceRoot "web-console-bridge.exe"
+& $csc /nologo /target:winexe /optimize+ /out:$bridgeExe `
+    /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\System.Web.Extensions.dll" $bridgeSource
+if ($LASTEXITCODE -ne 0) { throw "Could not build Web Console bridge." }
+
+$extensionSource = Join-Path (Split-Path -Parent $sourceRoot) "browser-extension"
+if (Test-Path -LiteralPath $extensionSource -PathType Container) {
+    Remove-Item -LiteralPath (Join-Path $serviceRoot "browser-extension") -Recurse -Force -ErrorAction SilentlyContinue
+    Copy-Item -LiteralPath $extensionSource -Destination (Join-Path $serviceRoot "browser-extension") -Recurse -Force
+}
+
 & icacls.exe $queueRoot /inheritance:r /grant:r `
     "*S-1-5-18:(OI)(CI)F" `
     "*S-1-5-32-544:(OI)(CI)F" `

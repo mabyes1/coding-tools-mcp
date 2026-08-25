@@ -38,11 +38,16 @@ def human_help_tool(
                 timeout_seconds=timeout_seconds,
             )
             outcome = str(response.get("outcome") or "unknown")
+            actual_delivery = (
+                "web_qa"
+                if str(response.get("execution_context") or "") == "web_console"
+                else "desktop_qa"
+            )
             if outcome in {"submitted", "done"}:
                 return {
                     "ok": True,
                     "status": "human_completed",
-                    "delivery": "desktop_qa",
+                    "delivery": actual_delivery,
                     "reason": reason,
                     "request": request,
                     "answer": str(response.get("answer") or ""),
@@ -52,7 +57,7 @@ def human_help_tool(
             return {
                 "ok": True,
                 "status": "human_declined" if outcome == "skip" else "human_unavailable",
-                "delivery": "desktop_qa",
+                "delivery": actual_delivery,
                 "reason": reason,
                 "request": request,
                 "answer": str(response.get("answer") or ""),

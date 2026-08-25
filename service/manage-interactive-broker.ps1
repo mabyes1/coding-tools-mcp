@@ -24,6 +24,18 @@ function Get-BrokerProcess {
     return Get-Process -Id $brokerPid -ErrorAction SilentlyContinue
 }
 
+function Stop-WebConsoleInstance {
+    $webConsolePidPath = Join-Path $queueRoot "web-console.pid"
+    if (Test-Path -LiteralPath $webConsolePidPath -PathType Leaf) {
+        try {
+            $webConsolePid = [int](Get-Content -LiteralPath $webConsolePidPath -Raw)
+            if ($webConsolePid -gt 0) { Stop-Process -Id $webConsolePid -Force -ErrorAction SilentlyContinue }
+        }
+        catch { }
+    }
+    Remove-Item -LiteralPath $webConsolePidPath,(Join-Path $queueRoot "web-console.heartbeat") -Force -ErrorAction SilentlyContinue
+}
+
 function Assert-InteractiveCaller {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $sessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
@@ -35,6 +47,7 @@ function Assert-InteractiveCaller {
 function Stop-BrokerInstance {
     $brokerProcess = Get-BrokerProcess
     if (-not $brokerProcess) {
+        Stop-WebConsoleInstance
         Remove-Item -LiteralPath (Join-Path $queueRoot "broker.pid") -Force -ErrorAction SilentlyContinue
         return
     }
@@ -46,6 +59,7 @@ function Stop-BrokerInstance {
     }
     Remove-Item -LiteralPath $stopPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $queueRoot "broker.pid") -Force -ErrorAction SilentlyContinue
+    Stop-WebConsoleInstance
 }
 
 function Wait-ForInteractiveBroker([int]$TimeoutSeconds = 8) {
@@ -129,10 +143,17 @@ switch ($Action) {
         $brokerProcess = Get-BrokerProcess
         $status = $null
         $statusPath = Join-Path $queueRoot "broker.status.json"
+        $webConsoleProcess = $null
+        try {
+            $webConsolePid = [int](Get-Content -LiteralPath (Join-Path $queueRoot "web-console.pid") -Raw)
+            $webConsoleProcess = Get-Process -Id $webConsolePid -ErrorAction SilentlyContinue
+        }
+        catch { }
         try { $status = Get-Content -LiteralPath $statusPath -Raw | ConvertFrom-Json } catch { }
         [pscustomobject]@{
             Task = if ($task) { $task.State } else { "NotInstalled" }
             Broker = if ($brokerProcess) { "Running (PID $($brokerProcess.Id), Session $($brokerProcess.SessionId))" } else { "Stopped" }
+            WebConsole = if ($webConsoleProcess) { "Running (PID $($webConsoleProcess.Id), http://127.0.0.1:8768)" } else { "Stopped" }
             User = if ($status) { $status.username } else { $null }
             RunLevel = if ($status) { $status.run_level } else { $null }
             Queue = $queueRoot

@@ -15,6 +15,7 @@ $protocolVersion = 1
 $requestTtlSeconds = 900
 $maxCapturedBytes = 1048576
 $heartbeatIntervalSeconds = 5
+$webConsoleHeartbeatTtlSeconds = 90
 $workRetentionDays = 7
 
 try {
@@ -58,10 +59,11 @@ function Update-BrokerHeartbeat {
 function Clear-StaleBrokerArtifacts {
     # A broker restart invalidates unfinished IPC. Replaying an interactive
     # action is unsafe because we cannot know whether it already happened.
-    foreach ($pattern in @("*.request", "*.processing", "*.response")) {
+    foreach ($pattern in @("*.request", "*.processing", "*.response", "*.web-human-help.json", "*.web-human-help.response", "*.web-human-help.seen")) {
         Get-ChildItem -LiteralPath $queueRoot -Filter $pattern -File -ErrorAction SilentlyContinue |
             Remove-Item -Force -ErrorAction SilentlyContinue
     }
+    Remove-Item -LiteralPath (Join-Path $queueRoot "web-console.heartbeat") -Force -ErrorAction SilentlyContinue
     $cutoff = (Get-Date).AddDays(-$workRetentionDays)
     Get-ChildItem -LiteralPath $queueRoot -Directory -Filter "work-*" -ErrorAction SilentlyContinue |
         Where-Object LastWriteTime -lt $cutoff |
@@ -83,11 +85,75 @@ function Convert-UiText([string]$Base64) {
 
 $computerUseHelper = Join-Path $PSScriptRoot "computer-use-helper.exe"
 $activityLogViewer = Join-Path $PSScriptRoot "activity-log-viewer.exe"
+$webConsoleBridge = Join-Path $PSScriptRoot "web-console-bridge.exe"
 $activityLogPath = Join-Path $serviceRoot "logs\ai-activity.log"
 $activityLogViewerPid = Join-Path $queueRoot "activity-log-viewer.pid"
 $activityLogViewerDnd = Join-Path $queueRoot "activity-log-viewer.dnd"
+$activityLogViewerDesktopOptIn = Join-Path $queueRoot "activity-log-viewer.desktop"
+$webConsolePid = Join-Path $queueRoot "web-console.pid"
+$webConsoleHeartbeat = Join-Path $queueRoot "web-console.heartbeat"
+
+function Start-WebConsoleBridge {
+    if (-not (Test-Path -LiteralPath $webConsoleBridge -PathType Leaf)) { return }
+    $running = $false
+    if (Test-Path -LiteralPath $webConsolePid -PathType Leaf) {
+        try {
+            $bridgePid = [int]([IO.File]::ReadAllText($webConsolePid).Trim())
+            if ($bridgePid -gt 0 -and (Get-Process -Id $bridgePid -ErrorAction SilentlyContinue)) { $running = $true }
+        }
+        catch { }
+    }
+    if ($running) { return }
+    Remove-Item -LiteralPath $webConsolePid,$webConsoleHeartbeat -Force -ErrorAction SilentlyContinue
+    try {
+        Start-Process -FilePath $webConsoleBridge -WindowStyle Hidden -ArgumentList @(
+            "--log", $activityLogPath,
+            "--queue", $queueRoot,
+            "--permission-mode", (Join-Path $serviceRoot "permission-mode.txt"),
+            "--pid", $webConsolePid,
+            "--port", "8768"
+        ) | Out-Null
+    }
+    catch {
+        Write-BrokerLog "WEB_CONSOLE_BRIDGE_FAILED $($_.Exception.Message)"
+    }
+}
+
+function Stop-WebConsoleBridge {
+    if (Test-Path -LiteralPath $webConsolePid -PathType Leaf) {
+        try {
+            $bridgePid = [int]([IO.File]::ReadAllText($webConsolePid).Trim())
+            if ($bridgePid -gt 0) { Stop-Process -Id $bridgePid -Force -ErrorAction SilentlyContinue }
+        }
+        catch { }
+    }
+    Remove-Item -LiteralPath $webConsolePid,$webConsoleHeartbeat -Force -ErrorAction SilentlyContinue
+}
+
+function Test-WebConsoleConnected {
+    if (-not (Test-Path -LiteralPath $webConsoleHeartbeat -PathType Leaf)) { return $false }
+    try {
+        # Do not open/read the heartbeat file here. WebConsoleBridge replaces it
+        # atomically on every poll, and a content read can briefly collide with
+        # that replace/write and incorrectly report the console as disconnected.
+        # File metadata is sufficient for liveness and does not contend with the
+        # writer's content handle.
+        $lastWriteUtc = [IO.File]::GetLastWriteTimeUtc($webConsoleHeartbeat)
+        if ($lastWriteUtc -eq [DateTime]::MinValue) { return $false }
+        $ageSeconds = ([DateTime]::UtcNow - $lastWriteUtc).TotalSeconds
+        return ($ageSeconds -ge -5 -and $ageSeconds -le $webConsoleHeartbeatTtlSeconds)
+    }
+    catch { return $false }
+}
 
 function Start-ActivityLogViewer {
+    # The browser drawer is the primary surface. Keep the legacy desktop viewer
+    # available as an explicit opt-in fallback without opening a separate window
+    # on every broker start or MCP action.
+    if (-not (Test-Path -LiteralPath $activityLogViewerDesktopOptIn -PathType Leaf)) {
+        Remove-Item -LiteralPath $activityLogViewerPid -Force -ErrorAction SilentlyContinue
+        return
+    }
     if (-not (Test-Path -LiteralPath $activityLogViewer -PathType Leaf)) { return }
     $running = $false
     if (Test-Path -LiteralPath $activityLogViewerPid -PathType Leaf) {
@@ -108,6 +174,86 @@ function Start-ActivityLogViewer {
     }
     catch {
         Write-BrokerLog "ACTIVITY_LOG_VIEWER_FAILED $($_.Exception.Message)"
+    }
+}
+
+function Try-HandleHumanHelpInWebConsole([string]$RequestId, $Request, [int]$TimeoutSeconds) {
+    if (-not (Test-WebConsoleConnected)) { return $false }
+
+    $pendingPath = Join-Path $queueRoot "$RequestId.web-human-help.json"
+    $webResponsePath = Join-Path $queueRoot "$RequestId.web-human-help.response"
+    $webSeenPath = Join-Path $queueRoot "$RequestId.web-human-help.seen"
+    $payload = @{
+        protocol = $protocolVersion
+        request_id = $RequestId
+        created_at = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        reason = [string]$Request.reason
+        request = [string]$Request.request
+        expected_result = [string]$Request.expected_result
+        return_to_agent = [string]$Request.return_to_agent
+        mode = [string]$Request.mode
+        fallback = [string]$Request.fallback
+        timeout_seconds = $TimeoutSeconds
+    }
+    try {
+        Write-AtomicJson $pendingPath $payload
+        Write-BrokerLog "HUMAN_HELP_WEB_START id=$RequestId timeout=$TimeoutSeconds"
+        $deliveryDeadline = [DateTimeOffset]::UtcNow.AddSeconds([Math]::Min(5, [Math]::Max(1, $TimeoutSeconds)))
+        while ([DateTimeOffset]::UtcNow -lt $deliveryDeadline -and -not (Test-Path -LiteralPath $webSeenPath -PathType Leaf)) {
+            Start-Sleep -Milliseconds 100
+        }
+        if (-not (Test-Path -LiteralPath $webSeenPath -PathType Leaf)) {
+            Write-BrokerLog "HUMAN_HELP_WEB_NOT_SEEN id=$RequestId fallback=desktop"
+            return $false
+        }
+        Write-BrokerLog "HUMAN_HELP_WEB_SEEN id=$RequestId"
+        $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+        while ([DateTimeOffset]::UtcNow -lt $deadline) {
+            if (Test-Path -LiteralPath $webResponsePath -PathType Leaf) {
+                $webResponse = [IO.File]::ReadAllText($webResponsePath, [Text.UTF8Encoding]::new($false)) | ConvertFrom-Json
+                if ([string]$webResponse.request_id -ne $RequestId) { throw "Web console response id did not match." }
+                $answer = [string]$webResponse.answer
+                $requestedOutcome = [string]$webResponse.outcome
+                $outcome = if ($requestedOutcome -eq "cancelled") { "skip" } elseif ([string]::IsNullOrWhiteSpace($answer)) { "done" } else { "submitted" }
+                Complete-Request $RequestId @{
+                    ok = $true
+                    status = "human_response"
+                    outcome = $outcome
+                    answer = $answer
+                    timed_out = $false
+                    mode = [string]$Request.mode
+                    fallback = [string]$Request.fallback
+                    execution_context = "web_console"
+                    message = "Human-help web console prompt completed."
+                    retryable = $false
+                }
+                Write-BrokerLog "HUMAN_HELP_WEB_END id=$RequestId outcome=$outcome"
+                return $true
+            }
+            Start-Sleep -Milliseconds 100
+        }
+
+        Complete-Request $RequestId @{
+            ok = $true
+            status = "human_response"
+            outcome = "timeout"
+            answer = ""
+            timed_out = $true
+            mode = [string]$Request.mode
+            fallback = [string]$Request.fallback
+            execution_context = "web_console"
+            message = "Human-help web console prompt timed out."
+            retryable = $false
+        }
+        Write-BrokerLog "HUMAN_HELP_WEB_END id=$RequestId outcome=timeout"
+        return $true
+    }
+    catch {
+        Write-BrokerLog "HUMAN_HELP_WEB_ERROR id=$RequestId error=$($_.Exception.Message) fallback=desktop"
+        return $false
+    }
+    finally {
+        Remove-Item -LiteralPath $pendingPath,$webResponsePath,$webSeenPath -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -401,6 +547,8 @@ function Handle-HumanHelpRequest([string]$RequestId, $Request) {
         Complete-Request $RequestId @{ ok = $false; error = "HUMAN_HELP_REQUEST_INVALID"; message = "Human-help request is missing or too large."; retryable = $false }
         return
     }
+
+    if (Try-HandleHumanHelpInWebConsole $RequestId $Request $timeoutSeconds) { return }
 
     try {
         Write-BrokerLog "HUMAN_HELP_START id=$RequestId reason=$reason mode=$mode fallback=$fallback timeout=$timeoutSeconds"
@@ -802,6 +950,7 @@ try {
         started_at = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     }
     Write-BrokerLog "BOOT_STATUS_WRITTEN path=$statusPath"
+    Start-WebConsoleBridge
     Start-ActivityLogViewer
     Write-BrokerLog "START pid=$([Diagnostics.Process]::GetCurrentProcess().Id) session=$brokerSessionId user=$($brokerIdentity.Name) runlevel=limited"
 }
@@ -832,5 +981,6 @@ catch {
 }
 finally {
     Write-BrokerLog "STOP pid=$([Diagnostics.Process]::GetCurrentProcess().Id)"
+    Stop-WebConsoleBridge
     Remove-Item -LiteralPath $stopPath,$pidPath,$heartbeatPath,$statusPath -Force -ErrorAction SilentlyContinue
 }

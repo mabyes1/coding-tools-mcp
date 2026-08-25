@@ -50,6 +50,7 @@ function Get-CodingToolsManagedServiceFiles {
         "computer-use-helper.exe",
         "computer-use-overlay.exe",
         "activity-log-viewer.exe",
+        "web-console-bridge.exe",
         "computer-use-actions.json",
         "elevated-actions.manifest.json"
     )
@@ -98,6 +99,15 @@ function New-CodingToolsBrokerArtifactStage(
     & $csc /nologo /target:winexe /optimize+ ("/out:" + (Join-Path $serviceStage "activity-log-viewer.exe")) `
         /reference:System.Drawing.dll /reference:System.Windows.Forms.dll (Join-Path $ServiceSourceRoot "ActivityLogViewer.cs")
     if ($LASTEXITCODE -ne 0) { throw "Could not stage the Activity Log viewer." }
+    & $csc /nologo /target:winexe /optimize+ ("/out:" + (Join-Path $serviceStage "web-console-bridge.exe")) `
+        /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\System.Web.Extensions.dll" `
+        (Join-Path $ServiceSourceRoot "WebConsoleBridge.cs")
+    if ($LASTEXITCODE -ne 0) { throw "Could not stage the Web Console bridge." }
+
+    $extensionSource = Join-Path (Split-Path -Parent $ServiceSourceRoot) "browser-extension"
+    if (Test-Path -LiteralPath $extensionSource -PathType Container) {
+        Copy-Item -LiteralPath $extensionSource -Destination (Join-Path $serviceStage "browser-extension") -Recurse -Force
+    }
 
     $assetsSource = Join-Path $ServiceSourceRoot "assets"
     if (Test-Path -LiteralPath $assetsSource -PathType Container) {
@@ -185,7 +195,7 @@ function Stop-CodingToolsBrokerProcesses([string]$ServiceRoot) {
         }
         Stop-ScheduledTask -TaskName $pair.Task -ErrorAction SilentlyContinue
     }
-    Get-Process -Name "elevated-broker-launcher","interactive-broker-launcher","computer-use-overlay","activity-log-viewer" -ErrorAction SilentlyContinue |
+    Get-Process -Name "elevated-broker-launcher","interactive-broker-launcher","computer-use-overlay","activity-log-viewer","web-console-bridge" -ErrorAction SilentlyContinue |
         Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
@@ -240,6 +250,10 @@ function Backup-CodingToolsServiceComponents(
     if (Test-Path -LiteralPath $assets -PathType Container) {
         Copy-Item -LiteralPath $assets -Destination (Join-Path $Destination "assets") -Recurse -Force
     }
+    $extension = Join-Path $ServiceRoot "browser-extension"
+    if (Test-Path -LiteralPath $extension -PathType Container) {
+        Copy-Item -LiteralPath $extension -Destination (Join-Path $Destination "browser-extension") -Recurse -Force
+    }
 }
 
 function Install-CodingToolsBrokerArtifacts(
@@ -262,6 +276,11 @@ function Install-CodingToolsBrokerArtifacts(
     if (Test-Path -LiteralPath $stagedAssets -PathType Container) {
         Remove-Item -LiteralPath (Join-Path $ServiceRoot "assets") -Recurse -Force -ErrorAction SilentlyContinue
         Copy-Item -LiteralPath $stagedAssets -Destination (Join-Path $ServiceRoot "assets") -Recurse -Force
+    }
+    $stagedExtension = Join-Path $ServiceStage "browser-extension"
+    if (Test-Path -LiteralPath $stagedExtension -PathType Container) {
+        Remove-Item -LiteralPath (Join-Path $ServiceRoot "browser-extension") -Recurse -Force -ErrorAction SilentlyContinue
+        Copy-Item -LiteralPath $stagedExtension -Destination (Join-Path $ServiceRoot "browser-extension") -Recurse -Force
     }
 
     Set-CodingToolsBrokerPermissions $ServiceRoot $ElevatedQueueRoot $InteractiveQueueRoot $LocalServiceSid
@@ -299,6 +318,12 @@ function Restore-CodingToolsServiceComponents(
     $assetsBackup = Join-Path $Source "assets"
     if (Test-Path -LiteralPath $assetsBackup -PathType Container) {
         Copy-Item -LiteralPath $assetsBackup -Destination $assetsDestination -Recurse -Force
+    }
+    $extensionDestination = Join-Path $ServiceRoot "browser-extension"
+    Remove-Item -LiteralPath $extensionDestination -Recurse -Force -ErrorAction SilentlyContinue
+    $extensionBackup = Join-Path $Source "browser-extension"
+    if (Test-Path -LiteralPath $extensionBackup -PathType Container) {
+        Copy-Item -LiteralPath $extensionBackup -Destination $extensionDestination -Recurse -Force
     }
     Set-CodingToolsBrokerPermissions $ServiceRoot $ElevatedQueueRoot $InteractiveQueueRoot $LocalServiceSid
     $windowsPowerShell = Join-Path $env:WINDIR "System32\WindowsPowerShell\v1.0\powershell.exe"

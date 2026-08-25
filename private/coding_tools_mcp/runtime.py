@@ -485,7 +485,12 @@ class Runtime:
         spec = TOOL_REGISTRY[name]
         validate_arguments(name, args)
         try:
-            append_activity_start(name, args)
+            append_activity_start(
+                name,
+                args,
+                session_id=self.http_session_id,
+                request_id=request_id,
+            )
             self.request_context.request_id = request_id
             self.request_context.tool_name = name
             self.request_context.arguments = args
@@ -501,7 +506,7 @@ class Runtime:
                 self.request_context.tool_name = None
                 self.request_context.arguments = None
             payload.setdefault("ok", True)
-            self.emit_tool_trace(name, args, payload, started_at)
+            self.emit_tool_trace(name, args, payload, started_at, request_id=request_id)
             content = spec.content_builder(payload) if spec.content_builder else None
             return make_tool_result(name, payload, is_error=payload.get("ok") is False, content=content)
         except ToolFailure as exc:
@@ -533,7 +538,7 @@ class Runtime:
                 }
             if exc.code == "ELICITATION_UNSUPPORTED":
                 payload["status"] = "unsupported"
-            self.emit_tool_trace(name, args, payload, started_at)
+            self.emit_tool_trace(name, args, payload, started_at, request_id=request_id)
             return make_tool_result(name, payload, is_error=True)
         except Exception as exc:  # noqa: BLE001 - tool failures must stay structured
             error_message, error_leaves = summarize_exception(exc)
@@ -550,7 +555,7 @@ class Runtime:
             }
             if spec.error_status:
                 payload["status"] = spec.error_status
-            self.emit_tool_trace(name, args, payload, started_at)
+            self.emit_tool_trace(name, args, payload, started_at, request_id=request_id)
             return make_tool_result(name, payload, is_error=True)
 
     def server_info(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -737,7 +742,15 @@ class Runtime:
             return None
         return resolved
 
-    def emit_tool_trace(self, name: str, args: dict[str, Any], payload: dict[str, Any], started_at: float) -> None:
+    def emit_tool_trace(
+        self,
+        name: str,
+        args: dict[str, Any],
+        payload: dict[str, Any],
+        started_at: float,
+        *,
+        request_id: str | int | None = None,
+    ) -> None:
         raw_error = payload.get("error")
         error = raw_error if isinstance(raw_error, dict) else {}
         duration_ms = int((time.time() - started_at) * 1000)
@@ -748,7 +761,14 @@ class Runtime:
             duration_ms=duration_ms,
             truncated=bool(payload.get("truncated")),
         )
-        append_activity_log(name, args, payload, duration_ms)
+        append_activity_log(
+            name,
+            args,
+            payload,
+            duration_ms,
+            session_id=self.http_session_id,
+            request_id=request_id,
+        )
         if os.environ.get(f"{ENV_PREFIX}_TRACE") != "1":
             return
         event = {

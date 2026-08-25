@@ -27,6 +27,8 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
     helper_source = service_root / "ComputerUseHelper.cs"
     overlay_source = service_root / "ComputerUseOverlay.cs"
     activity_viewer_source = service_root / "ActivityLogViewer.cs"
+    web_console_bridge_source = service_root / "WebConsoleBridge.cs"
+    browser_extension_root = service_root.parent / "browser-extension"
     action_contract_source = package_parent / "coding_tools_mcp" / "computer-use-actions.json"
     elevated_install_text = (service_root / "install-elevated-broker.ps1").read_text(encoding="utf-8")
     interactive_install_text = (service_root / "install-interactive-broker.ps1").read_text(encoding="utf-8")
@@ -85,6 +87,12 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
             helper_source,
             overlay_source,
             activity_viewer_source,
+            web_console_bridge_source,
+            browser_extension_root / "manifest.json",
+            browser_extension_root / "background.js",
+            browser_extension_root / "content.js",
+            browser_extension_root / "bridge-frame.html",
+            browser_extension_root / "bridge-frame.js",
             action_contract_source,
             *helper_refs,
         ]
@@ -99,6 +107,12 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
     # Regression contracts come from bugs we actually hit in production.
     helper_text = helper_source.read_text(encoding="utf-8")
     interactive_broker_text = (service_root / "interactive-broker.ps1").read_text(encoding="utf-8")
+    web_console_bridge_text = web_console_bridge_source.read_text(encoding="utf-8")
+    extension_manifest = json.loads((browser_extension_root / "manifest.json").read_text(encoding="utf-8"))
+    extension_background_text = (browser_extension_root / "background.js").read_text(encoding="utf-8")
+    extension_content_text = (browser_extension_root / "content.js").read_text(encoding="utf-8")
+    extension_bridge_text = (browser_extension_root / "bridge-frame.js").read_text(encoding="utf-8")
+    desktop_tool_text = (package_parent / "coding_tools_mcp" / "tools" / "desktop.py").read_text(encoding="utf-8")
     if "System.Management.Automation.Language.Parser]::ParseInput" not in interactive_broker_text:
         raise RuntimeError("active_user exec must reject PowerShell syntax errors before launching the child shell")
     for action in sorted(set(action_contract["computer_use"]) | set(action_contract["browser_use"])):
@@ -116,6 +130,58 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
         raise RuntimeError("click must not report success when it only focused the element")
     if "computer-use-overlay-leases" not in helper_text:
         raise RuntimeError("Computer Use overlay must use per-operation leases")
+    if "Try-HandleHumanHelpInWebConsole" not in interactive_broker_text:
+        raise RuntimeError("HUMAN HELP stopped preferring the in-page Web Console")
+    if "GetLastWriteTimeUtc($webConsoleHeartbeat)" not in interactive_broker_text:
+        raise RuntimeError("Web Console liveness must use heartbeat metadata instead of contended content reads")
+    for web_help_delivery_contract in ("HUMAN_HELP_WEB_SEEN", "HUMAN_HELP_WEB_NOT_SEEN", ".web-human-help.seen"):
+        if web_help_delivery_contract not in interactive_broker_text:
+            raise RuntimeError(f"HUMAN HELP web delivery handshake lost broker contract: {web_help_delivery_contract}")
+    if ".web-human-help.seen" not in web_console_bridge_text:
+        raise RuntimeError("Web Console bridge stopped acknowledging delivered HUMAN HELP prompts")
+    web_help_attempt_index = interactive_broker_text.find("Try-HandleHumanHelpInWebConsole $RequestId")
+    desktop_help_index = interactive_broker_text.find("Add-Type -AssemblyName System.Windows.Forms")
+    if web_help_attempt_index < 0 or desktop_help_index < 0 or web_help_attempt_index > desktop_help_index:
+        raise RuntimeError("HUMAN HELP must try the Web Console before creating desktop UI")
+    if "activity-log-viewer.desktop" not in interactive_broker_text:
+        raise RuntimeError("legacy desktop activity viewer must remain explicit opt-in")
+    for bridge_contract in (
+        "IPAddress.Loopback",
+        "X-Coding-Tools-Console",
+        "chrome-extension://",
+        "Access-Control-Allow-Private-Network: true",
+        ".web-human-help.response",
+    ):
+        if bridge_contract not in web_console_bridge_text:
+            raise RuntimeError(f"Web Console bridge lost security/IPC contract: {bridge_contract}")
+    if extension_manifest.get("manifest_version") != 3:
+        raise RuntimeError("Web Console browser extension must use Manifest V3")
+    if extension_manifest.get("host_permissions") != ["http://127.0.0.1:8768/*"]:
+        raise RuntimeError("Web Console extension host permissions became broader than loopback bridge access")
+    if "http://127.0.0.1:8768" not in extension_background_text:
+        raise RuntimeError("Web Console extension stopped using the loopback bridge")
+    for timeout_contract in ("CONSOLE_REQUEST_TIMEOUT_MS", "AbortController", "console_request_timeout"):
+        if timeout_contract not in extension_background_text:
+            raise RuntimeError(f"Web Console background bridge lost timeout contract: {timeout_contract}")
+    for timeout_contract in ("REQUEST_TIMEOUT_MS", "主控台請求逾時"):
+        if timeout_contract not in extension_content_text:
+            raise RuntimeError(f"Web Console content bridge lost timeout contract: {timeout_contract}")
+    for ui_contract in ("attachShadow", "CODING MCP 主控台", "HUMAN_HELP", "coding-tools-console-request"):
+        if ui_contract not in extension_content_text:
+            raise RuntimeError(f"Web Console drawer lost UI contract: {ui_contract}")
+    for local_network_contract in ('targetAddressSpace: "loopback"', "coding-tools-bridge-frame", "127.0.0.1:8768"):
+        if local_network_contract not in extension_bridge_text:
+            raise RuntimeError(f"Web Console Local Network Access bootstrap lost contract: {local_network_contract}")
+    if 'targetAddressSpace: "loopback"' not in extension_background_text:
+        raise RuntimeError("Web Console background bridge must classify 127.0.0.1 as loopback")
+    for content_bridge_contract in ('http://127.0.0.1:8768', 'targetAddressSpace: "loopback"', 'X-Coding-Tools-Console'):
+        if content_bridge_contract not in extension_content_text:
+            raise RuntimeError(f"Web Console content script lost direct loopback contract: {content_bridge_contract}")
+    for allowed_web_origin in ("https://chatgpt.com", "https://chat.openai.com"):
+        if allowed_web_origin not in web_console_bridge_text:
+            raise RuntimeError(f"Web Console bridge lost allowed web origin: {allowed_web_origin}")
+    if '"web_qa"' not in desktop_tool_text or 'execution_context' not in desktop_tool_text:
+        raise RuntimeError("HUMAN HELP public delivery must report Web Console responses as web_qa")
 
     with tempfile.TemporaryDirectory(prefix="coding-tools-computer-use-build-") as helper_temp:
         (Path(helper_temp) / "computer-use-actions.json").write_bytes(action_contract_source.read_bytes())
@@ -267,4 +333,27 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
         if viewer_compile.returncode != 0 or not activity_viewer_output.is_file():
             raise RuntimeError(
                 "Activity Log viewer failed to compile:\n" + viewer_compile.stdout[-8000:]
+            )
+
+        web_console_output = Path(helper_temp) / "web-console-bridge.exe"
+        web_console_compile = subprocess.run(
+            [
+                str(csc),
+                "/nologo",
+                "/target:winexe",
+                "/optimize+",
+                f"/out:{web_console_output}",
+                f"/reference:{windows_root / 'Microsoft.NET' / 'Framework64' / 'v4.0.30319' / 'System.Web.Extensions.dll'}",
+                str(web_console_bridge_source),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+        if web_console_compile.returncode != 0 or not web_console_output.is_file():
+            raise RuntimeError(
+                "Web Console bridge failed to compile:\n" + web_console_compile.stdout[-8000:]
             )

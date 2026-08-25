@@ -25,6 +25,15 @@ ACTIVITY_LOG_RETENTION_DAYS = 7
 
 ACTIVITY_LOG_LOCK = threading.Lock()
 
+
+def _activity_identity_suffix(session_id: Any = None, request_id: Any = None) -> str:
+    def short(value: Any, prefix: str) -> str:
+        text = re.sub(r"[^A-Za-z0-9_-]", "", str(value or ""))
+        return f"{prefix}-{text[:6].upper()}" if text else ""
+
+    fields = [item for item in (short(session_id, "S"), short(request_id, "R")) if item]
+    return " {" + ";".join(fields) + "}" if fields else ""
+
 ACTIVITY_LOG_PATH = (
     Path(
         os.environ.get(
@@ -229,11 +238,20 @@ def _prepare_activity_log_for_write() -> None:
     except OSError:
         pass
 
-def append_activity_start(name: str, args: dict[str, Any]) -> None:
+def append_activity_start(
+    name: str,
+    args: dict[str, Any],
+    *,
+    session_id: Any = None,
+    request_id: Any = None,
+) -> None:
     if ACTIVITY_LOG_PATH is None:
         return
     try:
-        block = "\n".join(_activity_start_lines(name, args)) + "\n"
+        lines = _activity_start_lines(name, args)
+        if lines:
+            lines[0] += _activity_identity_suffix(session_id, request_id)
+        block = "\n".join(lines) + "\n"
         with ACTIVITY_LOG_LOCK:
             _prepare_activity_log_for_write()
             with ACTIVITY_LOG_PATH.open("a", encoding="utf-8", newline="\n") as handle:
@@ -246,11 +264,16 @@ def append_activity_log(
     args: dict[str, Any],
     payload: dict[str, Any],
     duration_ms: int,
+    *,
+    session_id: Any = None,
+    request_id: Any = None,
 ) -> None:
     if ACTIVITY_LOG_PATH is None:
         return
     try:
         lines = _activity_log_lines(name, args, payload, duration_ms)
+        if lines:
+            lines[0] += _activity_identity_suffix(session_id, request_id)
         block = "\n".join(lines) + "\n\n"
         with ACTIVITY_LOG_LOCK:
             _prepare_activity_log_for_write()
