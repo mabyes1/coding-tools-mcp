@@ -103,6 +103,25 @@ internal sealed class WebConsoleBridge
             WriteJson(stream, 200, BuildState(), origin);
             return;
         }
+        if (request.Method == "POST" && request.Path == "/v1/human-help/seen")
+        {
+            var body = DeserializeBody(request);
+            var requestId = body.ContainsKey("request_id") ? Convert.ToString(body["request_id"]) : "";
+            if (!Regex.IsMatch(requestId, "^[A-Za-z0-9_-]{8,80}$"))
+            {
+                WriteJson(stream, 400, new Dictionary<string, object> { { "ok", false }, { "error", "invalid_request_id" } }, origin);
+                return;
+            }
+            var pendingPath = Path.Combine(_queueRoot, requestId + ".web-human-help.json");
+            if (!File.Exists(pendingPath))
+            {
+                WriteJson(stream, 409, new Dictionary<string, object> { { "ok", false }, { "error", "request_not_pending" } }, origin);
+                return;
+            }
+            WriteTextAtomic(Path.Combine(_queueRoot, requestId + ".web-human-help.seen"), DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString());
+            WriteJson(stream, 200, new Dictionary<string, object> { { "ok", true } }, origin);
+            return;
+        }
         if (request.Method == "POST" && request.Path == "/v1/preferences")
         {
             var body = DeserializeBody(request);
@@ -172,17 +191,7 @@ internal sealed class WebConsoleBridge
             var files = Directory.GetFiles(_queueRoot, "*.web-human-help.json");
             if (files.Length == 0) return null;
             Array.Sort(files, delegate(string left, string right) { return File.GetCreationTimeUtc(left).CompareTo(File.GetCreationTimeUtc(right)); });
-            var pending = _json.DeserializeObject(File.ReadAllText(files[0], Encoding.UTF8));
-            var payload = pending as Dictionary<string, object>;
-            if (payload != null && payload.ContainsKey("request_id"))
-            {
-                var requestId = Convert.ToString(payload["request_id"]);
-                if (!String.IsNullOrWhiteSpace(requestId))
-                {
-                    WriteTextAtomic(Path.Combine(_queueRoot, requestId + ".web-human-help.seen"), DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString());
-                }
-            }
-            return pending;
+            return _json.DeserializeObject(File.ReadAllText(files[0], Encoding.UTF8));
         }
         catch { return null; }
     }

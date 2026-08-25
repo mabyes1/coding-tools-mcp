@@ -52,7 +52,7 @@
   let state = null;
   let activeTab = "activity";
   let connected = false;
-  let lastHelpId = "";
+  let lastPresentedHelpId = "";
   let renderedHelpId = "";
   let pollTimer = null;
   let connectionError = "";
@@ -310,6 +310,7 @@
 
   async function poll() {
     clearTimeout(pollTimer);
+    let helpToAcknowledge = "";
     const activeBeforePoll = document.activeElement;
     let focusToRestore = (
       activeBeforePoll &&
@@ -320,13 +321,22 @@
     try {
       state = await request("/v1/state"); connected = true;
       const helpId = state.human_help && state.human_help.request_id || "";
-      if (helpId && helpId !== lastHelpId && !state.dnd) {
+      if (helpId && helpId !== lastPresentedHelpId && !state.dnd && document.visibilityState === "visible") {
         activeTab = "help";
         setOpen(true);
+        helpToAcknowledge = helpId;
       }
-      lastHelpId = helpId;
+      if (!helpId) lastPresentedHelpId = "";
     } catch (error) { connected = false; state = null; connectionError = String(error && error.message || error); }
     render();
+    if (helpToAcknowledge) {
+      try {
+        await request("/v1/human-help/seen", { method:"POST", body:{ request_id:helpToAcknowledge } });
+        lastPresentedHelpId = helpToAcknowledge;
+      } catch (error) {
+        connectionError = String(error && error.message || error);
+      }
+    }
     if (focusToRestore && focusToRestore.isConnected) {
       const restoreFocus = () => {
         if (!focusToRestore.isConnected || document.activeElement === focusToRestore) return;

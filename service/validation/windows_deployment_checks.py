@@ -151,6 +151,12 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
             raise RuntimeError(f"HUMAN HELP web delivery handshake lost broker contract: {web_help_delivery_contract}")
     if ".web-human-help.seen" not in web_console_bridge_text:
         raise RuntimeError("Web Console bridge stopped acknowledging delivered HUMAN HELP prompts")
+    if 'request.Path == "/v1/human-help/seen"' not in web_console_bridge_text:
+        raise RuntimeError("Web Console bridge must require an explicit HUMAN HELP delivery acknowledgement")
+    if 'document.visibilityState === "visible"' not in extension_content_text:
+        raise RuntimeError("background Web Console tabs must not suppress desktop HUMAN HELP fallback")
+    if 'request("/v1/human-help/seen"' not in extension_content_text:
+        raise RuntimeError("visible Web Console stopped acknowledging rendered HUMAN HELP prompts")
     web_help_attempt_index = interactive_broker_text.find("Try-HandleHumanHelpInWebConsole $RequestId")
     desktop_help_index = interactive_broker_text.find("Add-Type -AssemblyName System.Windows.Forms")
     if web_help_attempt_index < 0 or desktop_help_index < 0 or web_help_attempt_index > desktop_help_index:
