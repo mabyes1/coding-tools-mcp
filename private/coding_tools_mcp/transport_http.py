@@ -77,7 +77,33 @@ def safe_external_host(host: str) -> str:
     return host
 
 
+def _normalize_modern_discover_payload(payload: Any) -> Any:
+    """Normalize the server/discover wire shape to final MCP 2026-07-28."""
+    if not isinstance(payload, dict):
+        return payload
+    raw_result = payload.get("result")
+    if not isinstance(raw_result, dict) or "supportedVersions" not in raw_result:
+        return payload
+    # Discovery is the only response with supportedVersions.  The final
+    # 2026-07-28 wire format requires cache hints and moved server identity
+    # from the RC top-level serverInfo field into the reserved result _meta.
+    result = dict(raw_result)
+    result.setdefault("resultType", "complete")
+    result.setdefault("ttlMs", 0)
+    result.setdefault("cacheScope", "private")
+    server_info = result.pop("serverInfo", None)
+    if isinstance(server_info, dict):
+        raw_meta = result.get("_meta")
+        meta = dict(raw_meta) if isinstance(raw_meta, dict) else {}
+        meta.setdefault("io.modelcontextprotocol/serverInfo", server_info)
+        result["_meta"] = meta
+    normalized = dict(payload)
+    normalized["result"] = result
+    return normalized
+
+
 def json_response_payload(payload: Any) -> bytes:
+    payload = _normalize_modern_discover_payload(payload)
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
