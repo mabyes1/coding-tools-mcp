@@ -37,6 +37,8 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
     deploy_text = internal_root.joinpath("deploy-coding-tools.ps1").read_text(encoding="utf-8")
     install_text = internal_root.joinpath("install-coding-tools.ps1").read_text(encoding="utf-8")
     repair_text = internal_root.joinpath("repair-coding-tools.ps1").read_text(encoding="utf-8")
+    mcp_service_xml_text = (service_root / "WebGPTCodingToolsMCP.xml").read_text(encoding="utf-8")
+    bootstrap_text = (package_parent / "coding_tools_mcp" / "bootstrap.py").read_text(encoding="utf-8")
     for label, script_text in (
         ("elevated installer", elevated_install_text),
         ("deployment common", deployment_common_text),
@@ -74,6 +76,8 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
     for retained_listener_contract in (
         "Get-NetTCPConnection -State Listen",
         "$reservedPorts = @(8765, 8766, 8767)",
+        "Get-CimInstance Win32_Process",
+        "Refusing to kill it automatically",
         "Stop-Process -Id $listenerPid -Force",
         "Timed out clearing retained private MCP listeners",
     ):
@@ -82,6 +86,36 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
                 "service stop lifecycle lost stale MCP listener cleanup contract: "
                 + retained_listener_contract
             )
+
+    for readiness_contract in (
+        "Invoke-CodingToolsTunnelServerInfo",
+        "Set-CodingToolsMcpRecoveryPolicy",
+        'method = "tools/call"',
+        'name = "server_info"',
+        '"MCP-Protocol-Version" = "2026-07-28"',
+        "health/tunnel version mismatch",
+        "health/tunnel workspace mismatch",
+        "restart/5000/restart/10000/restart/30000",
+        "failureflag WebGPTCodingToolsMCP 1",
+    ):
+        if readiness_contract not in deployment_common_text:
+            raise RuntimeError(f"service readiness lost real Tunnel MCP handshake contract: {readiness_contract}")
+
+    if '<onfailure action="restart"' not in mcp_service_xml_text or "<resetfailure>" not in mcp_service_xml_text:
+        raise RuntimeError("MCP Windows service lost automatic crash-restart policy")
+
+    if "sc.exe failure WebGPTCodingToolsMCP reset= 0" in install_text:
+        raise RuntimeError("fresh install must not clear the MCP recovery restart policy")
+
+    for watchdog_contract in (
+        "_probe_loopback_mcp",
+        "_start_tunnel_watchdog",
+        "TUNNEL_WATCHDOG_INTERVAL_SECONDS",
+        "TUNNEL_WATCHDOG_FAILURES",
+        "tunnel_watchdog_failed.is_set()",
+    ):
+        if watchdog_contract not in bootstrap_text:
+            raise RuntimeError(f"Secure MCP Tunnel watchdog contract missing: {watchdog_contract}")
 
     helper_refs = [
         windows_root / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "System.Web.Extensions.dll",

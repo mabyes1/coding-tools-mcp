@@ -119,21 +119,77 @@ function New-CodingToolsBrokerArtifactStage(
     return $serviceStage
 }
 
-function Wait-CodingToolsMcpHealth([int]$Seconds = 30) {
+function Invoke-CodingToolsTunnelServerInfo([int]$TimeoutSeconds = 3) {
+    $body = @{
+        jsonrpc = "2.0"
+        id = "service-readiness"
+        method = "tools/call"
+        params = @{
+            name = "server_info"
+            arguments = @{}
+        }
+    } | ConvertTo-Json -Depth 8 -Compress
+    $response = Invoke-RestMethod `
+        -Uri "http://127.0.0.1:8767/mcp" `
+        -Method Post `
+        -ContentType "application/json" `
+        -Headers @{
+            Accept = "application/json, text/event-stream"
+            "MCP-Protocol-Version" = "2026-07-28"
+        } `
+        -Body $body `
+        -TimeoutSec $TimeoutSeconds
+    if ($response.error) {
+        throw "Tunnel MCP server_info returned JSON-RPC error: $($response.error | ConvertTo-Json -Compress)"
+    }
+    $result = $response.result
+    $info = $result.structuredContent
+    if (-not $result -or $result.isError -or -not $info -or $info.ok -ne $true -or $info.server -ne "coding-tools-mcp") {
+        throw "Tunnel MCP server_info returned an invalid tool result."
+    }
+    return $info
+}
+
+function Wait-CodingToolsMcpReady([int]$Seconds = 30) {
     $deadline = (Get-Date).AddSeconds($Seconds)
+    $lastError = "not probed"
     do {
         Start-Sleep -Milliseconds 500
         try {
             $health = Invoke-RestMethod "http://127.0.0.1:8766/healthz" -TimeoutSec 3
+            if (-not $health -or $health.status -ne "ok") {
+                $lastError = "healthz did not return status=ok"
+                continue
+            }
+            $serverInfo = Invoke-CodingToolsTunnelServerInfo -TimeoutSeconds 3
+            if ($serverInfo.version -ne $health.version) {
+                $lastError = "health/tunnel version mismatch ($($health.version) != $($serverInfo.version))"
+                continue
+            }
+            if ($serverInfo.workspace -ne $health.workspace) {
+                $lastError = "health/tunnel workspace mismatch"
+                continue
+            }
+            return $serverInfo
         }
         catch {
-            $health = $null
+            $lastError = $_.Exception.Message
         }
-    } while ((-not $health) -and (Get-Date) -lt $deadline)
-    if (-not $health -or $health.status -ne "ok") {
-        throw "MCP health endpoint did not become ready."
+    } while ((Get-Date) -lt $deadline)
+    throw "MCP did not become ready through healthz + Tunnel server_info: $lastError"
+}
+
+function Set-CodingToolsMcpRecoveryPolicy {
+    & sc.exe failure WebGPTCodingToolsMCP `
+        reset= 3600 `
+        actions= restart/5000/restart/10000/restart/30000 | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not configure WebGPTCodingToolsMCP service recovery actions."
     }
-    return $health
+    & sc.exe failureflag WebGPTCodingToolsMCP 1 | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not enable WebGPTCodingToolsMCP failure actions for non-crash failures."
+    }
 }
 
 function Stop-CodingToolsPrivateServices([int]$TimeoutSeconds = 20) {
@@ -161,6 +217,16 @@ function Stop-CodingToolsPrivateServices([int]$TimeoutSeconds = 20) {
         Select-Object -ExpandProperty OwningProcess -Unique)
     foreach ($listenerPid in $listenerPids) {
         if ($listenerPid -gt 0 -and $listenerPid -ne $PID) {
+            $owner = Get-CimInstance Win32_Process -Filter "ProcessId = $listenerPid" -ErrorAction SilentlyContinue
+            $ownerCommandLine = if ($owner) { [string]$owner.CommandLine } else { "" }
+            $ownerName = if ($owner) { [string]$owner.Name } else { "unknown" }
+            $managedListener = $ownerCommandLine -match '(?i)(coding_tools_mcp|run-mcp-service\.ps1|WebGPTCodingToolsMCPService)'
+            if (-not $managedListener) {
+                $ownedPorts = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+                    Where-Object { $_.LocalAddress -eq "127.0.0.1" -and $_.LocalPort -in $reservedPorts -and $_.OwningProcess -eq $listenerPid } |
+                    Select-Object -ExpandProperty LocalPort -Unique) -join ","
+                throw "Reserved MCP port collision: port(s) $ownedPorts are owned by unexpected process pid=$listenerPid name=$ownerName. Refusing to kill it automatically."
+            }
             Stop-Process -Id $listenerPid -Force -ErrorAction SilentlyContinue
         }
     }
@@ -178,13 +244,14 @@ function Stop-CodingToolsPrivateServices([int]$TimeoutSeconds = 20) {
 }
 
 function Start-CodingToolsPrivateServices([string]$ExpectedVersion = "") {
+    Set-CodingToolsMcpRecoveryPolicy
     Start-Service -Name WebGPTCodingToolsMCP
-    $health = Wait-CodingToolsMcpHealth
-    if (-not [string]::IsNullOrWhiteSpace($ExpectedVersion) -and $health.version -ne $ExpectedVersion) {
-        throw "MCP started with version $($health.version), expected $ExpectedVersion."
+    $serverInfo = Wait-CodingToolsMcpReady
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedVersion) -and $serverInfo.version -ne $ExpectedVersion) {
+        throw "MCP started with version $($serverInfo.version), expected $ExpectedVersion."
     }
     Start-Service -Name WebGPTCloudflareTunnel
-    return $health
+    return $serverInfo
 }
 
 function Copy-CodingToolsPackageToStage([string]$PackageRoot, [string]$RunnerSource, [string]$StageRoot) {

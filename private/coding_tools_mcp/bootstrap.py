@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import http.client
+import json
 import os
 import secrets
 import signal
@@ -13,6 +15,7 @@ from typing import Any
 from .envutils import ENV_PREFIX, truthy_env
 from .http_server import MCPHandler, RuntimeHTTPServer
 from .oauth import OAUTH_TOKEN_TTL_SECONDS, OAuthClientRegistry, OAuthConfig, OAuthStateStore
+from .protocol import STATELESS_PROTOCOL_VERSION
 from .project_context import ProjectContext
 from .runtime_config import (
     PERMISSION_MODE_CHOICES,
@@ -30,6 +33,84 @@ from .workspace import validate_workspace_selection
 
 
 AUTH_MODE_CHOICES = ("bearer", "noauth", "oauth")
+
+
+def _probe_loopback_mcp(port: int, timeout_seconds: int = 3) -> tuple[bool, str]:
+    """Exercise the actual Streamable HTTP MCP endpoint without creating a session."""
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout_seconds)
+    request = json.dumps(
+        {"jsonrpc": "2.0", "id": "tunnel-watchdog", "method": "ping"},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    try:
+        connection.request(
+            "POST",
+            "/mcp",
+            body=request,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+                "MCP-Protocol-Version": STATELESS_PROTOCOL_VERSION,
+            },
+        )
+        response = connection.getresponse()
+        body = response.read()
+        if response.status != 200:
+            return False, f"HTTP {response.status}"
+        payload = json.loads(body.decode("utf-8"))
+        if not isinstance(payload, dict) or payload.get("error") is not None:
+            return False, "invalid JSON-RPC response"
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            return False, "missing JSON-RPC result"
+        return True, ""
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return False, str(exc)
+    finally:
+        connection.close()
+
+
+def _start_tunnel_watchdog(
+    server: RuntimeHTTPServer,
+    tunnel_port: int,
+    stop_event: threading.Event,
+    failed_event: threading.Event,
+) -> threading.Thread:
+    interval_seconds = max(1, env_int(f"{ENV_PREFIX}_TUNNEL_WATCHDOG_INTERVAL_SECONDS", 10))
+    failure_threshold = max(1, env_int(f"{ENV_PREFIX}_TUNNEL_WATCHDOG_FAILURES", 3))
+    timeout_seconds = max(1, env_int(f"{ENV_PREFIX}_TUNNEL_WATCHDOG_TIMEOUT_SECONDS", 3))
+
+    def watch() -> None:
+        consecutive_failures = 0
+        while not stop_event.wait(interval_seconds):
+            ok, detail = _probe_loopback_mcp(tunnel_port, timeout_seconds)
+            if ok:
+                consecutive_failures = 0
+                continue
+            consecutive_failures += 1
+            print(
+                f"WARNING: Secure MCP Tunnel watchdog probe failed "
+                f"({consecutive_failures}/{failure_threshold}): {detail}",
+                file=sys.stderr,
+            )
+            if consecutive_failures < failure_threshold:
+                continue
+            print(
+                "ERROR: Secure MCP Tunnel listener failed repeatedly; "
+                "terminating the MCP service so the Windows service wrapper can restart it.",
+                file=sys.stderr,
+            )
+            failed_event.set()
+            server.shutdown()
+            return
+
+    thread = threading.Thread(
+        target=watch,
+        name="coding-tools-mcp-tunnel-watchdog",
+        daemon=True,
+    )
+    thread.start()
+    return thread
 
 
 def build_runtime(
@@ -227,6 +308,9 @@ def run_http(args: argparse.Namespace) -> int:
 
     tunnel_server: RuntimeHTTPServer | None = None
     tunnel_thread: threading.Thread | None = None
+    tunnel_watchdog_thread: threading.Thread | None = None
+    tunnel_watchdog_stop = threading.Event()
+    tunnel_watchdog_failed = threading.Event()
     raw_tunnel_port = (os.environ.get(f"{ENV_PREFIX}_TUNNEL_PORT") or "").strip()
     if raw_tunnel_port:
         try:
@@ -321,6 +405,12 @@ def run_http(args: argparse.Namespace) -> int:
             daemon=True,
         )
         tunnel_thread.start()
+        tunnel_watchdog_thread = _start_tunnel_watchdog(
+            server,
+            tunnel_port,
+            tunnel_watchdog_stop,
+            tunnel_watchdog_failed,
+        )
         print(
             f"{SERVER_NAME} Secure MCP Tunnel listener on http://127.0.0.1:{tunnel_port}/mcp (loopback only, auth handled by tunnel)",
             file=sys.stderr,
@@ -340,13 +430,16 @@ def run_http(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         return 130
     finally:
+        tunnel_watchdog_stop.set()
+        if tunnel_watchdog_thread is not None:
+            tunnel_watchdog_thread.join(timeout=1.0)
         if tunnel_server is not None:
             tunnel_server.shutdown()
             tunnel_server.server_close()
         server.server_close()
         if oauth_config is not None:
             oauth_config.close()
-    return 0
+    return 70 if tunnel_watchdog_failed.is_set() else 0
 
 
 def run_stdio(args: argparse.Namespace) -> int:

@@ -251,7 +251,7 @@ try {
         }
     }
 
-    Write-Host "Installing genuine Windows services (no recovery restart policy)..."
+    Write-Host "Installing genuine Windows services..."
     foreach ($xmlName in @("WebGPTCodingToolsMCP.xml", "WebGPTCloudflareTunnel.xml")) {
         $serviceId = [IO.Path]::GetFileNameWithoutExtension($xmlName)
         $wrapper = Join-Path $serviceRoot "$serviceId.exe"
@@ -261,7 +261,6 @@ try {
         }
     }
 
-    & sc.exe failure WebGPTCodingToolsMCP reset= 0 actions= "" | Out-Host
     & sc.exe failure WebGPTCloudflareTunnel reset= 0 actions= "" | Out-Host
     & sc.exe config WebGPTCodingToolsMCP obj= "NT AUTHORITY\LocalService" | Out-Host
     & sc.exe config WebGPTCloudflareTunnel obj= "NT AUTHORITY\LocalService" | Out-Host

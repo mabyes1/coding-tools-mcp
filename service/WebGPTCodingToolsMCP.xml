@@ -9,6 +9,10 @@
   <delayedAutoStart>true</delayedAutoStart>
   <hidewindow>true</hidewindow>
   <stoptimeout>15sec</stoptimeout>
+  <onfailure action="restart" delay="5 sec" />
+  <onfailure action="restart" delay="10 sec" />
+  <onfailure action="restart" delay="30 sec" />
+  <resetfailure>1 hour</resetfailure>
   <logpath>%BASE%\logs</logpath>
   <log mode="roll-by-size">
     <sizeThreshold>10240</sizeThreshold>
