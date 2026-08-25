@@ -192,8 +192,17 @@ function Set-CodingToolsMcpRecoveryPolicy {
     }
 }
 
-function Stop-CodingToolsPrivateServices([int]$TimeoutSeconds = 20) {
-    foreach ($name in @("WebGPTCloudflareTunnel", "WebGPTCodingToolsMCP")) {
+function Stop-CodingToolsPrivateServices(
+    [int]$TimeoutSeconds = 20,
+    [switch]$IncludeLegacyCloudflare
+) {
+    $serviceNames = if ($IncludeLegacyCloudflare) {
+        @("WebGPTCloudflareTunnel", "WebGPTCodingToolsMCP")
+    }
+    else {
+        @("WebGPTCodingToolsMCP")
+    }
+    foreach ($name in $serviceNames) {
         $service = Get-Service -Name $name -ErrorAction SilentlyContinue
         if ($service -and $service.Status -ne "Stopped") {
             Stop-Service -Name $name -Force
@@ -202,10 +211,12 @@ function Stop-CodingToolsPrivateServices([int]$TimeoutSeconds = 20) {
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     do {
         Start-Sleep -Milliseconds 250
-        $running = @(Get-Service -Name WebGPTCloudflareTunnel,WebGPTCodingToolsMCP -ErrorAction SilentlyContinue |
+        $running = @(Get-Service -Name $serviceNames -ErrorAction SilentlyContinue |
             Where-Object Status -ne "Stopped")
     } while ($running.Count -gt 0 -and (Get-Date) -lt $deadline)
-    if ($running.Count -gt 0) { throw "Timed out stopping the private MCP services." }
+    if ($running.Count -gt 0) {
+        throw "Timed out stopping private MCP service(s): $($running.Name -join ', ')"
+    }
 
     # WinSW stops the PowerShell service host, but the venv launcher can leave
     # its base Python child behind. A retained child keeps one or more MCP
@@ -243,14 +254,29 @@ function Stop-CodingToolsPrivateServices([int]$TimeoutSeconds = 20) {
     }
 }
 
-function Start-CodingToolsPrivateServices([string]$ExpectedVersion = "") {
+function Start-CodingToolsPrivateServices(
+    [string]$ExpectedVersion = "",
+    [switch]$RequireLegacyCloudflare
+) {
     Set-CodingToolsMcpRecoveryPolicy
     Start-Service -Name WebGPTCodingToolsMCP
     $serverInfo = Wait-CodingToolsMcpReady
     if (-not [string]::IsNullOrWhiteSpace($ExpectedVersion) -and $serverInfo.version -ne $ExpectedVersion) {
         throw "MCP started with version $($serverInfo.version), expected $ExpectedVersion."
     }
-    Start-Service -Name WebGPTCloudflareTunnel
+    $legacyCloudflare = Get-Service -Name WebGPTCloudflareTunnel -ErrorAction SilentlyContinue
+    if ($legacyCloudflare -and $legacyCloudflare.Status -ne "Running") {
+        try {
+            Start-Service -Name WebGPTCloudflareTunnel
+        }
+        catch {
+            if ($RequireLegacyCloudflare) { throw }
+            Write-Warning "Legacy Cloudflare MCP tunnel did not start; Secure MCP Tunnel on 8767 is healthy and remains available. $($_.Exception.Message)"
+        }
+    }
+    elseif ($RequireLegacyCloudflare -and -not $legacyCloudflare) {
+        throw "Required legacy Cloudflare MCP service is not installed."
+    }
     return $serverInfo
 }
 

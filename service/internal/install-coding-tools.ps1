@@ -48,7 +48,7 @@ try {
         }
     }
 
-    Stop-CodingToolsPrivateServices 15
+    Stop-CodingToolsPrivateServices 15 -IncludeLegacyCloudflare
     foreach ($serviceName in @("WebGPTCloudflareTunnel", "WebGPTCodingToolsMCP")) {
         if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
             & sc.exe delete $serviceName | Out-Host
@@ -266,7 +266,7 @@ try {
     & sc.exe config WebGPTCloudflareTunnel obj= "NT AUTHORITY\LocalService" | Out-Host
     & sc.exe config WebGPTCloudflareTunnel depend= WebGPTCodingToolsMCP | Out-Host
 
-    Start-CodingToolsPrivateServices | Out-Null
+    Start-CodingToolsPrivateServices -RequireLegacyCloudflare | Out-Null
 
     Get-Service -Name WebGPTCodingToolsMCP, WebGPTCloudflareTunnel |
         Select-Object Name, Status, StartType |

@@ -112,6 +112,23 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
         if readiness_contract not in deployment_common_text:
             raise RuntimeError(f"service readiness lost real Tunnel MCP handshake contract: {readiness_contract}")
 
+    for tunnel_independence_contract in (
+        "[switch]$IncludeLegacyCloudflare",
+        "[switch]$RequireLegacyCloudflare",
+        "Secure MCP Tunnel on 8767 is healthy and remains available",
+    ):
+        if tunnel_independence_contract not in deployment_common_text:
+            raise RuntimeError(
+                "Secure MCP Tunnel lifecycle regained a hard dependency on legacy Cloudflare: "
+                + tunnel_independence_contract
+            )
+    if "Stop-CodingToolsPrivateServices 15 -IncludeLegacyCloudflare" not in install_text:
+        raise RuntimeError("fresh install must explicitly stop the legacy Cloudflare service before replacing it")
+    if "Start-CodingToolsPrivateServices -RequireLegacyCloudflare" not in install_text:
+        raise RuntimeError("fresh install must still verify the explicitly installed legacy Cloudflare service")
+    if "RequireLegacyCloudflare" in deploy_text or "IncludeLegacyCloudflare" in deploy_text:
+        raise RuntimeError("normal deploy/rollback must not make Secure MCP Tunnel health depend on legacy Cloudflare")
+
     if '<onfailure action="restart"' not in mcp_service_xml_text or "<resetfailure>" not in mcp_service_xml_text:
         raise RuntimeError("MCP Windows service lost automatic crash-restart policy")
 
