@@ -78,6 +78,24 @@ def protocol_version_is_supported(version: Any) -> bool:
     return isinstance(version, str) and version in SUPPORTED_PROTOCOL_VERSIONS
 
 
+def _stamp_stateless_result(method: str, result: Any) -> Any:
+    """Add 2026-07-28 wire-only result fields without changing legacy responses."""
+    if not isinstance(result, dict):
+        return result
+    result = dict(result)
+    result.setdefault("resultType", "complete")
+    if method in {
+        "tools/list",
+        "prompts/list",
+        "resources/list",
+        "resources/templates/list",
+        "resources/read",
+    }:
+        result.setdefault("ttlMs", 0)
+        result.setdefault("cacheScope", "private")
+    return result
+
+
 def dispatch_rpc(runtime: Any, request: dict[str, Any]) -> dict[str, Any] | None:
     """Dispatch one MCP JSON-RPC request against a runtime, shared by all transports.
 
@@ -92,7 +110,11 @@ def dispatch_rpc(runtime: Any, request: dict[str, Any]) -> dict[str, Any] | None
         method = request["method"]
         params = rpc_params(request)
         request_meta = params.get("_meta")
-        stateless_version = request_meta.get("io.modelcontextprotocol/protocolVersion") if isinstance(request_meta, dict) else None
+        stateless_version = (
+            request_meta.get("io.modelcontextprotocol/protocolVersion")
+            if isinstance(request_meta, dict)
+            else None
+        )
         stateless_request = stateless_version == STATELESS_PROTOCOL_VERSION
         if not runtime.initialized and method not in {"initialize", "ping"} and not stateless_request:
             raise JsonRpcError(-32002, "Server not initialized")
@@ -126,6 +148,8 @@ def dispatch_rpc(runtime: Any, request: dict[str, Any]) -> dict[str, Any] | None
             raise JsonRpcError(-32601, f"Unknown method: {method}")
         if request_id is None:
             return None
+        if stateless_request:
+            result = _stamp_stateless_result(method, result)
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
     except JsonRpcError as exc:
         return jsonrpc_error(response_id(request), exc.code, exc.message, exc.data)
