@@ -160,10 +160,18 @@ assert r.get("exit_code") == 1, r
 assert str(r.get("stderr", "")).strip(), r
 print("INTERACTIVE_EXEC_PARSE_E2E_OK")
 '@
-        & $serverPython -c $code
-        if ($LASTEXITCODE -ne 0) {
-            throw "Interactive exec syntax-error regression test failed."
-        }
+        # Broker artifacts are deliberately restarted during deployment. The
+        # scheduled task may report Started a few seconds before its heartbeat
+        # and queue consumer are actually ready. Treat that startup window the
+        # same way as Computer Use instead of rolling a healthy MCP back on the
+        # first transient probe failure.
+        $deadline = [DateTimeOffset]::UtcNow.AddSeconds(35)
+        do {
+            & $serverPython -c $code
+            if ($LASTEXITCODE -eq 0) { return }
+            Start-Sleep -Milliseconds 500
+        } while ([DateTimeOffset]::UtcNow -lt $deadline)
+        throw "Interactive exec syntax-error regression test did not complete after broker readiness retries."
     }
     finally {
         $env:PYTHONPATH = $previousPythonPath
