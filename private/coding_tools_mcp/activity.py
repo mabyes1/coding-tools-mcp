@@ -102,10 +102,12 @@ def _activity_log_lines(
     lines: list[str] = []
 
     if name == "exec_command":
+        intent = sanitize_activity_text(args.get("intent", ""), max_chars=160)
+        intent_part = f" · {intent}" if intent else ""
         context = str(args.get("execution_context") or "service")
         exit_code = payload.get("exit_code")
         status = f"exit {exit_code}" if exit_code is not None else str(payload.get("status") or "done")
-        lines.append(f"[{stamp}] {marker} exec_command · {context} · {status} · {duration_ms} ms")
+        lines.append(f"[{stamp}] {marker} exec_command{intent_part} · {context} · {status} · {duration_ms} ms")
         stdout = payload.get("stdout")
         stderr = payload.get("stderr")
         if stdout:
@@ -118,8 +120,10 @@ def _activity_log_lines(
         return lines
 
     if name == "apply_patch":
+        intent = sanitize_activity_text(args.get("intent", ""), max_chars=160)
+        intent_part = f" · {intent}" if intent else ""
         lines.append(
-            f"[{stamp}] {marker} apply_patch · {payload.get('additions', 0)} additions · {payload.get('removals', 0)} removals · {duration_ms} ms"
+            f"[{stamp}] {marker} apply_patch{intent_part} · {payload.get('additions', 0)} additions · {payload.get('removals', 0)} removals · {duration_ms} ms"
         )
         affected = payload.get("affected_files")
         if isinstance(affected, list):
@@ -182,13 +186,17 @@ def _activity_log_lines(
 def _activity_start_lines(name: str, args: dict[str, Any]) -> list[str]:
     stamp = datetime.now().astimezone().strftime("%H:%M:%S")
     if name == "exec_command":
+        intent = sanitize_activity_text(args.get("intent", ""), max_chars=160)
+        intent_part = f" · {intent}" if intent else ""
         context = sanitize_activity_text(args.get("execution_context") or "service", max_chars=40)
         return [
-            f"[{stamp}] ▶ exec_command · {context}",
+            f"[{stamp}] ▶ exec_command{intent_part} · {context}",
             "> " + sanitize_activity_text(args.get("cmd", ""), max_chars=700),
         ]
     if name == "apply_patch":
-        return [f"[{stamp}] ▶ apply_patch"]
+        intent = sanitize_activity_text(args.get("intent", ""), max_chars=160)
+        intent_part = f" · {intent}" if intent else ""
+        return [f"[{stamp}] ▶ apply_patch{intent_part}"]
     if name in {"browser_use", "computer_use"}:
         surface = "Browser Use" if name == "browser_use" else "Computer Use"
         action = sanitize_activity_text(args.get("action", "inspect"), max_chars=80)

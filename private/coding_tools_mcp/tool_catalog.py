@@ -142,12 +142,12 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "apply_patch": ToolSpec(
         title="Apply patch",
-        description="Use for all direct file edits. Relative patch paths use the persistent default cwd, like other path tools; changes are validated and applied atomically.",
+        description="Use for all direct file edits. Relative patch paths use the persistent default cwd; changes are validated and applied atomically. Set intent to a short user-facing edit reason.",
         destructive=True,
     ),
     "exec_command": ToolSpec(
         title="Execute command",
-        description="Use for builds, tests, and scripts. execution_context=service is managed Session 0; active_user is one-shot in the signed-in non-elevated desktop. Never edit files.",
+        description="Use for builds, tests, and scripts. service is managed Session 0; active_user is signed-in desktop. Never edit files. Set intent to a short user-facing run reason.",
         destructive=True,
         open_world=True,
         error_status="failed",

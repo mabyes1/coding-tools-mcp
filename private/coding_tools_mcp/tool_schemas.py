@@ -290,10 +290,26 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             },
             ["query"],
         ),
-        "apply_patch": object_schema({"patch": {**string, "minLength": 1}, "dry_run": {**boolean, "default": False}}, ["patch"]),
+        "apply_patch": object_schema(
+            {
+                "patch": {**string, "minLength": 1},
+                "dry_run": {**boolean, "default": False},
+                "intent": {
+                    **string,
+                    "maxLength": 160,
+                    "description": "Short user-facing description of why this edit is being made. Used by the Web Console activity UI.",
+                },
+            },
+            ["patch"],
+        ),
         "exec_command": object_schema(
             {
                 "cmd": {**string, "minLength": 1},
+                "intent": {
+                    **string,
+                    "maxLength": 160,
+                    "description": "Short user-facing description of why this command is being run. Used by the Web Console activity UI.",
+                },
                 "execution_context": {**string, "enum": ["service", "active_user"], "default": "service"},
                 "workdir": {**string, "default": "."},
                 "cwd": {**string},

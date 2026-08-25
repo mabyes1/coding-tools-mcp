@@ -5,7 +5,7 @@ import json
 from typing import Any
 
 
-EXPECTED_PUBLIC_CONTRACT_SHA256 = "10a6219c4dd9a739f3ad6d05572f449d0800f8ad9bce16184851d10413b65392"
+EXPECTED_PUBLIC_CONTRACT_SHA256 = "3df3c465bba681718a5094320299e585518351104d0b0fd2c9057ed326742a73"
 
 
 def run_catalog_checks(server: Any, elevated_actions: Any) -> dict[str, tuple[str, ...]]:
@@ -75,6 +75,10 @@ def run_catalog_checks(server: Any, elevated_actions: Any) -> dict[str, tuple[st
     execution_context = exec_schema.get("properties", {}).get("execution_context", {})
     if execution_context.get("enum") != ["service", "active_user"]:
         raise RuntimeError("exec_command execution_context schema drifted from service/active_user")
+    for intent_tool in ("exec_command", "apply_patch"):
+        intent_schema = schemas[intent_tool].get("properties", {}).get("intent", {})
+        if intent_schema.get("type") != "string" or intent_schema.get("maxLength") != 160:
+            raise RuntimeError(f"{intent_tool} lost its short user-facing activity intent contract")
     permission_schema = schemas["request_permissions"]["properties"]["permission"]
     if "interactive_session" not in permission_schema.get("enum", []):
         raise RuntimeError("interactive_session permission is missing from request_permissions schema")
