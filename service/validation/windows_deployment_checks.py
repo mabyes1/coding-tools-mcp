@@ -71,6 +71,18 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
         if f"function {duplicated_name}" in deploy_text or f"function {duplicated_name}" in install_text:
             raise RuntimeError(f"deployment policy regressed to a local duplicate: {duplicated_name}")
 
+    for retained_listener_contract in (
+        "Get-NetTCPConnection -State Listen",
+        "$reservedPorts = @(8765, 8766, 8767)",
+        "Stop-Process -Id $listenerPid -Force",
+        "Timed out clearing retained private MCP listeners",
+    ):
+        if retained_listener_contract not in deployment_common_text:
+            raise RuntimeError(
+                "service stop lifecycle lost stale MCP listener cleanup contract: "
+                + retained_listener_contract
+            )
+
     helper_refs = [
         windows_root / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "System.Web.Extensions.dll",
         windows_root / "Microsoft.NET" / "Framework64" / "v4.0.30319" / "WPF" / "UIAutomationClient.dll",

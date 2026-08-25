@@ -150,6 +150,31 @@ function Stop-CodingToolsPrivateServices([int]$TimeoutSeconds = 20) {
             Where-Object Status -ne "Stopped")
     } while ($running.Count -gt 0 -and (Get-Date) -lt $deadline)
     if ($running.Count -gt 0) { throw "Timed out stopping the private MCP services." }
+
+    # WinSW stops the PowerShell service host, but the venv launcher can leave
+    # its base Python child behind. A retained child keeps one or more MCP
+    # listeners alive and can make the replacement service look healthy while
+    # tunnel traffic is still routed to the stale process.
+    $reservedPorts = @(8765, 8766, 8767)
+    $listenerPids = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+        Where-Object { $_.LocalAddress -eq "127.0.0.1" -and $_.LocalPort -in $reservedPorts } |
+        Select-Object -ExpandProperty OwningProcess -Unique)
+    foreach ($listenerPid in $listenerPids) {
+        if ($listenerPid -gt 0 -and $listenerPid -ne $PID) {
+            Stop-Process -Id $listenerPid -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    $listenerDeadline = (Get-Date).AddSeconds(5)
+    do {
+        Start-Sleep -Milliseconds 250
+        $retainedListeners = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+            Where-Object { $_.LocalAddress -eq "127.0.0.1" -and $_.LocalPort -in $reservedPorts })
+    } while ($retainedListeners.Count -gt 0 -and (Get-Date) -lt $listenerDeadline)
+    if ($retainedListeners.Count -gt 0) {
+        $retainedSummary = ($retainedListeners | ForEach-Object { "$($_.LocalAddress):$($_.LocalPort) pid=$($_.OwningProcess)" }) -join ", "
+        throw "Timed out clearing retained private MCP listeners: $retainedSummary"
+    }
 }
 
 function Start-CodingToolsPrivateServices([string]$ExpectedVersion = "") {
