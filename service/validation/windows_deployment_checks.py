@@ -364,9 +364,17 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
             raise RuntimeError(f"Web Console Local Network Access bootstrap lost contract: {local_network_contract}")
     if 'targetAddressSpace: "loopback"' not in extension_background_text:
         raise RuntimeError("Web Console background bridge must classify 127.0.0.1 as loopback")
+    if "if (false)" in extension_content_text:
+        raise RuntimeError("Web Console Local Network Access bootstrap must not be compile-time disabled")
+    if "function extensionRequest" not in extension_content_text or 'chrome.runtime.sendMessage(' not in extension_content_text:
+        raise RuntimeError("Web Console content script lost extension-background request transport")
+    if "return await extensionRequest(path, options);" not in extension_content_text:
+        raise RuntimeError("Web Console requests must prefer extension-background transport before page-context loopback")
+    if "return await directRequest(path, options);" not in extension_content_text:
+        raise RuntimeError("Web Console requests must retain direct loopback as a compatibility fallback")
     for content_bridge_contract in ('http://127.0.0.1:8768', 'targetAddressSpace: "loopback"', 'X-Coding-Tools-Console'):
         if content_bridge_contract not in extension_content_text:
-            raise RuntimeError(f"Web Console content script lost direct loopback contract: {content_bridge_contract}")
+            raise RuntimeError(f"Web Console content script lost direct loopback fallback contract: {content_bridge_contract}")
     for allowed_web_origin in ("https://chatgpt.com", "https://chat.openai.com"):
         if allowed_web_origin not in web_console_bridge_text:
             raise RuntimeError(f"Web Console bridge lost allowed web origin: {allowed_web_origin}")

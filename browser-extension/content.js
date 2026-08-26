@@ -65,7 +65,6 @@
   statusText.after(version);
   const CONSOLE_BASE = "http://127.0.0.1:8768";
 
-  if (false) {
   // Chrome 142+ requires a document from the extension origin to obtain Local
   // Network Access before its service worker can call a loopback service. Keep
   // the frame rendered (not display:none) so Chrome can surface the one-time
@@ -81,7 +80,6 @@
     connectionError = event.data.ok ? "" : String(event.data.error || "本機網路權限尚未允許");
     if (event.data.ok) poll(); else render();
   });
-  }
 
   const saved = (() => { try { return JSON.parse(localStorage.getItem("coding-tools-console-ui") || "{}"); } catch (_) { return {}; } })();
   details.checked = Boolean(saved.details);
@@ -91,7 +89,7 @@
     try { localStorage.setItem("coding-tools-console-ui", JSON.stringify({ open: shell.classList.contains("open"), details: details.checked })); } catch (_) { }
   }
 
-  function legacyRequest(path, options) {
+  function extensionRequest(path, options = {}) {
     return new Promise((resolve, reject) => {
       let settled = false;
       const timeout = setTimeout(() => {
@@ -113,7 +111,7 @@
     });
   }
 
-  async function request(path, options = {}) {
+  async function directRequest(path, options = {}) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
     try {
@@ -136,6 +134,20 @@
       throw error;
     } finally {
       clearTimeout(timeout);
+    }
+  }
+
+  async function request(path, options = {}) {
+    try {
+      return await extensionRequest(path, options);
+    } catch (extensionError) {
+      try {
+        return await directRequest(path, options);
+      } catch (directError) {
+        const extensionMessage = String(extensionError && extensionError.message || extensionError);
+        const directMessage = String(directError && directError.message || directError);
+        throw new Error(`extension: ${extensionMessage}; direct: ${directMessage}`);
+      }
     }
   }
 

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CODING MCP 主控台",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "把 coding-tools 工作紀錄與 HUMAN_HELP 直接嵌入目前網頁。",
   "permissions": ["storage"],
   "host_permissions": ["http://127.0.0.1:8768/*"],
