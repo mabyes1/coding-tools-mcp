@@ -316,10 +316,12 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
         raise RuntimeError("visible Web Console stopped acknowledging rendered HUMAN HELP prompts")
     if 'if (helpId && helpId !== lastPresentedHelpId && document.visibilityState === "visible")' not in extension_content_text:
         raise RuntimeError("visible Web Console must ACK HUMAN HELP independently of DND state")
-    if 'if (!state.dnd) {' not in extension_content_text:
-        raise RuntimeError("Web Console DND must suppress automatic opening without suppressing HUMAN HELP ACK")
+    if 'if (!state.dnd) {' in extension_content_text:
+        raise RuntimeError("Web Console DND must not suppress HUMAN HELP focus mode or automatic response-panel opening")
     if 'helpId !== lastPresentedHelpId && !state.dnd && document.visibilityState' in extension_content_text:
         raise RuntimeError("Web Console DND regressed to forcing HUMAN HELP desktop fallback")
+    if 'activeTab = "help";' not in extension_content_text or "setOpen(true);" not in extension_content_text:
+        raise RuntimeError("Web Console HUMAN HELP must force the response panel open even while DND is enabled")
     for human_help_reason_label in (
         'if (text === "permission_blocked") return "需要系統權限";',
         'if (text === "gui_required") return "需要你操作畫面";',
@@ -383,6 +385,19 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
         raise RuntimeError("Web Console content script lost extension-background request transport")
     if "return await extensionRequest(path, options);" not in extension_content_text:
         raise RuntimeError("Web Console requests must prefer extension-background transport before page-context loopback")
+    for focus_mode_contract in (
+        ".focusMask",
+        "backdrop-filter:blur(9px)",
+        "function findEscapeComposer()",
+        "function updateFocusMask()",
+        "const enabled = Boolean(state && state.human_help)",
+        'activeTab = "help";',
+        "setOpen(true);",
+    ):
+        if focus_mode_contract not in extension_content_text:
+            raise RuntimeError(f"Web Console HUMAN HELP focus mode lost contract: {focus_mode_contract}")
+    if 'helpId !== lastPresentedHelpId && document.visibilityState === "visible"' not in extension_content_text:
+        raise RuntimeError("Web Console HUMAN HELP visible-page presentation contract disappeared")
     if "return await directRequest(path, options);" not in extension_content_text:
         raise RuntimeError("Web Console requests must retain direct loopback as a compatibility fallback")
     for content_bridge_contract in ('http://127.0.0.1:8768', 'targetAddressSpace: "loopback"', 'X-Coding-Tools-Console'):

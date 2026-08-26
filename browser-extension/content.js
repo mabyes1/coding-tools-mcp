@@ -11,9 +11,12 @@
       :host{all:initial;color-scheme:dark;font-family:"Segoe UI","Microsoft JhengHei UI","Noto Sans TC",sans-serif}
       *{box-sizing:border-box}button,input,textarea{font:inherit}button{cursor:pointer}
       .edge,.shell{font-family:"Segoe UI","Microsoft JhengHei UI","Noto Sans TC",sans-serif}
+      .focusMask{position:fixed;background:#07101882;backdrop-filter:blur(9px) saturate(.7);-webkit-backdrop-filter:blur(9px) saturate(.7);pointer-events:auto;opacity:0;visibility:hidden;transition:opacity .16s ease;z-index:1}
+      .focusMask.on{opacity:1;visibility:visible}.focusMask.top{left:0;right:0;top:0}.focusMask.left,.focusMask.right{top:0}.focusMask.bottom{left:0;right:0;bottom:0}
+      .escapeHint{position:fixed;pointer-events:none;border:1px solid #79d7b04d;border-radius:18px;box-shadow:0 0 0 1px #07101866,0 0 34px #79d7b020;opacity:0;visibility:hidden;transition:opacity .16s ease;z-index:2}.escapeHint.on{opacity:1;visibility:visible}
       .edge{pointer-events:auto;position:fixed;right:0;top:42%;width:34px;height:116px;border:1px solid #344251;border-right:0;border-radius:12px 0 0 12px;background:#101820;color:#dce8f2;box-shadow:0 12px 35px #0008;display:grid;place-items:center;transition:transform .22s ease,opacity .22s ease}
       .edge:hover{background:#15212c}.edge span{writing-mode:vertical-rl;letter-spacing:.16em;font-size:11px}.edge i{position:absolute;top:13px;width:7px;height:7px;border-radius:50%;background:#7d8995}.edge i.live{background:#55d6a3;box-shadow:0 0 0 4px #55d6a31c}.edge i.attn{background:#ffb45e;animation:pulse 1.4s infinite}
-      .shell{pointer-events:auto;position:fixed;right:0;top:0;height:100vh;width:min(430px,calc(100vw - 20px));background:#0c1218;border-left:1px solid #293744;box-shadow:-24px 0 64px #0009;transform:translateX(102%);transition:transform .25s cubic-bezier(.2,.8,.2,1);display:grid;grid-template-rows:auto auto 1fr auto;color:#e8eef4}
+      .shell{pointer-events:auto;position:fixed;right:0;top:0;height:100vh;width:min(430px,calc(100vw - 20px));background:#0c1218;border-left:1px solid #293744;box-shadow:-24px 0 64px #0009;transform:translateX(102%);transition:transform .25s cubic-bezier(.2,.8,.2,1);display:grid;grid-template-rows:auto auto 1fr auto;color:#e8eef4;z-index:3}
       .shell.open{transform:translateX(0)}.shell.open~.edge{transform:translateX(110%);opacity:0}
       .header{padding:18px 18px 13px;border-bottom:1px solid #26333e;background:#101820}.titleRow{display:flex;align-items:center;gap:10px}.mark{width:24px;height:24px;border:1px solid #526679;display:grid;place-items:center;font:700 10px/1 Consolas,monospace;color:#71d9b1}.title{font-size:15px;font-weight:700;letter-spacing:.04em}.spacer{flex:1}.iconBtn{width:32px;height:32px;border:0;border-radius:7px;background:transparent;color:#94a6b7;font-size:19px}.iconBtn:hover{background:#1b2833;color:#fff}
       .sub{display:flex;align-items:center;gap:8px;margin-top:10px;color:#8496a8;font-size:11px}.statusDot{width:7px;height:7px;border-radius:50%;background:#697783}.statusDot.live{background:#55d6a3}.mode{margin-left:auto;color:#ff8f8f;font-weight:700}.mode:empty{display:none}
@@ -27,6 +30,11 @@
       @media (max-width:520px){.shell{width:100vw}.edge{top:auto;bottom:18%;height:92px}}
       @media (prefers-reduced-motion:reduce){.shell,.edge,.toast{transition:none}.edge i.attn{animation:none}}
     </style>
+    <div class="focusMask top" aria-hidden="true"></div>
+    <div class="focusMask left" aria-hidden="true"></div>
+    <div class="focusMask right" aria-hidden="true"></div>
+    <div class="focusMask bottom" aria-hidden="true"></div>
+    <div class="escapeHint" aria-hidden="true"></div>
     <aside class="shell" aria-label="CODING MCP 主控台">
       <header class="header">
         <div class="titleRow"><div class="mark">MCP</div><div class="title">CODING MCP 主控台</div><div class="spacer"></div><button class="iconBtn close" title="收合">×</button></div>
@@ -49,6 +57,8 @@
   const details = $(".details");
   const dnd = $(".dnd");
   const badge = $(".badge");
+  const focusMasks = Array.from(root.querySelectorAll(".focusMask"));
+  const escapeHint = $(".escapeHint");
   let state = null;
   let activeTab = "activity";
   let connected = false;
@@ -57,6 +67,7 @@
   let pollTimer = null;
   let connectionError = "";
   let allowHelpInputFocus = false;
+  let focusMaskRaf = 0;
   const REQUEST_TIMEOUT_MS = 5000;
   const version = document.createElement("span");
   version.className = "version";
@@ -155,6 +166,62 @@
     shell.classList.toggle("open", open);
     persist();
     if (open) setTimeout(() => { body.scrollTop = body.scrollHeight; }, 20);
+  }
+
+  function findEscapeComposer() {
+    const candidates = Array.from(document.querySelectorAll(
+      '#prompt-textarea, textarea, [contenteditable="true"], [role="textbox"]'
+    ));
+    let best = null;
+    let bestScore = -Infinity;
+    for (const node of candidates) {
+      if (!(node instanceof HTMLElement) || host.contains(node)) continue;
+      const rect = node.getBoundingClientRect();
+      if (rect.width < 180 || rect.height < 24 || rect.bottom < window.innerHeight * .58) continue;
+      const style = getComputedStyle(node);
+      if (style.visibility === "hidden" || style.display === "none") continue;
+      const score = rect.bottom * 3 + rect.width - Math.abs(window.innerWidth / 2 - (rect.left + rect.width / 2));
+      if (score > bestScore) { best = node; bestScore = score; }
+    }
+    return best;
+  }
+
+  function updateFocusMask() {
+    cancelAnimationFrame(focusMaskRaf);
+    focusMaskRaf = requestAnimationFrame(() => {
+      const enabled = Boolean(state && state.human_help);
+      if (!enabled) {
+        focusMasks.forEach((node) => node.classList.remove("on"));
+        escapeHint.classList.remove("on");
+        return;
+      }
+      const composer = findEscapeComposer();
+      const rect = composer ? composer.getBoundingClientRect() : null;
+      const padX = 22;
+      const padY = 14;
+      const hole = rect ? {
+        left: Math.max(0, rect.left - padX),
+        right: Math.min(window.innerWidth, rect.right + padX),
+        top: Math.max(0, rect.top - padY),
+        bottom: Math.min(window.innerHeight, rect.bottom + padY),
+      } : {
+        left: Math.max(12, window.innerWidth * .27),
+        right: Math.min(window.innerWidth - 12, window.innerWidth * .73),
+        top: Math.max(0, window.innerHeight - 132),
+        bottom: window.innerHeight,
+      };
+      const top = $(".focusMask.top");
+      const left = $(".focusMask.left");
+      const right = $(".focusMask.right");
+      const bottom = $(".focusMask.bottom");
+      top.style.height = `${hole.top}px`;
+      left.style.left = "0"; left.style.top = `${hole.top}px`; left.style.width = `${hole.left}px`; left.style.height = `${Math.max(0, hole.bottom - hole.top)}px`;
+      right.style.left = `${hole.right}px`; right.style.top = `${hole.top}px`; right.style.right = "0"; right.style.height = `${Math.max(0, hole.bottom - hole.top)}px`;
+      bottom.style.top = `${hole.bottom}px`;
+      escapeHint.style.left = `${hole.left}px`; escapeHint.style.top = `${hole.top}px`; escapeHint.style.width = `${Math.max(0, hole.right - hole.left)}px`; escapeHint.style.height = `${Math.max(0, hole.bottom - hole.top)}px`;
+      focusMasks.forEach((node) => node.classList.add("on"));
+      escapeHint.classList.add("on");
+    });
   }
 
   function toast(message) {
@@ -313,6 +380,7 @@
     mode.textContent = state && state.permission_mode === "dangerous" ? "YOLO MODE" : "";
     dnd.checked = Boolean(state && state.dnd);
     const help = state && state.human_help;
+    updateFocusMask();
     badge.hidden = !help;
     edge.querySelector("i").className = help ? "attn" : connected ? "live" : "";
     if (activeTab === "help") renderHelp(); else renderActivity();
@@ -341,10 +409,8 @@
       const helpId = state.human_help && state.human_help.request_id || "";
       if (helpId && helpId !== lastPresentedHelpId && document.visibilityState === "visible") {
         helpToAcknowledge = helpId;
-        if (!state.dnd) {
-          activeTab = "help";
-          setOpen(true);
-        }
+        activeTab = "help";
+        setOpen(true);
       }
       if (!helpId) lastPresentedHelpId = "";
     } catch (error) { connected = false; state = null; connectionError = String(error && error.message || error); }
@@ -386,5 +452,7 @@
     catch (error) { toast(`清除失敗：${error.message}`); }
   };
   chrome.runtime.onMessage.addListener((message) => { if (message && message.type === "coding-tools-console-toggle") setOpen(!shell.classList.contains("open")); });
+  window.addEventListener("resize", updateFocusMask);
+  window.addEventListener("scroll", updateFocusMask, true);
   poll();
 })();
