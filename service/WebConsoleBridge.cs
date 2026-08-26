@@ -82,7 +82,14 @@ internal sealed class WebConsoleBridge
             return;
         }
 
-        if (!IsAllowedOrigin(origin) || !String.Equals(Header(request, "X-Coding-Tools-Console"), "1", StringComparison.Ordinal))
+        var consoleClient = String.Equals(Header(request, "X-Coding-Tools-Console"), "1", StringComparison.Ordinal);
+        var extensionClient = String.Equals(Header(request, "X-Coding-Tools-Extension"), "1", StringComparison.Ordinal);
+        // Chromium extension service-worker fetches may omit Origin entirely,
+        // even when host_permissions allow the loopback request. Keep normal
+        // browser callers origin-checked, and only admit the originless case
+        // when the dedicated extension transport marker is also present.
+        var originlessExtensionClient = String.IsNullOrWhiteSpace(origin) && extensionClient;
+        if ((!IsAllowedOrigin(origin) && !originlessExtensionClient) || !consoleClient)
         {
             WriteJson(stream, 403, new Dictionary<string, object> { { "ok", false }, { "error", "console_client_required" } }, "");
             return;
@@ -327,7 +334,7 @@ internal sealed class WebConsoleBridge
         headers.Append("Content-Length: ").Append(body.Length).Append("\r\n");
         headers.Append("Cache-Control: no-store\r\n");
         headers.Append("Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n");
-        headers.Append("Access-Control-Allow-Headers: Content-Type, X-Coding-Tools-Console\r\n");
+        headers.Append("Access-Control-Allow-Headers: Content-Type, X-Coding-Tools-Console, X-Coding-Tools-Extension\r\n");
         headers.Append("Access-Control-Allow-Private-Network: true\r\n");
         if (!String.IsNullOrWhiteSpace(origin)) headers.Append("Access-Control-Allow-Origin: ").Append(origin).Append("\r\nVary: Origin\r\n");
         headers.Append("Connection: close\r\n\r\n");

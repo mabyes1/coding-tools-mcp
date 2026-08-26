@@ -9,6 +9,7 @@ async function consoleRequest(path, options = {}) {
       method: options.method || "GET",
       headers: {
         "X-Coding-Tools-Console": "1",
+        "X-Coding-Tools-Extension": "1",
         ...(options.body ? { "Content-Type": "application/json" } : {})
       },
       body: options.body ? JSON.stringify(options.body) : undefined,

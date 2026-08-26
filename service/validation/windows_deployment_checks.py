@@ -364,6 +364,19 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
             raise RuntimeError(f"Web Console Local Network Access bootstrap lost contract: {local_network_contract}")
     if 'targetAddressSpace: "loopback"' not in extension_background_text:
         raise RuntimeError("Web Console background bridge must classify 127.0.0.1 as loopback")
+    if '"X-Coding-Tools-Extension": "1"' not in extension_background_text:
+        raise RuntimeError("Web Console extension transport lost its originless service-worker marker")
+    for extension_originless_contract in (
+        'Header(request, "X-Coding-Tools-Extension")',
+        "originlessExtensionClient",
+        "String.IsNullOrWhiteSpace(origin) && extensionClient",
+    ):
+        if extension_originless_contract not in web_console_bridge_text:
+            raise RuntimeError(f"Web Console bridge lost originless extension authentication contract: {extension_originless_contract}")
+    if "(!IsAllowedOrigin(origin) && !originlessExtensionClient) || !consoleClient" not in web_console_bridge_text:
+        raise RuntimeError("Web Console bridge must preserve Origin checks except for marked extension service-worker requests")
+    if "X-Coding-Tools-Console, X-Coding-Tools-Extension" not in web_console_bridge_text:
+        raise RuntimeError("Web Console CORS allowlist lost the extension transport marker header")
     if "if (false)" in extension_content_text:
         raise RuntimeError("Web Console Local Network Access bootstrap must not be compile-time disabled")
     if "function extensionRequest" not in extension_content_text or 'chrome.runtime.sendMessage(' not in extension_content_text:
