@@ -64,6 +64,78 @@ def run_patch_checks(server: Any, find_subsequence_all: Callable[[list[str], lis
             if patch_runtime.patch_baselines != baselines_before_dry_run:
                 raise RuntimeError("apply_patch dry-run baseline contract drifted")
 
+            ambiguous = patch_project / "ambiguous.txt"
+            ambiguous.write_text("head\ntarget\nomega\nmiddle\ntarget\nomega\ntail\n", encoding="utf-8")
+            try:
+                patch_runtime.apply_patch(
+                    {
+                        "patch": "\n".join(
+                            [
+                                "*** Begin Patch",
+                                "*** Update File: ambiguous.txt",
+                                "@@",
+                                "-target",
+                                "+changed",
+                                " omega",
+                                "*** End Patch",
+                            ]
+                        )
+                    }
+                )
+            except server.ToolFailure as exc:
+                if exc.code != "PATCH_CONTEXT_AMBIGUOUS":
+                    raise RuntimeError("ambiguous patch context returned the wrong error") from exc
+                if exc.details.get("candidate_lines") != [2, 5]:
+                    raise RuntimeError("ambiguous patch context stopped reporting candidate line numbers") from exc
+                if "@@ -120,3 +120,3 @@" not in str(exc.details.get("retry_hint") or ""):
+                    raise RuntimeError("ambiguous patch context stopped teaching the agent to use a location hint") from exc
+            else:
+                raise RuntimeError("ambiguous patch context was silently guessed without a location hint")
+
+            located = patch_runtime.apply_patch(
+                {
+                    "patch": "\n".join(
+                        [
+                            "*** Begin Patch",
+                            "*** Update File: ambiguous.txt",
+                            "@@ -5,2 +5,2 @@",
+                            "-target",
+                            "+changed",
+                            " omega",
+                            "*** End Patch",
+                        ]
+                    )
+                }
+            )
+            if ambiguous.read_text(encoding="utf-8") != "head\ntarget\nomega\nmiddle\nchanged\nomega\ntail\n":
+                raise RuntimeError("unified hunk line hint did not select the nearest exact context match")
+            if located.get("additions") != 1 or located.get("removals") != 1:
+                raise RuntimeError("location-hinted patch result accounting drifted")
+
+            tied = patch_project / "tied.txt"
+            tied.write_text("head\ntarget\nomega\na\nb\ntarget\nomega\ntail\n", encoding="utf-8")
+            try:
+                patch_runtime.apply_patch(
+                    {
+                        "patch": "\n".join(
+                            [
+                                "*** Begin Patch",
+                                "*** Update File: tied.txt",
+                                "@@ -4,2 +4,2 @@",
+                                "-target",
+                                "+changed",
+                                " omega",
+                                "*** End Patch",
+                            ]
+                        )
+                    }
+                )
+            except server.ToolFailure as exc:
+                if exc.code != "PATCH_CONTEXT_AMBIGUOUS" or exc.details.get("candidate_lines") != [2, 6]:
+                    raise RuntimeError("equidistant location hint stopped failing safely with candidate lines") from exc
+            else:
+                raise RuntimeError("equidistant location hint guessed between identical patch contexts")
+
             moved = patch_runtime.apply_patch(
                 {
                     "patch": "\n".join(

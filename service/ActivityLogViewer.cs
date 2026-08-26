@@ -452,12 +452,20 @@ internal sealed class ActivityLogViewerForm : Form
         var detail = parts.Length > 1 ? String.Join(" · ", parts, 1, parts.Length - 1) : "";
         var label = ToolLabel(tool);
 
+        if (tool == "HUMAN HELP")
+        {
+            var helpParts = new List<string>();
+            if (parts.Length > 1 && !String.IsNullOrWhiteSpace(parts[1]))
+                helpParts.Add(HumanHelpReason(parts[1].Trim()));
+            if (parts.Length > 2 && !String.IsNullOrWhiteSpace(parts[2]))
+                helpParts.Add(Shorten(parts[2].Trim(), 220));
+            return helpParts.Count == 0 ? label : label + "  ·  " + String.Join("  ·  ", helpParts.ToArray());
+        }
+
         if (tool == "exec_command")
             detail = detail == "active_user" ? "桌面" : detail == "service" ? "背景" : detail;
         else if (tool == "browser_use" || tool == "computer_use")
             detail = ActionLabel(detail);
-        else if (tool == "HUMAN HELP")
-            detail = HumanHelpReason(detail);
 
         return String.IsNullOrWhiteSpace(detail) ? label : label + "  ·  " + detail;
     }
@@ -468,9 +476,12 @@ internal sealed class ActivityLogViewerForm : Form
         if (parts.Length == 0) return "完成";
 
         var pieces = new List<string>();
+        var tool = parts[0].Trim();
+        if (tool == "HUMAN HELP") pieces.Add(ToolLabel(tool));
         for (int i = 1; i < parts.Length; i++)
         {
             var item = parts[i].Trim();
+            if (tool == "HUMAN HELP" && i == 1) item = HumanHelpReason(item);
             if (item == "active_user" || item == "service") continue;
             if (item == "ok") item = "完成";
             if (item == "failed") item = "失敗";

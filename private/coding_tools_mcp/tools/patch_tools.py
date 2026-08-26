@@ -122,7 +122,7 @@ def apply_patch_tool(
                 assert content is not None
                 updated = apply_update_hunks(content, op.hunks, op.path)
                 for hunk in op.hunks:
-                    for line in hunk:
+                    for line in hunk.lines:
                         additions += line.startswith("+")
                         removals += line.startswith("-")
                 source_mode = prior.mode if prior is not None else baseline.mode

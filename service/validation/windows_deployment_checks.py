@@ -308,6 +308,15 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
         raise RuntimeError("background Web Console tabs must not suppress desktop HUMAN HELP fallback")
     if 'request("/v1/human-help/seen"' not in extension_content_text:
         raise RuntimeError("visible Web Console stopped acknowledging rendered HUMAN HELP prompts")
+    for human_help_reason_label in (
+        'if (text === "permission_blocked") return "需要系統權限";',
+        'if (text === "gui_required") return "需要你操作畫面";',
+        'if (text === "faster_by_human") return "這一步你做比較快";',
+        'if (text === "need_information") return "需要你提供資訊";',
+        'if (text === "need_decision") return "需要你決定";',
+    ):
+        if human_help_reason_label not in extension_content_text:
+            raise RuntimeError(f"Web Console HUMAN HELP reason label regressed: {human_help_reason_label}")
     web_help_attempt_index = interactive_broker_text.find("Try-HandleHumanHelpInWebConsole $RequestId")
     desktop_help_index = interactive_broker_text.find("Add-Type -AssemblyName System.Windows.Forms")
     if web_help_attempt_index < 0 or desktop_help_index < 0 or web_help_attempt_index > desktop_help_index:

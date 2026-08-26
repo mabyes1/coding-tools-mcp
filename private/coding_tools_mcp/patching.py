@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import stat
 import tempfile
 from dataclasses import dataclass, field
@@ -19,14 +20,21 @@ class PatchOperation:
     kind: str
     path: str
     add_content: str | None = None
-    hunks: list[list[str]] = field(default_factory=list)
+    hunks: list[PatchHunk] = field(default_factory=list)
     move_to: str | None = None
+
+
+@dataclass(frozen=True)
+class PatchHunk:
+    lines: list[str]
+    old_start: int | None = None
 
 
 @dataclass(frozen=True)
 class ParsedHunk:
     old: list[str]
     new: list[str]
+    old_start: int | None = None
 
 
 @dataclass(frozen=True)
@@ -307,25 +315,27 @@ def parse_patch(patch: str) -> list[PatchOperation]:
             if i < len(lines) - 1 and lines[i].startswith("*** Move to: "):
                 move_to = lines[i].removeprefix("*** Move to: ").strip()
                 i += 1
-            hunks: list[list[str]] = []
+            hunks: list[PatchHunk] = []
             current: list[str] = []
+            current_old_start: int | None = None
             while i < len(lines) - 1 and not lines[i].startswith("*** "):
                 if lines[i].startswith("@@"):
                     if current:
-                        hunks.append(current)
+                        hunks.append(PatchHunk(current, current_old_start))
                     current = []
+                    current_old_start = parse_hunk_old_start(lines[i])
                 else:
                     current.append(lines[i])
                 i += 1
             if current:
-                hunks.append(current)
+                hunks.append(PatchHunk(current, current_old_start))
             operations.append(PatchOperation("update", path, hunks=hunks, move_to=move_to))
             continue
         raise ToolFailure("PATCH_FAILED", f"Unrecognized patch line: {line}", category="validation")
     return operations
 
 
-def apply_update_hunks(content: str, hunks: list[list[str]], path: str = "<patch>") -> str:
+def apply_update_hunks(content: str, hunks: list[PatchHunk], path: str = "<patch>") -> str:
     if not hunks:
         return content
     bom, text = strip_bom(content)
@@ -350,17 +360,32 @@ def apply_update_hunks(content: str, hunks: list[list[str]], path: str = "<patch
                     "retry_hint": "Read the current file and regenerate this hunk with current context.",
                 },
             )
+        if len(matches) > 1 and hunk.old_start is not None:
+            hint_index = max(0, hunk.old_start - 1)
+            minimum_distance = min(abs(match - hint_index) for match in matches)
+            closest = [match for match in matches if abs(match - hint_index) == minimum_distance]
+            if len(closest) == 1:
+                matches = closest
         if len(matches) > 1:
+            candidate_lines = [match + 1 for match in matches[:50]]
+            retry_hint = (
+                "Adjust the unified hunk line hint or include additional unchanged context lines."
+                if hunk.old_start is not None
+                else "Use a standard unified hunk header such as @@ -120,3 +120,3 @@ or include additional unchanged context lines."
+            )
             raise ToolFailure(
                 "PATCH_CONTEXT_AMBIGUOUS",
-                f"Patch context matched {len(matches)} locations in {path}; add more context.",
+                f"Patch context matched {len(matches)} locations in {path} at lines {candidate_lines}; add a location hint or more context.",
                 category="validation",
                 retryable=True,
                 details={
                     "path": path,
                     "hunk_index": index,
                     "match_count": len(matches),
-                    "retry_hint": "Include additional unchanged context lines to make this hunk unique.",
+                    "candidate_lines": candidate_lines,
+                    "candidate_lines_truncated": len(matches) > len(candidate_lines),
+                    "location_hint_line": hunk.old_start,
+                    "retry_hint": retry_hint,
                 },
             )
         start = matches[0]
@@ -398,10 +423,18 @@ def apply_update_hunks(content: str, hunks: list[list[str]], path: str = "<patch
     return bom + restore_line_endings(updated, line_ending)
 
 
-def parse_update_hunk(hunk: list[str]) -> ParsedHunk:
+UNIFIED_HUNK_HEADER_RE = re.compile(r"^@@\s+-(\d+)(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@(?:\s.*)?$")
+
+
+def parse_hunk_old_start(header: str) -> int | None:
+    match = UNIFIED_HUNK_HEADER_RE.match(header.strip())
+    return int(match.group(1)) if match else None
+
+
+def parse_update_hunk(hunk: PatchHunk) -> ParsedHunk:
     old: list[str] = []
     new: list[str] = []
-    for raw in hunk:
+    for raw in hunk.lines:
         if raw == "*** End of File":
             continue
         if not raw:
@@ -417,7 +450,7 @@ def parse_update_hunk(hunk: list[str]) -> ParsedHunk:
             new.append(value)
         else:
             raise ToolFailure("PATCH_FAILED", "Update lines must start with space, '-' or '+'.", category="validation")
-    return ParsedHunk(old=old, new=new)
+    return ParsedHunk(old=old, new=new, old_start=hunk.old_start)
 
 
 def find_subsequence_all(lines: list[str], needle: list[str]) -> list[int]:

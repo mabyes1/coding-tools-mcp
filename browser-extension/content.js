@@ -161,6 +161,12 @@
     const text = String(value || "").trim();
     if (text === "active_user") return "桌面";
     if (text === "service") return "背景";
+    if (text === "permission_blocked") return "需要系統權限";
+    if (text === "gui_required") return "需要你操作畫面";
+    if (text === "physical_action") return "需要實體操作";
+    if (text === "faster_by_human") return "這一步你做比較快";
+    if (text === "need_information") return "需要你提供資訊";
+    if (text === "need_decision") return "需要你決定";
     if (text === "ok") return "完成";
     if (text === "failed") return "失敗";
     if (text === "human_action_required") return "等待你操作";

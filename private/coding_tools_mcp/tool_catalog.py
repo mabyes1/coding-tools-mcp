@@ -142,7 +142,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "apply_patch": ToolSpec(
         title="Apply patch",
-        description="Use for all direct file edits. Relative patch paths use the persistent default cwd; changes are validated and applied atomically. Set intent to a short user-facing edit reason.",
+        description="Use for direct file edits; paths use default cwd and changes are atomic. For repeated context, use unified hunk hints like @@ -120,3 +120,3 @@; exact context must still match. Set intent.",
         destructive=True,
     ),
     "exec_command": ToolSpec(

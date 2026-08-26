@@ -5,7 +5,7 @@ import json
 from typing import Any
 
 
-EXPECTED_PUBLIC_CONTRACT_SHA256 = "c8e1eae942b00f8752ebc9e8dee6e944af462d218b325cf174a3021498910419"
+EXPECTED_PUBLIC_CONTRACT_SHA256 = "23737db68b2d98b39abe1d962bcb3a53f3abb8f261376797f51beb5ed7b8924e"
 
 
 def run_catalog_checks(server: Any, elevated_actions: Any, activity_module: Any) -> dict[str, tuple[str, ...]]:
@@ -122,6 +122,28 @@ def run_catalog_checks(server: Any, elevated_actions: Any, activity_module: Any)
     ):
         if not any(activity_intent in line for line in lines):
             raise RuntimeError(f"Web Console activity intent disappeared from {label} rendering")
+
+    human_request = "Start the existing Tunnel-Coding task"
+    human_args = {"reason": "faster_by_human", "request": human_request}
+    human_start = activity_module._activity_start_lines("human_help_me", human_args)
+    human_done = activity_module._activity_log_lines(
+        "human_help_me",
+        human_args,
+        {"ok": True, "status": "human_action_required"},
+        12,
+    )
+    for label, lines in (("human help start", human_start), ("human help done", human_done)):
+        if not any(human_request in line for line in lines):
+            raise RuntimeError(f"Web Console HUMAN HELP request summary disappeared from {label} rendering")
+
+    sensitive_human_request = "Use api_key=sk-1234567890abcdef for this diagnostic"
+    sensitive_human_lines = activity_module._activity_start_lines(
+        "human_help_me",
+        {"reason": "need_information", "request": sensitive_human_request},
+    )
+    sensitive_rendered = "\n".join(sensitive_human_lines)
+    if "sk-1234567890abcdef" in sensitive_rendered or "[REDACTED]" not in sensitive_rendered:
+        raise RuntimeError("Web Console HUMAN HELP request summary leaked a sensitive value")
     permission_schema = schemas["request_permissions"]["properties"]["permission"]
     if "interactive_session" not in permission_schema.get("enum", []):
         raise RuntimeError("interactive_session permission is missing from request_permissions schema")

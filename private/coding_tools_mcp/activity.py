@@ -90,6 +90,12 @@ def _activity_tail(value: Any, *, max_lines: int = 10, max_chars: int = 1800) ->
         used += len(clipped)
     return result
 
+
+def _human_help_request_summary(args: dict[str, Any]) -> str:
+    request = sanitize_activity_text(args.get("request", ""), max_chars=240)
+    request = re.sub(r"\s+", " ", request).strip().replace(" · ", " / ")
+    return request if len(request) <= 180 else request[:179] + "…"
+
 def _activity_log_lines(
     name: str,
     args: dict[str, Any],
@@ -174,8 +180,10 @@ def _activity_log_lines(
 
     if name == "human_help_me":
         reason = sanitize_activity_text(args.get("reason", ""), max_chars=120)
+        request = _human_help_request_summary(args)
+        request_part = f" · {request}" if request else ""
         lines.append(
-            f"[{stamp}] {marker} HUMAN HELP · {reason} · {payload.get('status') or payload.get('outcome') or 'done'} · {duration_ms} ms"
+            f"[{stamp}] {marker} HUMAN HELP · {reason}{request_part} · {payload.get('status') or payload.get('outcome') or 'done'} · {duration_ms} ms"
         )
         return lines
 
@@ -211,7 +219,10 @@ def _activity_start_lines(name: str, args: dict[str, Any]) -> list[str]:
     if name in {"list_files", "list_dir"} or name.startswith("git_"):
         return [f"[{stamp}] ▶ {name} · {sanitize_activity_text(args.get('path', '.'), max_chars=320)}"]
     if name == "human_help_me":
-        return [f"[{stamp}] ▶ HUMAN HELP · {sanitize_activity_text(args.get('reason', ''), max_chars=120)}"]
+        reason = sanitize_activity_text(args.get("reason", ""), max_chars=120)
+        request = _human_help_request_summary(args)
+        request_part = f" · {request}" if request else ""
+        return [f"[{stamp}] ▶ HUMAN HELP · {reason}{request_part}"]
     return [f"[{stamp}] ▶ {name}"]
 
 def _prepare_activity_log_for_write() -> None:
