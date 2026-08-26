@@ -303,13 +303,17 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
         raise RuntimeError("HUMAN HELP stopped preferring the in-page Web Console")
     if "GetLastWriteTimeUtc($webConsoleHeartbeat)" not in interactive_broker_text:
         raise RuntimeError("Web Console liveness must use heartbeat metadata instead of contended content reads")
-    for web_help_delivery_contract in ("HUMAN_HELP_WEB_SEEN", "HUMAN_HELP_WEB_NOT_SEEN", ".web-human-help.seen"):
+    for web_help_delivery_contract in ("HUMAN_HELP_WEB_SEEN", "HUMAN_HELP_WEB_NOT_SEEN", ".web-human-help.seen", ".web-human-help.activity", "HUMAN_HELP_WEB_ACTIVITY"):
         if web_help_delivery_contract not in interactive_broker_text:
             raise RuntimeError(f"HUMAN HELP web delivery handshake lost broker contract: {web_help_delivery_contract}")
     if ".web-human-help.seen" not in web_console_bridge_text:
         raise RuntimeError("Web Console bridge stopped acknowledging delivered HUMAN HELP prompts")
     if 'request.Path == "/v1/human-help/seen"' not in web_console_bridge_text:
         raise RuntimeError("Web Console bridge must require an explicit HUMAN HELP delivery acknowledgement")
+    if 'request.Path == "/v1/human-help/activity"' not in web_console_bridge_text:
+        raise RuntimeError("Web Console bridge must accept HUMAN HELP input activity heartbeats")
+    if "ToUnixTimeMilliseconds" not in web_console_bridge_text:
+        raise RuntimeError("Web Console HUMAN HELP activity must use monotonic-enough millisecond timestamps")
     if 'document.visibilityState === "visible"' not in extension_content_text:
         raise RuntimeError("background Web Console tabs must not suppress desktop HUMAN HELP fallback")
     if 'request("/v1/human-help/seen"' not in extension_content_text:
@@ -322,6 +326,15 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
         raise RuntimeError("Web Console DND regressed to forcing HUMAN HELP desktop fallback")
     if 'activeTab = "help";' not in extension_content_text or "setOpen(true);" not in extension_content_text:
         raise RuntimeError("Web Console HUMAN HELP must force the response panel open even while DND is enabled")
+    for input_activity_contract in (
+        "HELP_ACTIVITY_THROTTLE_MS",
+        "function noteHumanHelpActivity(requestId)",
+        'request("/v1/human-help/activity"',
+        '"keydown", "input", "paste", "compositionupdate"',
+        "noteEscapeComposerActivity",
+    ):
+        if input_activity_contract not in extension_content_text:
+            raise RuntimeError(f"Web Console HUMAN HELP input activity reset contract regressed: {input_activity_contract}")
     for human_help_reason_label in (
         'if (text === "permission_blocked") return "需要系統權限";',
         'if (text === "gui_required") return "需要你操作畫面";',

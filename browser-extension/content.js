@@ -68,7 +68,9 @@
   let connectionError = "";
   let allowHelpInputFocus = false;
   let focusMaskRaf = 0;
+  let lastHelpActivitySentAt = 0;
   const REQUEST_TIMEOUT_MS = 5000;
+  const HELP_ACTIVITY_THROTTLE_MS = 300;
   const version = document.createElement("span");
   version.className = "version";
   version.textContent = `v${chrome.runtime.getManifest().version}`;
@@ -353,9 +355,13 @@
     const textarea = document.createElement("textarea"); textarea.placeholder = "輸入結果、補充資訊，或描述你完成了什麼…";
     textarea.tabIndex = -1;
     textarea.addEventListener("pointerdown", () => {
+      noteHumanHelpActivity(help.request_id);
       allowHelpInputFocus = true;
       textarea.tabIndex = 0;
     });
+    for (const eventName of ["keydown", "input", "paste", "compositionupdate"]) {
+      textarea.addEventListener(eventName, () => noteHumanHelpActivity(help.request_id));
+    }
     textarea.addEventListener("focus", () => {
       if (allowHelpInputFocus) return;
       textarea.blur();
@@ -392,6 +398,24 @@
       toast("已交還代理，工作會繼續進行");
       await poll();
     } catch (error) { toast(`送出失敗：${error.message}`); }
+  }
+
+  function noteHumanHelpActivity(requestId) {
+    if (!requestId) return;
+    const now = Date.now();
+    if (now - lastHelpActivitySentAt < HELP_ACTIVITY_THROTTLE_MS) return;
+    lastHelpActivitySentAt = now;
+    request("/v1/human-help/activity", { method:"POST", body:{ request_id:requestId } }).catch(() => {});
+  }
+
+  function isEditableTarget(target) {
+    if (!(target instanceof HTMLElement) || host.contains(target)) return false;
+    return target.matches("textarea,input,[contenteditable='true'],[role='textbox']") || Boolean(target.closest("textarea,input,[contenteditable='true'],[role='textbox']"));
+  }
+
+  function noteEscapeComposerActivity(event) {
+    const helpId = state && state.human_help && state.human_help.request_id || "";
+    if (helpId && isEditableTarget(event.target)) noteHumanHelpActivity(helpId);
   }
 
   async function poll() {
@@ -452,6 +476,9 @@
     catch (error) { toast(`清除失敗：${error.message}`); }
   };
   chrome.runtime.onMessage.addListener((message) => { if (message && message.type === "coding-tools-console-toggle") setOpen(!shell.classList.contains("open")); });
+  for (const eventName of ["keydown", "input", "paste", "compositionupdate", "pointerdown"]) {
+    document.addEventListener(eventName, noteEscapeComposerActivity, true);
+  }
   window.addEventListener("resize", updateFocusMask);
   window.addEventListener("scroll", updateFocusMask, true);
   poll();

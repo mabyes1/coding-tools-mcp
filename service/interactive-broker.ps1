@@ -183,6 +183,7 @@ function Try-HandleHumanHelpInWebConsole([string]$RequestId, $Request, [int]$Tim
     $pendingPath = Join-Path $queueRoot "$RequestId.web-human-help.json"
     $webResponsePath = Join-Path $queueRoot "$RequestId.web-human-help.response"
     $webSeenPath = Join-Path $queueRoot "$RequestId.web-human-help.seen"
+    $webActivityPath = Join-Path $queueRoot "$RequestId.web-human-help.activity"
     $payload = @{
         protocol = $protocolVersion
         request_id = $RequestId
@@ -208,6 +209,7 @@ function Try-HandleHumanHelpInWebConsole([string]$RequestId, $Request, [int]$Tim
         }
         Write-BrokerLog "HUMAN_HELP_WEB_SEEN id=$RequestId"
         $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+        $lastWebActivityUtc = [DateTime]::MinValue
         while ([DateTimeOffset]::UtcNow -lt $deadline) {
             if (Test-Path -LiteralPath $webResponsePath -PathType Leaf) {
                 $webResponse = [IO.File]::ReadAllText($webResponsePath, [Text.UTF8Encoding]::new($false)) | ConvertFrom-Json
@@ -229,6 +231,14 @@ function Try-HandleHumanHelpInWebConsole([string]$RequestId, $Request, [int]$Tim
                 }
                 Write-BrokerLog "HUMAN_HELP_WEB_END id=$RequestId outcome=$outcome"
                 return $true
+            }
+            if (Test-Path -LiteralPath $webActivityPath -PathType Leaf) {
+                $webActivityUtc = (Get-Item -LiteralPath $webActivityPath -ErrorAction SilentlyContinue).LastWriteTimeUtc
+                if ($null -ne $webActivityUtc -and $webActivityUtc -gt $lastWebActivityUtc) {
+                    $lastWebActivityUtc = $webActivityUtc
+                    $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+                    Write-BrokerLog "HUMAN_HELP_WEB_ACTIVITY id=$RequestId timeout_reset=$TimeoutSeconds"
+                }
             }
             Start-Sleep -Milliseconds 100
         }
@@ -253,7 +263,7 @@ function Try-HandleHumanHelpInWebConsole([string]$RequestId, $Request, [int]$Tim
         return $false
     }
     finally {
-        Remove-Item -LiteralPath $pendingPath,$webResponsePath,$webSeenPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $pendingPath,$webResponsePath,$webSeenPath,$webActivityPath -Force -ErrorAction SilentlyContinue
     }
 }
 

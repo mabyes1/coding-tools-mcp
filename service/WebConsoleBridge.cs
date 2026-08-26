@@ -129,6 +129,25 @@ internal sealed class WebConsoleBridge
             WriteJson(stream, 200, new Dictionary<string, object> { { "ok", true } }, origin);
             return;
         }
+        if (request.Method == "POST" && request.Path == "/v1/human-help/activity")
+        {
+            var body = DeserializeBody(request);
+            var requestId = body.ContainsKey("request_id") ? Convert.ToString(body["request_id"]) : "";
+            if (!Regex.IsMatch(requestId, "^[A-Za-z0-9_-]{8,80}$"))
+            {
+                WriteJson(stream, 400, new Dictionary<string, object> { { "ok", false }, { "error", "invalid_request_id" } }, origin);
+                return;
+            }
+            var pendingPath = Path.Combine(_queueRoot, requestId + ".web-human-help.json");
+            if (!File.Exists(pendingPath))
+            {
+                WriteJson(stream, 409, new Dictionary<string, object> { { "ok", false }, { "error", "request_not_pending" } }, origin);
+                return;
+            }
+            WriteTextAtomic(Path.Combine(_queueRoot, requestId + ".web-human-help.activity"), DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString());
+            WriteJson(stream, 200, new Dictionary<string, object> { { "ok", true } }, origin);
+            return;
+        }
         if (request.Method == "POST" && request.Path == "/v1/preferences")
         {
             var body = DeserializeBody(request);
