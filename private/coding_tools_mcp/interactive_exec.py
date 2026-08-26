@@ -262,6 +262,7 @@ def request_human_help(
     request_id = secrets.token_urlsafe(18)
     request_path = queue / f"{request_id}.request"
     response_path = queue / f"{request_id}.response"
+    activity_path = queue / f"{request_id}.web-human-help.activity"
     payload = {
         "protocol": INTERACTIVE_PROTOCOL_VERSION,
         "request_id": request_id,
@@ -288,6 +289,7 @@ def request_human_help(
         ) from exc
 
     deadline = time.monotonic() + timeout + 10.0
+    last_activity_mtime_ns = 0
     try:
         while time.monotonic() < deadline:
             if response_path.exists():
@@ -321,10 +323,21 @@ def request_human_help(
                         details={"request_id": request_id, "broker": status},
                     )
                 return response
+            try:
+                activity_mtime_ns = activity_path.stat().st_mtime_ns
+            except OSError:
+                activity_mtime_ns = 0
+            if activity_mtime_ns > last_activity_mtime_ns:
+                last_activity_mtime_ns = activity_mtime_ns
+                deadline = time.monotonic() + timeout + 10.0
             time.sleep(0.1)
     finally:
         try:
             request_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            activity_path.unlink(missing_ok=True)
         except OSError:
             pass
 

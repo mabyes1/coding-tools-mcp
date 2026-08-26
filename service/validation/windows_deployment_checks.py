@@ -282,6 +282,7 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
     extension_content_text = (browser_extension_root / "content.js").read_text(encoding="utf-8")
     extension_bridge_text = (browser_extension_root / "bridge-frame.js").read_text(encoding="utf-8")
     desktop_tool_text = (package_parent / "coding_tools_mcp" / "tools" / "desktop.py").read_text(encoding="utf-8")
+    interactive_exec_text = (package_parent / "coding_tools_mcp" / "interactive_exec.py").read_text(encoding="utf-8")
     if "System.Management.Automation.Language.Parser]::ParseInput" not in interactive_broker_text:
         raise RuntimeError("active_user exec must reject PowerShell syntax errors before launching the child shell")
     for action in sorted(set(action_contract["computer_use"]) | set(action_contract["browser_use"])):
@@ -306,6 +307,14 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
     for web_help_delivery_contract in ("HUMAN_HELP_WEB_SEEN", "HUMAN_HELP_WEB_NOT_SEEN", ".web-human-help.seen", ".web-human-help.activity", "HUMAN_HELP_WEB_ACTIVITY"):
         if web_help_delivery_contract not in interactive_broker_text:
             raise RuntimeError(f"HUMAN HELP web delivery handshake lost broker contract: {web_help_delivery_contract}")
+    for caller_activity_contract in (
+        'activity_path = queue / f"{request_id}.web-human-help.activity"',
+        "activity_path.stat().st_mtime_ns",
+        "deadline = time.monotonic() + timeout + 10.0",
+        "if activity_mtime_ns > last_activity_mtime_ns:",
+    ):
+        if caller_activity_contract not in interactive_exec_text:
+            raise RuntimeError(f"HUMAN HELP caller no longer extends its wait on Web input activity: {caller_activity_contract}")
     if ".web-human-help.seen" not in web_console_bridge_text:
         raise RuntimeError("Web Console bridge stopped acknowledging delivered HUMAN HELP prompts")
     if 'request.Path == "/v1/human-help/seen"' not in web_console_bridge_text:
