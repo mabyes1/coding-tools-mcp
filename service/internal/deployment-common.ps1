@@ -38,6 +38,210 @@ function Assert-DeploymentPath([string]$Path, [string]$Description) {
     }
 }
 
+function Get-CodingToolsArgumentValue([string]$Arguments, [string]$Name) {
+    $escapedName = [regex]::Escape($Name)
+    $pattern = '(?:^|\s)--' + $escapedName + '(?:=|\s+)(?:"([^"]+)"|(\S+))'
+    $match = [regex]::Match($Arguments, $pattern)
+    if (-not $match.Success) { return $null }
+    if (-not [string]::IsNullOrWhiteSpace($match.Groups[1].Value)) { return $match.Groups[1].Value }
+    return $match.Groups[2].Value
+}
+
+function Get-LegacyOpenAITunnelMigrationSource {
+    $task = Get-ScheduledTask -TaskName "Tunnel-Coding" -ErrorAction SilentlyContinue
+    if (-not $task) {
+        throw "OpenAI tunnel service files are missing and the legacy Tunnel-Coding task is unavailable for one-time migration."
+    }
+    $action = @($task.Actions)[0]
+    $binary = [Environment]::ExpandEnvironmentVariables([string]$action.Execute)
+    Assert-DeploymentPath $binary "Legacy tunnel-client binary"
+
+    $profileDir = Get-CodingToolsArgumentValue ([string]$action.Arguments) "profile-dir"
+    $profileName = Get-CodingToolsArgumentValue ([string]$action.Arguments) "profile"
+    if ([string]::IsNullOrWhiteSpace($profileDir) -or [string]::IsNullOrWhiteSpace($profileName)) {
+        throw "Legacy Tunnel-Coding task does not expose --profile-dir and --profile arguments."
+    }
+    $profilePath = Join-Path $profileDir "$profileName.yaml"
+    if (-not (Test-Path -LiteralPath $profilePath -PathType Leaf)) {
+        $profilePath = Join-Path $profileDir "$profileName.yml"
+    }
+    Assert-DeploymentPath $profilePath "Legacy tunnel-client profile"
+    $profileText = [IO.File]::ReadAllText($profilePath)
+    $apiKeyRef = $null
+    $tunnelId = $null
+    $mcpUrl = $null
+    try {
+        $profile = $profileText | ConvertFrom-Json -ErrorAction Stop
+    }
+    catch {
+        throw "Legacy Tunnel-Coding profile is not JSON-compatible and cannot be migrated safely: $profilePath"
+    }
+    $apiKeyRef = [string]$profile.control_plane.api_key
+    $tunnelId = [string]$profile.control_plane.tunnel_id
+    $mcpUrl = [string](@($profile.mcp.server_urls)[0].url)
+    if ([string]::IsNullOrWhiteSpace($apiKeyRef) -or -not $apiKeyRef.StartsWith("file:", [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Legacy tunnel-client profile does not use a file: control-plane API key reference."
+    }
+    if ($tunnelId -ne "tunnel_6a87d59143248191aa263b98ceb8d9d8") {
+        throw "Legacy tunnel-client profile points at unexpected tunnel id: $tunnelId"
+    }
+    if ($mcpUrl -ne "http://127.0.0.1:8767/mcp") {
+        throw "Legacy tunnel-client profile points at unexpected MCP URL: $mcpUrl"
+    }
+    $secret = $apiKeyRef.Substring(5)
+    Assert-DeploymentPath $secret "Legacy tunnel runtime API key file"
+    return [pscustomobject]@{
+        Binary = $binary
+        Profile = $profilePath
+        Secret = $secret
+    }
+}
+
+function Set-OpenAITunnelClientRecoveryPolicy {
+    & sc.exe failure OpenAITunnelClient `
+        reset= 3600 `
+        actions= restart/5000/restart/10000/restart/30000 | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not configure OpenAITunnelClient service recovery actions."
+    }
+    & sc.exe failureflag OpenAITunnelClient 1 | Out-Host
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not enable OpenAITunnelClient failure actions for non-crash failures."
+    }
+}
+
+function Wait-OpenAITunnelClientReady(
+    [string]$ServiceRoot = "C:\ProgramData\WebGPTCodingToolsMCPService",
+    [int]$Seconds = 45
+) {
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    $baseUrl = "http://127.0.0.1:8769"
+    $client = Join-Path $ServiceRoot "tunnel\tunnel-client.exe"
+    $lastError = "not probed"
+    do {
+        Start-Sleep -Milliseconds 500
+        try {
+            $ready = Invoke-WebRequest -UseBasicParsing -Uri "$baseUrl/readyz" -TimeoutSec 3
+            if ([int]$ready.StatusCode -ne 200 -or $ready.Content.Trim() -ne "ready") {
+                $lastError = "readyz did not return HTTP 200 + ready"
+                continue
+            }
+            & $client health --url $baseUrl --require-control-plane-poll | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                $lastError = "tunnel-client health did not confirm a successful control-plane poll"
+                continue
+            }
+            return $true
+        }
+        catch {
+            $lastError = $_.Exception.Message
+        }
+    } while ((Get-Date) -lt $deadline)
+    throw "OpenAITunnelClient did not become ready through /readyz + control-plane poll: $lastError"
+}
+
+function Initialize-OpenAITunnelClientFiles(
+    [string]$ServiceRoot,
+    [string]$ServiceSourceRoot,
+    [string]$WinSw,
+    [string]$CurrentAccount,
+    [string]$LocalServiceSid
+) {
+    $tunnelRoot = Join-Path $ServiceRoot "tunnel"
+    $logsRoot = Join-Path $tunnelRoot "logs"
+    $winswLogsRoot = Join-Path $logsRoot "winsw"
+    $stateRoot = Join-Path $tunnelRoot "state"
+    $binary = Join-Path $tunnelRoot "tunnel-client.exe"
+    $secret = Join-Path $tunnelRoot "runtime-api-key.txt"
+    $config = Join-Path $tunnelRoot "tunnel-client.yaml"
+    $serviceXml = Join-Path $ServiceRoot "OpenAITunnelClient.xml"
+    $wrapper = Join-Path $ServiceRoot "OpenAITunnelClient.exe"
+
+    New-Item -ItemType Directory -Path $tunnelRoot,$logsRoot,$winswLogsRoot,$stateRoot -Force | Out-Null
+    if (-not (Test-Path -LiteralPath $binary -PathType Leaf) -or -not (Test-Path -LiteralPath $secret -PathType Leaf)) {
+        $legacy = Get-LegacyOpenAITunnelMigrationSource
+        if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+            Copy-Item -LiteralPath $legacy.Binary -Destination $binary -Force
+        }
+        if (-not (Test-Path -LiteralPath $secret -PathType Leaf)) {
+            Copy-Item -LiteralPath $legacy.Secret -Destination $secret -Force
+        }
+    }
+    Copy-Item -LiteralPath (Join-Path $ServiceSourceRoot "tunnel-client.yaml") -Destination $config -Force
+    Copy-Item -LiteralPath (Join-Path $ServiceSourceRoot "OpenAITunnelClient.xml") -Destination $serviceXml -Force
+    if (-not (Test-Path -LiteralPath $wrapper -PathType Leaf)) {
+        Copy-Item -LiteralPath $WinSw -Destination $wrapper -Force
+    }
+    Unblock-File -LiteralPath $binary
+    Unblock-File -LiteralPath $wrapper
+
+    & icacls.exe $tunnelRoot /inheritance:r /grant:r `
+        "*S-1-5-18:(OI)(CI)F" `
+        "*S-1-5-32-544:(OI)(CI)F" `
+        "${CurrentAccount}:(OI)(CI)F" `
+        "${LocalServiceSid}:(OI)(CI)RX" /C | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Securing OpenAI tunnel root failed." }
+    foreach ($writableRoot in @($logsRoot, $stateRoot)) {
+        & icacls.exe $writableRoot /grant "${LocalServiceSid}:(OI)(CI)M" /C | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "Granting LocalService tunnel runtime write access failed: $writableRoot" }
+    }
+    & icacls.exe $secret /inheritance:r /grant:r `
+        "*S-1-5-18:F" `
+        "*S-1-5-32-544:F" `
+        "${CurrentAccount}:F" `
+        "${LocalServiceSid}:R" | Out-Host
+    if ($LASTEXITCODE -ne 0) { throw "Securing OpenAI tunnel runtime API key failed." }
+}
+
+function Ensure-OpenAITunnelClientService(
+    [string]$ServiceRoot,
+    [string]$ServiceSourceRoot,
+    [string]$WinSw,
+    [string]$CurrentAccount,
+    [string]$LocalServiceSid
+) {
+    Assert-DeploymentPath (Join-Path $ServiceSourceRoot "OpenAITunnelClient.xml") "OpenAI tunnel service template"
+    Assert-DeploymentPath (Join-Path $ServiceSourceRoot "tunnel-client.yaml") "OpenAI tunnel config template"
+    Assert-DeploymentPath $WinSw "WinSW service wrapper"
+    Initialize-OpenAITunnelClientFiles $ServiceRoot $ServiceSourceRoot $WinSw $CurrentAccount $LocalServiceSid
+
+    $wrapper = Join-Path $ServiceRoot "OpenAITunnelClient.exe"
+    $service = Get-Service -Name OpenAITunnelClient -ErrorAction SilentlyContinue
+    if (-not $service) {
+        & $wrapper install | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "WinSW failed to install OpenAITunnelClient." }
+        & sc.exe config OpenAITunnelClient obj= "NT AUTHORITY\LocalService" | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "Could not configure OpenAITunnelClient service account." }
+        & sc.exe config OpenAITunnelClient depend= WebGPTCodingToolsMCP | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "Could not configure OpenAITunnelClient dependency." }
+    }
+    Set-OpenAITunnelClientRecoveryPolicy
+
+    $legacyTask = Get-ScheduledTask -TaskName "Tunnel-Coding" -ErrorAction SilentlyContinue
+    $legacyWasRunning = $legacyTask -and $legacyTask.State -eq "Running"
+    if ($legacyWasRunning) {
+        Stop-ScheduledTask -TaskName "Tunnel-Coding" -ErrorAction Stop
+        Start-Sleep -Milliseconds 750
+    }
+    try {
+        $service = Get-Service -Name OpenAITunnelClient -ErrorAction Stop
+        if ($service.Status -ne "Running") {
+            Start-Service -Name OpenAITunnelClient
+        }
+        Wait-OpenAITunnelClientReady $ServiceRoot | Out-Null
+    }
+    catch {
+        Stop-Service -Name OpenAITunnelClient -Force -ErrorAction SilentlyContinue
+        if ($legacyWasRunning -and (Get-ScheduledTask -TaskName "Tunnel-Coding" -ErrorAction SilentlyContinue)) {
+            Start-ScheduledTask -TaskName "Tunnel-Coding" -ErrorAction SilentlyContinue
+        }
+        throw
+    }
+    if ($legacyTask) {
+        Unregister-ScheduledTask -TaskName "Tunnel-Coding" -Confirm:$false
+    }
+}
+
 function Get-CodingToolsManagedServiceFiles {
     return @(
         "elevated-broker.ps1",
@@ -194,13 +398,15 @@ function Set-CodingToolsMcpRecoveryPolicy {
 
 function Stop-CodingToolsPrivateServices(
     [int]$TimeoutSeconds = 20,
-    [switch]$IncludeLegacyCloudflare
+    [switch]$IncludeLegacyCloudflare,
+    [switch]$IncludeSecureTunnel
 ) {
-    $serviceNames = if ($IncludeLegacyCloudflare) {
-        @("WebGPTCloudflareTunnel", "WebGPTCodingToolsMCP")
+    $serviceNames = @("WebGPTCodingToolsMCP")
+    if ($IncludeSecureTunnel) {
+        $serviceNames = @("OpenAITunnelClient") + $serviceNames
     }
-    else {
-        @("WebGPTCodingToolsMCP")
+    if ($IncludeLegacyCloudflare) {
+        $serviceNames = @("WebGPTCloudflareTunnel") + $serviceNames
     }
     foreach ($name in $serviceNames) {
         $service = Get-Service -Name $name -ErrorAction SilentlyContinue
@@ -263,6 +469,13 @@ function Start-CodingToolsPrivateServices(
     $serverInfo = Wait-CodingToolsMcpReady
     if (-not [string]::IsNullOrWhiteSpace($ExpectedVersion) -and $serverInfo.version -ne $ExpectedVersion) {
         throw "MCP started with version $($serverInfo.version), expected $ExpectedVersion."
+    }
+    $secureTunnel = Get-Service -Name OpenAITunnelClient -ErrorAction SilentlyContinue
+    if ($secureTunnel) {
+        if ($secureTunnel.Status -ne "Running") {
+            Start-Service -Name OpenAITunnelClient
+        }
+        Wait-OpenAITunnelClientReady | Out-Null
     }
     $legacyCloudflare = Get-Service -Name WebGPTCloudflareTunnel -ErrorAction SilentlyContinue
     if ($legacyCloudflare -and $legacyCloudflare.Status -ne "Running") {

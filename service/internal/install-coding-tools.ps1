@@ -30,6 +30,8 @@ $managedServiceFiles = Get-CodingToolsManagedServiceFiles
 $oauthStateBackup = Join-Path ([IO.Path]::GetTempPath()) ("web-gpt-oauth-state-" + [guid]::NewGuid().ToString("N") + ".sqlite")
 $hadOAuthStateBackup = $false
 $brokerStageRoot = Join-Path ([IO.Path]::GetTempPath()) ("web-gpt-broker-stage-" + [guid]::NewGuid().ToString("N"))
+$tunnelBackupRoot = Join-Path ([IO.Path]::GetTempPath()) ("web-gpt-openai-tunnel-" + [guid]::NewGuid().ToString("N"))
+$hadTunnelBackup = $false
 
 Start-Transcript -LiteralPath $installLog -Force
 try {
@@ -48,8 +50,13 @@ try {
         }
     }
 
-    Stop-CodingToolsPrivateServices 15 -IncludeLegacyCloudflare
-    foreach ($serviceName in @("WebGPTCloudflareTunnel", "WebGPTCodingToolsMCP")) {
+    if (Test-Path -LiteralPath (Join-Path $serviceRoot "tunnel") -PathType Container) {
+        Copy-Item -LiteralPath (Join-Path $serviceRoot "tunnel") -Destination $tunnelBackupRoot -Recurse -Force
+        $hadTunnelBackup = $true
+    }
+
+    Stop-CodingToolsPrivateServices 15 -IncludeLegacyCloudflare -IncludeSecureTunnel
+    foreach ($serviceName in @("WebGPTCloudflareTunnel", "OpenAITunnelClient", "WebGPTCodingToolsMCP")) {
         if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
             & sc.exe delete $serviceName | Out-Host
         }
@@ -90,6 +97,9 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $serviceRoot "app") -Force | Out-Null
     New-Item -ItemType Directory -Path $elevatedQueueRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $interactiveQueueRoot -Force | Out-Null
+    if ($hadTunnelBackup) {
+        Copy-Item -LiteralPath $tunnelBackupRoot -Destination (Join-Path $serviceRoot "tunnel") -Recurse -Force
+    }
     $currentAccount = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 
     # Recover cleanly if an earlier install was interrupted after ACL hardening.
@@ -266,14 +276,21 @@ try {
     & sc.exe config WebGPTCloudflareTunnel obj= "NT AUTHORITY\LocalService" | Out-Host
     & sc.exe config WebGPTCloudflareTunnel depend= WebGPTCodingToolsMCP | Out-Host
 
-    Start-CodingToolsPrivateServices -RequireLegacyCloudflare | Out-Null
+    Start-CodingToolsPrivateServices | Out-Null
+    Ensure-OpenAITunnelClientService `
+        $serviceRoot `
+        $templateRoot `
+        $winsw `
+        $currentAccount `
+        $localServiceSid
 
-    Get-Service -Name WebGPTCodingToolsMCP, WebGPTCloudflareTunnel |
+    Get-Service -Name WebGPTCodingToolsMCP, OpenAITunnelClient, WebGPTCloudflareTunnel |
         Select-Object Name, Status, StartType |
         Format-Table -AutoSize
     Write-Host "SERVICE_INSTALL_OK"
 }
 finally {
+    Remove-Item -LiteralPath $tunnelBackupRoot -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $brokerStageRoot -Recurse -Force -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $oauthStateBackup) {
         Remove-Item -LiteralPath $oauthStateBackup -Force -ErrorAction SilentlyContinue

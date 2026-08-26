@@ -2,6 +2,7 @@ private/**/__pycache__/
 private/**/*.pyc
 .test-runtime*/
 service-install-result.log
+runtime-api-key.txt
 
 # Local/runtime state and credentials must never enter version control.
 *.dpapi

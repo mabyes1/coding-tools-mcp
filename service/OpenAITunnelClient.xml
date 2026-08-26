@@ -1,0 +1,22 @@
+<service>
+  <id>OpenAITunnelClient</id>
+  <name>OpenAI Tunnel Client</name>
+  <description>OpenAI Secure MCP Tunnel client for the private coding-tools MCP endpoint.</description>
+  <executable>%BASE%\tunnel\tunnel-client.exe</executable>
+  <arguments>run --config "%BASE%\tunnel\tunnel-client.yaml"</arguments>
+  <workingdirectory>%BASE%\tunnel</workingdirectory>
+  <startmode>Automatic</startmode>
+  <delayedAutoStart>true</delayedAutoStart>
+  <depend>WebGPTCodingToolsMCP</depend>
+  <hidewindow>true</hidewindow>
+  <stoptimeout>15sec</stoptimeout>
+  <onfailure action="restart" delay="5 sec" />
+  <onfailure action="restart" delay="10 sec" />
+  <onfailure action="restart" delay="30 sec" />
+  <resetfailure>1 hour</resetfailure>
+  <logpath>%BASE%\tunnel\logs\winsw</logpath>
+  <log mode="roll-by-size">
+    <sizeThreshold>10240</sizeThreshold>
+    <keepFiles>4</keepFiles>
+  </log>
+</service>

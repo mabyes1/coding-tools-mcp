@@ -26,6 +26,7 @@ $elevatedQueueRoot = Join-Path $serviceRoot "elevated-requests"
 $interactiveQueueRoot = Join-Path $serviceRoot "interactive-requests"
 $localServiceSid = "*S-1-5-19"
 $managedServiceFiles = Get-CodingToolsManagedServiceFiles
+$winsw = Join-Path $serviceRoot "winsw.exe"
 
 function Get-PackageVersion([string]$PackageRoot) {
     $init = Join-Path $PackageRoot "__init__.py"
@@ -306,6 +307,12 @@ try {
     & icacls.exe $appPath /grant "${localServiceSid}:(OI)(CI)RX" /C | Out-Null
     & icacls.exe $runnerPath /grant "${localServiceSid}:RX" /C | Out-Null
     $health = Start-CodingToolsPrivateServices $expectedVersion
+    Ensure-OpenAITunnelClientService `
+        $serviceRoot `
+        $serviceSourceRoot `
+        $winsw `
+        ([Security.Principal.WindowsIdentity]::GetCurrent().Name) `
+        $localServiceSid
     if (-not $SkipBrokerRefresh) {
         Test-InstalledInteractiveExecE2E
         Test-InstalledComputerUseE2E

@@ -38,6 +38,10 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
     install_text = internal_root.joinpath("install-coding-tools.ps1").read_text(encoding="utf-8")
     repair_text = internal_root.joinpath("repair-coding-tools.ps1").read_text(encoding="utf-8")
     mcp_service_xml_text = (service_root / "WebGPTCodingToolsMCP.xml").read_text(encoding="utf-8")
+    openai_tunnel_service_xml_text = (service_root / "OpenAITunnelClient.xml").read_text(encoding="utf-8")
+    openai_tunnel_config_text = (service_root / "tunnel-client.yaml").read_text(encoding="utf-8")
+    openai_tunnel_config = json.loads(openai_tunnel_config_text)
+    gitignore_text = service_root.parent.joinpath(".gitignore").read_text(encoding="utf-8")
     bootstrap_text = (package_parent / "coding_tools_mcp" / "bootstrap.py").read_text(encoding="utf-8")
     for label, script_text in (
         ("elevated installer", elevated_install_text),
@@ -122,12 +126,97 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
                 "Secure MCP Tunnel lifecycle regained a hard dependency on legacy Cloudflare: "
                 + tunnel_independence_contract
             )
-    if "Stop-CodingToolsPrivateServices 15 -IncludeLegacyCloudflare" not in install_text:
-        raise RuntimeError("fresh install must explicitly stop the legacy Cloudflare service before replacing it")
-    if "Start-CodingToolsPrivateServices -RequireLegacyCloudflare" not in install_text:
-        raise RuntimeError("fresh install must still verify the explicitly installed legacy Cloudflare service")
+    if "Stop-CodingToolsPrivateServices 15 -IncludeLegacyCloudflare -IncludeSecureTunnel" not in install_text:
+        raise RuntimeError("fresh install must explicitly stop both replaceable tunnel services before replacing them")
+    if 'foreach ($serviceName in @("WebGPTCloudflareTunnel", "OpenAITunnelClient", "WebGPTCodingToolsMCP"))' not in install_text:
+        raise RuntimeError("fresh install must delete the old OpenAITunnelClient SCM registration before replacing the service root")
+    for tunnel_preservation_contract in (
+        "web-gpt-openai-tunnel-",
+        "$hadTunnelBackup = $false",
+        'Join-Path $serviceRoot "tunnel"',
+        "Copy-Item -LiteralPath $tunnelBackupRoot -Destination (Join-Path $serviceRoot \"tunnel\") -Recurse -Force",
+        "Remove-Item -LiteralPath $tunnelBackupRoot -Recurse -Force -ErrorAction SilentlyContinue",
+    ):
+        if tunnel_preservation_contract not in install_text:
+            raise RuntimeError(f"fresh install lost machine-level tunnel preservation contract: {tunnel_preservation_contract}")
+    if "Start-CodingToolsPrivateServices -RequireLegacyCloudflare" in install_text:
+        raise RuntimeError("fresh install must not let legacy Cloudflare failure block Secure Tunnel installation")
     if "RequireLegacyCloudflare" in deploy_text or "IncludeLegacyCloudflare" in deploy_text:
         raise RuntimeError("normal deploy/rollback must not make Secure MCP Tunnel health depend on legacy Cloudflare")
+    if "IncludeSecureTunnel" in deploy_text:
+        raise RuntimeError("normal deploy/rollback must leave a healthy OpenAITunnelClient running across the MCP restart")
+
+    for secure_service_consumer, secure_service_text in (
+        ("deploy", deploy_text),
+        ("fresh install", install_text),
+        ("repair", repair_text),
+    ):
+        if "Ensure-OpenAITunnelClientService" not in secure_service_text:
+            raise RuntimeError(f"{secure_service_consumer} stopped ensuring the OpenAITunnelClient SCM service")
+
+    for secure_tunnel_contract in (
+        "Get-LegacyOpenAITunnelMigrationSource",
+        "Initialize-OpenAITunnelClientFiles",
+        "Ensure-OpenAITunnelClientService",
+        "Set-OpenAITunnelClientRecoveryPolicy",
+        "Wait-OpenAITunnelClientReady",
+        'Get-ScheduledTask -TaskName "Tunnel-Coding"',
+        'Stop-ScheduledTask -TaskName "Tunnel-Coding"',
+        'Unregister-ScheduledTask -TaskName "Tunnel-Coding"',
+        'obj= "NT AUTHORITY\\LocalService"',
+        "depend= WebGPTCodingToolsMCP",
+        '"${LocalServiceSid}:R"',
+        '"${LocalServiceSid}:(OI)(CI)RX"',
+        '"${LocalServiceSid}:(OI)(CI)M"',
+        'http://127.0.0.1:8769',
+        '"$baseUrl/readyz"',
+        "--require-control-plane-poll",
+        "restart/5000/restart/10000/restart/30000",
+        "failureflag OpenAITunnelClient 1",
+    ):
+        if secure_tunnel_contract not in deployment_common_text:
+            raise RuntimeError(f"OpenAITunnelClient lifecycle contract missing: {secure_tunnel_contract}")
+
+    ready_index = deployment_common_text.find("Wait-OpenAITunnelClientReady $ServiceRoot")
+    unregister_legacy_index = deployment_common_text.find('Unregister-ScheduledTask -TaskName "Tunnel-Coding"')
+    if ready_index < 0 or unregister_legacy_index < 0 or ready_index > unregister_legacy_index:
+        raise RuntimeError("legacy Tunnel-Coding task must remain available until the new SCM service is actually ready")
+
+    for xml_contract in (
+        "<id>OpenAITunnelClient</id>",
+        "<executable>%BASE%\\tunnel\\tunnel-client.exe</executable>",
+        '<arguments>run --config "%BASE%\\tunnel\\tunnel-client.yaml"</arguments>',
+        "<startmode>Automatic</startmode>",
+        "<depend>WebGPTCodingToolsMCP</depend>",
+        '<onfailure action="restart" delay="5 sec" />',
+        '<onfailure action="restart" delay="10 sec" />',
+        '<onfailure action="restart" delay="30 sec" />',
+        "<resetfailure>1 hour</resetfailure>",
+    ):
+        if xml_contract not in openai_tunnel_service_xml_text:
+            raise RuntimeError(f"OpenAITunnelClient WinSW contract missing: {xml_contract}")
+    if "--control-plane.api-key" in openai_tunnel_service_xml_text or "sk-" in openai_tunnel_service_xml_text:
+        raise RuntimeError("OpenAITunnelClient must never place its runtime API key on the service command line")
+
+    expected_secret_ref = r"file:C:\ProgramData\WebGPTCodingToolsMCPService\tunnel\runtime-api-key.txt"
+    control_plane = openai_tunnel_config.get("control_plane", {})
+    if control_plane.get("api_key") != expected_secret_ref:
+        raise RuntimeError("machine-level tunnel config must use the ProgramData file: runtime API key reference")
+    if control_plane.get("tunnel_id") != "tunnel_6a87d59143248191aa263b98ceb8d9d8":
+        raise RuntimeError("machine-level tunnel config stopped reusing the established Secure Tunnel id")
+    server_urls = openai_tunnel_config.get("mcp", {}).get("server_urls", [])
+    if not server_urls or server_urls[0].get("url") != "http://127.0.0.1:8767/mcp":
+        raise RuntimeError("machine-level tunnel config stopped targeting the dedicated 8767 MCP listener")
+    health = openai_tunnel_config.get("health", {})
+    if health.get("listen_addr") != "127.0.0.1:8769":
+        raise RuntimeError("OpenAITunnelClient readiness endpoint must stay fixed on loopback port 8769")
+    if "runtime-api-key.txt" not in gitignore_text:
+        raise RuntimeError("runtime API key filename must remain ignored by Git")
+    if (service_root / "runtime-api-key.txt").exists() or (service_root / "tunnel" / "runtime-api-key.txt").exists():
+        raise RuntimeError("runtime API key material must never exist in the source tree")
+    for user_profile_dependency in (r"C:\Users\ken\.codex-chatgpt-web", r"C:\Users\ken\.coding-tools-tunnel"):
+        if user_profile_dependency in openai_tunnel_config_text or user_profile_dependency in openai_tunnel_service_xml_text:
+            raise RuntimeError("installed OpenAITunnelClient config must not depend on Ken's user profile")
 
     if '<onfailure action="restart"' not in mcp_service_xml_text or "<resetfailure>" not in mcp_service_xml_text:
         raise RuntimeError("MCP Windows service lost automatic crash-restart policy")

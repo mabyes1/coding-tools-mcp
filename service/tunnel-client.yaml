@@ -1,0 +1,28 @@
+{
+  "admin_ui": {
+    "open_browser": false
+  },
+  "config_version": 1,
+  "control_plane": {
+    "api_key": "file:C:\\ProgramData\\WebGPTCodingToolsMCPService\\tunnel\\runtime-api-key.txt",
+    "base_url": "https://api.openai.com",
+    "tunnel_id": "tunnel_6a87d59143248191aa263b98ceb8d9d8"
+  },
+  "health": {
+    "listen_addr": "127.0.0.1:8769",
+    "url_file": "C:\\ProgramData\\WebGPTCodingToolsMCPService\\tunnel\\state\\health.url"
+  },
+  "log": {
+    "file": "C:\\ProgramData\\WebGPTCodingToolsMCPService\\tunnel\\logs\\tunnel-client.log",
+    "format": "json",
+    "level": "info"
+  },
+  "mcp": {
+    "server_urls": [
+      {
+        "channel": "main",
+        "url": "http://127.0.0.1:8767/mcp"
+      }
+    ]
+  }
+}
