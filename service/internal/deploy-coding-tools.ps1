@@ -121,8 +121,15 @@ function Trim-ReleaseBackups([int]$Keep = 20) {
         ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
+function New-DeploymentPythonSmokeScript([string]$Code) {
+    $path = Join-Path ([IO.Path]::GetTempPath()) ("coding-tools-deploy-smoke-" + [Guid]::NewGuid().ToString("N") + ".py")
+    [IO.File]::WriteAllText($path, $Code, [Text.UTF8Encoding]::new($false))
+    return $path
+}
+
 function Test-InstalledComputerUseE2E {
     $previousPythonPath = $env:PYTHONPATH
+    $scriptPath = $null
     try {
         $env:PYTHONPATH = $appPath
         $code = @'
@@ -131,21 +138,24 @@ r = request_computer_use(action="list_windows", include_screenshot=False, includ
 assert r.get("ok") and r.get("action") == "list_windows", r
 print("COMPUTER_USE_E2E_OK")
 '@
+        $scriptPath = New-DeploymentPythonSmokeScript $code
         $deadline = [DateTimeOffset]::UtcNow.AddSeconds(35)
         do {
-            & $serverPython -c $code
+            & $serverPython $scriptPath
             if ($LASTEXITCODE -eq 0) { return }
             Start-Sleep -Milliseconds 500
         } while ([DateTimeOffset]::UtcNow -lt $deadline)
         throw "Computer Use E2E smoke test did not complete through queue -> broker -> helper -> response."
     }
     finally {
+        if ($scriptPath) { Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue }
         $env:PYTHONPATH = $previousPythonPath
     }
 }
 
 function Test-InstalledInteractiveExecE2E {
     $previousPythonPath = $env:PYTHONPATH
+    $scriptPath = $null
     try {
         $env:PYTHONPATH = $appPath
         $code = @'
@@ -161,6 +171,7 @@ assert r.get("exit_code") == 1, r
 assert str(r.get("stderr", "")).strip(), r
 print("INTERACTIVE_EXEC_PARSE_E2E_OK")
 '@
+        $scriptPath = New-DeploymentPythonSmokeScript $code
         # Broker artifacts are deliberately restarted during deployment. The
         # scheduled task may report Started a few seconds before its heartbeat
         # and queue consumer are actually ready. Treat that startup window the
@@ -168,13 +179,14 @@ print("INTERACTIVE_EXEC_PARSE_E2E_OK")
         # first transient probe failure.
         $deadline = [DateTimeOffset]::UtcNow.AddSeconds(35)
         do {
-            & $serverPython -c $code
+            & $serverPython $scriptPath
             if ($LASTEXITCODE -eq 0) { return }
             Start-Sleep -Milliseconds 500
         } while ([DateTimeOffset]::UtcNow -lt $deadline)
         throw "Interactive exec syntax-error regression test did not complete after broker readiness retries."
     }
     finally {
+        if ($scriptPath) { Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue }
         $env:PYTHONPATH = $previousPythonPath
     }
 }

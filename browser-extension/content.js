@@ -327,10 +327,12 @@
     try {
       state = await request("/v1/state"); connected = true;
       const helpId = state.human_help && state.human_help.request_id || "";
-      if (helpId && helpId !== lastPresentedHelpId && !state.dnd && document.visibilityState === "visible") {
-        activeTab = "help";
-        setOpen(true);
+      if (helpId && helpId !== lastPresentedHelpId && document.visibilityState === "visible") {
         helpToAcknowledge = helpId;
+        if (!state.dnd) {
+          activeTab = "help";
+          setOpen(true);
+        }
       }
       if (!helpId) lastPresentedHelpId = "";
     } catch (error) { connected = false; state = null; connectionError = String(error && error.message || error); }

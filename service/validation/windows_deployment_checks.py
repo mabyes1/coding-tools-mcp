@@ -67,6 +67,12 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
     interactive_e2e_text = deploy_text[interactive_e2e_start:interactive_e2e_end if interactive_e2e_end >= 0 else None]
     if "AddSeconds(35)" not in interactive_e2e_text or "Start-Sleep -Milliseconds 500" not in interactive_e2e_text:
         raise RuntimeError("interactive exec deployment E2E must tolerate the broker heartbeat reconstruction window")
+    if '& $serverPython -c $code' in deploy_text:
+        raise RuntimeError("deployment Python smoke tests must not pass multiline code through Windows PowerShell native -c quoting")
+    if "function New-DeploymentPythonSmokeScript" not in deploy_text:
+        raise RuntimeError("deployment Python smoke tests lost their temp-script execution helper")
+    if deploy_text.count("& $serverPython $scriptPath") < 2:
+        raise RuntimeError("deployment Python smoke tests must execute temp .py files for both Computer Use and interactive exec")
 
     drain_index = deploy_text.find('Write-Host "Waiting $StartDelaySeconds second(s) before restarting MCP')
     busy_check_index = deploy_text.find("Assert-NoActiveMcpWork", deploy_text.find("if (-not $ValidateOnly"))
@@ -308,6 +314,12 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
         raise RuntimeError("background Web Console tabs must not suppress desktop HUMAN HELP fallback")
     if 'request("/v1/human-help/seen"' not in extension_content_text:
         raise RuntimeError("visible Web Console stopped acknowledging rendered HUMAN HELP prompts")
+    if 'if (helpId && helpId !== lastPresentedHelpId && document.visibilityState === "visible")' not in extension_content_text:
+        raise RuntimeError("visible Web Console must ACK HUMAN HELP independently of DND state")
+    if 'if (!state.dnd) {' not in extension_content_text:
+        raise RuntimeError("Web Console DND must suppress automatic opening without suppressing HUMAN HELP ACK")
+    if 'helpId !== lastPresentedHelpId && !state.dnd && document.visibilityState' in extension_content_text:
+        raise RuntimeError("Web Console DND regressed to forcing HUMAN HELP desktop fallback")
     for human_help_reason_label in (
         'if (text === "permission_blocked") return "需要系統權限";',
         'if (text === "gui_required") return "需要你操作畫面";',
