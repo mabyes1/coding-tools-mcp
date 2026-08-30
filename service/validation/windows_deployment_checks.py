@@ -395,7 +395,7 @@ def run_windows_deployment_checks(
     if extension_manifest.get("host_permissions") != ["http://127.0.0.1:8768/*"]:
         raise RuntimeError("Web Console extension host permissions became broader than loopback bridge access")
     extension_permissions = set(extension_manifest.get("permissions") or [])
-    for permission in ("storage", "tabs", "tabGroups", "debugger"):
+    for permission in ("storage", "tabs", "tabGroups", "debugger", "alarms"):
         if permission not in extension_permissions:
             raise RuntimeError(f"Browser Use extension permission is missing: {permission}")
     if "scripting" in extension_permissions:
@@ -418,6 +418,9 @@ def run_windows_deployment_checks(
         'send("Input.insertText"',
         'send("Page.captureScreenshot"',
         "__coding_tools_browser_cursor__",
+        "BROWSER_AGENT_ALARM",
+        "chrome.alarms.create",
+        "chrome.alarms.onAlarm.addListener",
     ):
         if browser_agent_contract not in extension_agent_text:
             raise RuntimeError(f"Browser Use extension contract is missing: {browser_agent_contract}")

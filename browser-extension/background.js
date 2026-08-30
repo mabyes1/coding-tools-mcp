@@ -30,6 +30,7 @@ async function consoleRequest(path, options = {}) {
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || message.type !== "coding-tools-console-request") return false;
+  kickCodingToolsBrowserAgent();
   consoleRequest(message.path, message.options)
     .then((payload) => sendResponse({ ok: true, payload }))
     .catch((error) => sendResponse({ ok: false, error: String(error && error.message || error) }));

@@ -1,7 +1,8 @@
 const BROWSER_AGENT_BASE = "http://127.0.0.1:8768";
 const BROWSER_AGENT_STORAGE_KEY = "codingToolsBrowserAgentTabId";
 const BROWSER_AGENT_GROUP_TITLE = "Coding Tools · Browser Use";
-let browserAgentLoopStarted = false;
+const BROWSER_AGENT_ALARM = "coding-tools-browser-agent-poll";
+let browserAgentTickPromise = null;
 
 async function browserAgentRequest(path, options = {}) {
   const controller = new AbortController();
@@ -284,25 +285,30 @@ async function executeBrowserAgentRequest(request) {
   return await buildBrowserResponse(tab, action, request);
 }
 
-async function browserAgentLoop() {
-  while (true) {
-    try {
-      const pending = await browserAgentRequest("/v1/browser/next", { timeout: 10000 });
-      if (!pending || !pending.request_id || !pending.request) continue;
-      let response;
-      try { response = await executeBrowserAgentRequest(pending.request); }
-      catch (error) {
-        response = { ok: false, error: "BROWSER_EXTENSION_ACTION_FAILED", message: String(error && error.message || error), retryable: true };
-      }
-      await browserAgentRequest("/v1/browser/respond", { method: "POST", body: { request_id: pending.request_id, response }, timeout: 10000 });
-    } catch (_) {
-      await new Promise(resolve => setTimeout(resolve, 800));
-    }
+async function browserAgentTick() {
+  const pending = await browserAgentRequest("/v1/browser/next", { timeout: 10000 });
+  if (!pending || !pending.request_id || !pending.request) return;
+  let response;
+  try { response = await executeBrowserAgentRequest(pending.request); }
+  catch (error) {
+    response = { ok: false, error: "BROWSER_EXTENSION_ACTION_FAILED", message: String(error && error.message || error), retryable: true };
   }
+  await browserAgentRequest("/v1/browser/respond", { method: "POST", body: { request_id: pending.request_id, response }, timeout: 10000 });
 }
 
+function kickCodingToolsBrowserAgent() {
+  if (browserAgentTickPromise) return browserAgentTickPromise;
+  browserAgentTickPromise = browserAgentTick()
+    .catch(() => null)
+    .finally(() => { browserAgentTickPromise = null; });
+  return browserAgentTickPromise;
+}
+
+chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm && alarm.name === BROWSER_AGENT_ALARM) kickCodingToolsBrowserAgent();
+});
+
 function startCodingToolsBrowserAgent() {
-  if (browserAgentLoopStarted) return;
-  browserAgentLoopStarted = true;
-  browserAgentLoop();
+  chrome.alarms.create(BROWSER_AGENT_ALARM, { periodInMinutes: 0.5 });
+  kickCodingToolsBrowserAgent();
 }

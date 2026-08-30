@@ -86,7 +86,7 @@ def wait_window(request: Any, title: str, *, browser_only: bool, timeout: float 
 
 def call(request: Any, name: str, **kwargs: Any) -> dict[str, Any]:
     pointer_before = cursor_position()
-    payload = request(timeout_seconds=30, **kwargs)
+    payload = request(timeout_seconds=70 if kwargs.get("browser_only") else 30, **kwargs)
     require(payload.get("ok") is True, f"{name}: {payload}")
     pointer_after = cursor_position()
     if kwargs.get("action") in {"click", "right_click", "type_text", "scroll"}:
@@ -204,7 +204,7 @@ def main() -> int:
             }
             browser_listing = request_computer_use(
                 action="list_windows", browser_only=True,
-                include_screenshot=False, include_text=False, timeout_seconds=30,
+                include_screenshot=False, include_text=False, timeout_seconds=70,
             )
             managed_windows = browser_listing.get("windows", [])
             require(len(managed_windows) == 1, f"Browser Use must expose exactly one dedicated window: {managed_windows}")

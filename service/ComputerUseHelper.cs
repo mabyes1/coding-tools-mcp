@@ -23,6 +23,7 @@ internal static class ComputerUseHelper
     private const uint MouseEventRightDown = 0x0008;
     private const uint MouseEventRightUp = 0x0010;
     private const uint PrintWindowRenderFullContent = 0x00000002;
+    private const uint WindowMessageSetText = 0x000C;
     [StructLayout(LayoutKind.Sequential)]
     private struct NativePoint { public int X; public int Y; }
 
@@ -31,6 +32,9 @@ internal static class ComputerUseHelper
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetCursorPos(int x, int y);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, string lParam);
 
     [DllImport("user32.dll")]
     private static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
@@ -601,6 +605,10 @@ internal static class ComputerUseHelper
             pattern.SetValue(value);
             return;
         }
+
+        int nativeHandle = element.Current.NativeWindowHandle;
+        if (nativeHandle != 0 && SendMessage(new IntPtr(nativeHandle), WindowMessageSetText, IntPtr.Zero, value) != IntPtr.Zero)
+            return;
 
         // Some native and WinForms edit controls are writable but expose only
         // keyboard focus through UI Automation.  Keep type_text useful on
