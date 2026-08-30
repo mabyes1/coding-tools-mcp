@@ -272,6 +272,7 @@ def run_windows_deployment_checks(
             web_console_bridge_source,
             browser_extension_root / "manifest.json",
             browser_extension_root / "background.js",
+            browser_extension_root / "browser-agent.js",
             browser_extension_root / "content.js",
             browser_extension_root / "bridge-frame.html",
             browser_extension_root / "bridge-frame.js",
@@ -293,6 +294,7 @@ def run_windows_deployment_checks(
     web_console_admin_text = (service_root / "manage-web-console-system.ps1").read_text(encoding="utf-8")
     extension_manifest = json.loads((browser_extension_root / "manifest.json").read_text(encoding="utf-8"))
     extension_background_text = (browser_extension_root / "background.js").read_text(encoding="utf-8")
+    extension_agent_text = (browser_extension_root / "browser-agent.js").read_text(encoding="utf-8")
     extension_content_text = (browser_extension_root / "content.js").read_text(encoding="utf-8")
     extension_bridge_text = (browser_extension_root / "bridge-frame.js").read_text(encoding="utf-8")
     desktop_tool_text = (package_parent / "coding_tools_mcp" / "tools" / "desktop.py").read_text(encoding="utf-8")
@@ -392,8 +394,48 @@ def run_windows_deployment_checks(
         raise RuntimeError("Web Console browser extension must use Manifest V3")
     if extension_manifest.get("host_permissions") != ["http://127.0.0.1:8768/*"]:
         raise RuntimeError("Web Console extension host permissions became broader than loopback bridge access")
+    extension_permissions = set(extension_manifest.get("permissions") or [])
+    for permission in ("storage", "tabs", "tabGroups", "debugger"):
+        if permission not in extension_permissions:
+            raise RuntimeError(f"Browser Use extension permission is missing: {permission}")
+    if "scripting" in extension_permissions:
+        raise RuntimeError("Browser Use must use the Chrome debugger channel instead of all-site script injection")
     if "http://127.0.0.1:8768" not in extension_background_text:
         raise RuntimeError("Web Console extension stopped using the loopback bridge")
+    for browser_agent_contract in (
+        'importScripts("browser-agent.js")',
+        "startCodingToolsBrowserAgent()",
+    ):
+        if browser_agent_contract not in extension_background_text:
+            raise RuntimeError(f"Browser Use background startup contract is missing: {browser_agent_contract}")
+    for browser_agent_contract in (
+        'chrome.tabs.create({ active: false, url: "about:blank" })',
+        "BROWSER_AGENT_GROUP_TITLE",
+        'chrome.tabs.update(tab.id, { url, active: false })',
+        'chrome.debugger.attach(target, "1.3")',
+        'send("Runtime.evaluate"',
+        'send("Input.dispatchMouseEvent"',
+        'send("Input.insertText"',
+        'send("Page.captureScreenshot"',
+        "__coding_tools_browser_cursor__",
+    ):
+        if browser_agent_contract not in extension_agent_text:
+            raise RuntimeError(f"Browser Use extension contract is missing: {browser_agent_contract}")
+    for browser_bridge_contract in (
+        'request.Path == "/v1/browser/next"',
+        'request.Path == "/v1/browser/respond"',
+        ".browser-extension.request",
+        ".browser-extension.response",
+    ):
+        if browser_bridge_contract not in web_console_bridge_text:
+            raise RuntimeError(f"Browser Use loopback bridge contract is missing: {browser_bridge_contract}")
+    for browser_broker_contract in (
+        "Handle-BrowserExtensionRequest $RequestId $Request",
+        ".browser-extension.request",
+        "BROWSER_EXTENSION_UNAVAILABLE",
+    ):
+        if browser_broker_contract not in interactive_broker_text:
+            raise RuntimeError(f"Browser Use broker routing contract is missing: {browser_broker_contract}")
     for timeout_contract in ("CONSOLE_REQUEST_TIMEOUT_MS", "AbortController", "console_request_timeout"):
         if timeout_contract not in extension_background_text:
             raise RuntimeError(f"Web Console background bridge lost timeout contract: {timeout_contract}")

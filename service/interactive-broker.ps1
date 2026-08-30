@@ -269,6 +269,10 @@ function Try-HandleHumanHelpInWebConsole([string]$RequestId, $Request, [int]$Tim
 }
 
 function Handle-ComputerUseRequest([string]$RequestId, $Request) {
+    if ([bool]$Request.browser_only) {
+        Handle-BrowserExtensionRequest $RequestId $Request
+        return
+    }
     if (-not (Test-Path -LiteralPath $computerUseHelper -PathType Leaf)) {
         Complete-Request $RequestId @{ ok = $false; error = "COMPUTER_USE_UNAVAILABLE"; message = "Computer Use helper is not installed."; retryable = $true }
         return
@@ -342,6 +346,56 @@ function Handle-ComputerUseRequest([string]$RequestId, $Request) {
             try { $process.Dispose() } catch { }
         }
         Remove-Item -LiteralPath $scratchRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Handle-BrowserExtensionRequest([string]$RequestId, $Request) {
+    Start-WebConsoleBridge
+    $pendingPath = Join-Path $queueRoot "$RequestId.browser-extension.request"
+    $processingPath = Join-Path $queueRoot "$RequestId.browser-extension.processing"
+    $responsePath = Join-Path $queueRoot "$RequestId.browser-extension.response"
+    try {
+        $temporary = "$pendingPath.$([Guid]::NewGuid().ToString('N')).tmp"
+        [IO.File]::WriteAllText(
+            $temporary,
+            ($Request | ConvertTo-Json -Compress -Depth 12),
+            [Text.UTF8Encoding]::new($false)
+        )
+        Move-Item -LiteralPath $temporary -Destination $pendingPath -Force
+        $deadline = [DateTimeOffset]::UtcNow.AddSeconds(65)
+        while ([DateTimeOffset]::UtcNow -lt $deadline) {
+            if (Test-Path -LiteralPath $responsePath -PathType Leaf) {
+                $decoded = [IO.File]::ReadAllText($responsePath, [Text.UTF8Encoding]::new($false)) | ConvertFrom-Json -ErrorAction Stop
+                $payload = @{}
+                foreach ($property in @($decoded.PSObject.Properties)) {
+                    if ($null -eq $property -or [string]::IsNullOrWhiteSpace([string]$property.Name)) { continue }
+                    $payload[[string]$property.Name] = $property.Value
+                }
+                if ($payload.Count -eq 0) { throw "Browser extension returned an empty response." }
+                Write-BrokerLog "BROWSER_EXTENSION_OK id=$RequestId action=$([string]$Request.action) keys=$([string]::Join(',', @($payload.Keys)))"
+                Complete-Request $RequestId $payload
+                return
+            }
+            Start-Sleep -Milliseconds 75
+        }
+        $heartbeat = Join-Path $queueRoot "browser-extension.heartbeat"
+        $heartbeatAge = if (Test-Path -LiteralPath $heartbeat -PathType Leaf) {
+            [Math]::Round(([DateTimeOffset]::UtcNow - [DateTimeOffset](Get-Item -LiteralPath $heartbeat).LastWriteTimeUtc).TotalSeconds, 1)
+        } else { $null }
+        Complete-Request $RequestId @{
+            ok = $false
+            error = "BROWSER_EXTENSION_UNAVAILABLE"
+            message = "Coding Tools Chrome extension did not answer the Browser Use request. Reload the unpacked extension or open Chrome and try again."
+            retryable = $true
+            heartbeat_age_seconds = $heartbeatAge
+        }
+    }
+    catch {
+        Write-BrokerLog "BROWSER_EXTENSION_ERROR id=$RequestId error=$($_.Exception.Message)"
+        Complete-Request $RequestId @{ ok = $false; error = "BROWSER_EXTENSION_ERROR"; message = $_.Exception.Message; retryable = $true }
+    }
+    finally {
+        Remove-Item -LiteralPath $pendingPath,$processingPath,$responsePath -Force -ErrorAction SilentlyContinue
     }
 }
 

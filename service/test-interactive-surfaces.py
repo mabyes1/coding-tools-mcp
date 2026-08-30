@@ -8,7 +8,6 @@ import functools
 import http.server
 import json
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -44,21 +43,6 @@ def find_csc() -> Path:
         if path.is_file():
             return path
     raise RuntimeError(".NET Framework C# compiler was not found")
-
-
-def find_chrome() -> Path:
-    candidates = [
-        Path(os.environ.get("PROGRAMFILES", r"C:\Program Files")) / "Google/Chrome/Application/chrome.exe",
-        Path(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")) / "Google/Chrome/Application/chrome.exe",
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe",
-    ]
-    for path in candidates:
-        if path.is_file():
-            return path
-    resolved = shutil.which("chrome.exe")
-    if resolved:
-        return Path(resolved)
-    raise RuntimeError("Google Chrome was not found")
 
 
 def element_index(payload: dict[str, Any], *, name: str = "", automation_id: str = "", control_type: str = "") -> int:
@@ -101,19 +85,39 @@ def wait_window(request: Any, title: str, *, browser_only: bool, timeout: float 
 
 
 def call(request: Any, name: str, **kwargs: Any) -> dict[str, Any]:
+    pointer_before = cursor_position()
     payload = request(timeout_seconds=30, **kwargs)
     require(payload.get("ok") is True, f"{name}: {payload}")
+    pointer_after = cursor_position()
+    if kwargs.get("action") in {"click", "right_click", "type_text", "scroll"}:
+        require(pointer_after == pointer_before, f"{name} did not restore the user's pointer: before={pointer_before}, after={pointer_after}")
     log("PASS", name)
     return payload
 
 
+def cursor_position() -> tuple[int, int]:
+    import ctypes
+
+    class Point(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    point = Point()
+    require(bool(ctypes.windll.user32.GetCursorPos(ctypes.byref(point))), "could not read the Windows pointer position")
+    return int(point.x), int(point.y)
+
+
 def verify_status(request: Any, *, window_id: int, browser_only: bool, expected: str) -> dict[str, Any]:
-    payload = request(
-        action="inspect", window_id=window_id, browser_only=browser_only,
-        include_screenshot=False, include_text=True, timeout_seconds=30,
-    )
-    require(has_element_name(payload, expected), f"observable status {expected!r} was not found")
-    return payload
+    deadline = time.time() + 5.0
+    payload: dict[str, Any] = {}
+    while time.time() < deadline:
+        payload = request(
+            action="inspect", window_id=window_id, browser_only=browser_only,
+            include_screenshot=False, include_text=True, timeout_seconds=30,
+        )
+        if has_element_name(payload, expected):
+            return payload
+        time.sleep(0.15)
+    raise RuntimeError(f"observable status {expected!r} was not found")
 
 
 def run_surface(request: Any, *, window: dict[str, Any], browser_only: bool) -> None:
@@ -167,9 +171,8 @@ def main() -> int:
 
     failures: list[str] = []
     harness_process: subprocess.Popen[Any] | None = None
-    chrome_process: subprocess.Popen[Any] | None = None
     server: http.server.ThreadingHTTPServer | None = None
-    with tempfile.TemporaryDirectory(prefix="coding-tools-interactive-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="coding-tools-interactive-", ignore_cleanup_errors=True) as temporary:
         root = Path(temporary)
         try:
             harness = root / "interactive-surface-harness.exe"
@@ -190,13 +193,22 @@ def main() -> int:
             server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
             threading.Thread(target=server.serve_forever, daemon=True).start()
             port = int(server.server_address[1])
-            profile = root / "chrome-profile"
-            chrome_process = subprocess.Popen([
-                str(find_chrome()), f"--user-data-dir={profile}", "--new-window", "--no-first-run",
-                "--disable-default-apps", "--force-renderer-accessibility",
-                f"http://127.0.0.1:{port}/browser-surface-start.html",
-            ])
-            browser_window = wait_window(request_computer_use, BROWSER_START_TITLE, browser_only=True, timeout=30)
+            before_windows = request_computer_use(
+                action="list_windows", browser_only=False,
+                include_screenshot=False, include_text=False, timeout_seconds=20,
+            )
+            original_chrome = {
+                int(row["id"]): str(row.get("title") or "")
+                for row in before_windows.get("windows", [])
+                if str(row.get("process_name") or "").lower() == "chrome"
+            }
+            browser_listing = request_computer_use(
+                action="list_windows", browser_only=True,
+                include_screenshot=False, include_text=False, timeout_seconds=30,
+            )
+            managed_windows = browser_listing.get("windows", [])
+            require(len(managed_windows) == 1, f"Browser Use must expose exactly one dedicated window: {managed_windows}")
+            browser_window = managed_windows[0]
             call(
                 request_computer_use, "browser_use.navigate", action="navigate", window_id=int(browser_window["id"]),
                 browser_only=True, text=f"http://127.0.0.1:{port}/browser-surface.html",
@@ -205,6 +217,22 @@ def main() -> int:
             browser_window = wait_window(request_computer_use, BROWSER_TITLE, browser_only=True, timeout=20)
             try:
                 run_surface(request_computer_use, window=browser_window, browser_only=True)
+                after_windows = request_computer_use(
+                    action="list_windows", browser_only=False,
+                    include_screenshot=False, include_text=False, timeout_seconds=20,
+                )
+                after_chrome = {int(row["id"]): str(row.get("title") or "") for row in after_windows.get("windows", []) if str(row.get("process_name") or "").lower() == "chrome"}
+                managed_id = int(browser_window["id"])
+                changed = {
+                    window_id: (title, after_chrome.get(window_id))
+                    for window_id, title in original_chrome.items()
+                    if window_id != managed_id and after_chrome.get(window_id) != title
+                }
+                require(not changed, f"Browser Use changed an existing user Chrome window: {changed}")
+                call(
+                    request_computer_use, "browser_use.restore_home", action="navigate", window_id=managed_id,
+                    browser_only=True, text="about:blank", include_screenshot=False, include_text=False,
+                )
             except Exception as exc:  # noqa: BLE001
                 failures.append(f"browser_use: {exc}")
                 log("FAIL", "browser_use", str(exc))
@@ -212,7 +240,6 @@ def main() -> int:
             if server is not None:
                 server.shutdown()
                 server.server_close()
-            terminate_tree(chrome_process)
             terminate_tree(harness_process)
 
     counts = {"PASS": 2 - len(failures), "FAIL": len(failures)}

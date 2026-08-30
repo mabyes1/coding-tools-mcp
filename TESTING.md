@@ -30,10 +30,10 @@
   -ServiceRoot C:\ProgramData\WebGPTCodingToolsMCPService
 ```
 
-`Interactive` 會短暫開啟專用 Windows 測試視窗及全新的臨時 Chrome 使用者
-目錄，實際驗證視窗列舉、檢查、截圖、啟用、左右鍵、文字輸入、按鍵、
-捲動與瀏覽器導覽。它不會碰目前開著的應用程式或私人分頁，結束後會
-自動關閉測試視窗並刪除臨時資料。
+`Interactive` 會短暫開啟專用 Windows 測試視窗，並使用 Coding Tools
+Chrome 擴充功能建立的背景代理分頁，實際驗證視窗列舉、檢查、截圖、
+啟用、左右鍵、文字輸入、按鍵、捲動與瀏覽器導覽。代理分頁沿用目前
+Profile 與登入狀態，但不會導向或切換其他既有 Chrome 視窗與分頁。
 
 測試輸出分成四種狀態：`PASS`（自動通過）、`FAIL`/`ERROR`（需要修正）、
 `MANUAL`（必須由人操作或會改變正式系統）、`PAUSED`（目前明確不執行）。

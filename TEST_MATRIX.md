@@ -25,7 +25,7 @@
 
 - Computer Use：`list_windows`、`inspect`、`screenshot`、`activate`、`click`、`right_click`、`type_text`、`press_key`、`scroll`
 - Browser Use：上述動作加上 `navigate`
-- 測試目標：專用 Windows 測試視窗、localhost 測試頁、隔離的臨時 Chrome 使用者目錄
+- 測試目標：專用 Windows 測試視窗、localhost 測試頁、沿用目前 Profile 的 Coding Tools 背景代理分頁
 - 執行方式：`.\test-coding-tools.ps1 -Mode Interactive`
 
 ## 一般模式下暫停

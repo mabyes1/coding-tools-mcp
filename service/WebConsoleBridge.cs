@@ -116,6 +116,40 @@ internal sealed class WebConsoleBridge
             WriteJson(stream, 200, BuildState(), origin);
             return;
         }
+        if (request.Method == "GET" && request.Path == "/v1/browser/next")
+        {
+            var pending = TakeNextBrowserRequest(3500);
+            if (pending == null)
+            {
+                WriteResponse(stream, 204, "application/json; charset=utf-8", new byte[0], origin);
+                return;
+            }
+            WriteJson(stream, 200, pending, origin);
+            return;
+        }
+        if (request.Method == "POST" && request.Path == "/v1/browser/respond")
+        {
+            var body = DeserializeBody(request);
+            var requestId = body.ContainsKey("request_id") ? Convert.ToString(body["request_id"]) : "";
+            var response = body.ContainsKey("response") ? body["response"] as Dictionary<string, object> : null;
+            if (!Regex.IsMatch(requestId, "^[A-Za-z0-9_-]{8,80}$") || response == null)
+            {
+                WriteJson(stream, 400, new Dictionary<string, object> { { "ok", false }, { "error", "invalid_browser_response" } }, origin);
+                return;
+            }
+            var processingPath = Path.Combine(_queueRoot, requestId + ".browser-extension.processing");
+            if (!File.Exists(processingPath))
+            {
+                WriteJson(stream, 409, new Dictionary<string, object> { { "ok", false }, { "error", "browser_request_not_pending" } }, origin);
+                return;
+            }
+            response["request_id"] = requestId;
+            WriteTextAtomic(Path.Combine(_queueRoot, requestId + ".browser-extension.response"), _json.Serialize(response));
+            try { File.Delete(processingPath); } catch { }
+            WriteTextAtomic(Path.Combine(_queueRoot, "browser-extension.heartbeat"), DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString());
+            WriteJson(stream, 200, new Dictionary<string, object> { { "ok", true } }, origin);
+            return;
+        }
         if (request.Method == "POST" && request.Path == "/v1/human-help/seen")
         {
             var body = DeserializeBody(request);
@@ -225,6 +259,56 @@ internal sealed class WebConsoleBridge
         }
 
         WriteJson(stream, 404, new Dictionary<string, object> { { "ok", false }, { "error", "not_found" } }, origin);
+    }
+
+    private Dictionary<string, object> TakeNextBrowserRequest(int waitMilliseconds)
+    {
+        var deadline = DateTime.UtcNow.AddMilliseconds(waitMilliseconds);
+        do
+        {
+            try
+            {
+                string selected = null;
+                string processing = null;
+                lock (_fileLock)
+                {
+                    var files = Directory.GetFiles(_queueRoot, "*.browser-extension.request");
+                    Array.Sort(files, delegate(string left, string right) { return File.GetCreationTimeUtc(left).CompareTo(File.GetCreationTimeUtc(right)); });
+                    if (files.Length > 0)
+                    {
+                        selected = files[0];
+                        var name = Path.GetFileName(selected);
+                        processing = Path.Combine(_queueRoot, name.Substring(0, name.Length - ".request".Length) + ".processing");
+                        File.Move(selected, processing);
+                    }
+                }
+                if (!String.IsNullOrWhiteSpace(processing))
+                {
+                    var requestId = Path.GetFileName(processing).Split('.')[0];
+                    if (!Regex.IsMatch(requestId, "^[A-Za-z0-9_-]{8,80}$"))
+                    {
+                        try { File.Delete(processing); } catch { }
+                        continue;
+                    }
+                    var payload = _json.DeserializeObject(File.ReadAllText(processing, Encoding.UTF8)) as Dictionary<string, object>;
+                    if (payload == null)
+                    {
+                        try { File.Delete(processing); } catch { }
+                        continue;
+                    }
+                    WriteTextAtomic(Path.Combine(_queueRoot, "browser-extension.heartbeat"), DateTimeOffset.UtcNow.ToUnixTimeMilliseconds().ToString());
+                    return new Dictionary<string, object>
+                    {
+                        { "ok", true },
+                        { "request_id", requestId },
+                        { "request", payload }
+                    };
+                }
+            }
+            catch { }
+            Thread.Sleep(100);
+        } while (DateTime.UtcNow < deadline);
+        return null;
     }
 
     private Dictionary<string, object> BuildState()

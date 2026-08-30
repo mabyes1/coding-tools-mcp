@@ -23,6 +23,11 @@ internal static class ComputerUseHelper
     private const uint MouseEventRightDown = 0x0008;
     private const uint MouseEventRightUp = 0x0010;
     private const uint PrintWindowRenderFullContent = 0x00000002;
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint { public int X; public int Y; }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetCursorPos(out NativePoint point);
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool SetCursorPos(int x, int y);
@@ -205,13 +210,13 @@ internal static class ComputerUseHelper
             else if (action == "click")
             {
                 ActivateWindow(windowId);
-                ClickTarget(request, windowId, false);
+                ClickTarget(request, windowId, false, browserOnly);
                 Thread.Sleep(120);
             }
             else if (action == "right_click")
             {
                 ActivateWindow(windowId);
-                ClickTarget(request, windowId, true);
+                ClickTarget(request, windowId, true, browserOnly);
                 Thread.Sleep(120);
             }
             else if (action == "type_text")
@@ -502,12 +507,23 @@ internal static class ComputerUseHelper
         return false;
     }
 
-    private static void ClickTarget(Dictionary<string, object> request, long windowId, bool rightClick)
+    private static void ClickTarget(Dictionary<string, object> request, long windowId, bool rightClick, bool browserOnly)
     {
         if (request.ContainsKey("element_index") && request["element_index"] != null)
         {
             var element = ResolveElement(request, windowId);
             if (!rightClick && TryInvokeElement(element)) return;
+
+            if (rightClick && browserOnly)
+            {
+                try
+                {
+                    element.SetFocus();
+                    SendKeys.SendWait("+{F10}");
+                    return;
+                }
+                catch { }
+            }
 
             Rect elementRect = element.Current.BoundingRectangle;
             if (elementRect.IsEmpty || elementRect.Width <= 1 || elementRect.Height <= 1)
@@ -533,6 +549,13 @@ internal static class ComputerUseHelper
         if (x < 0 || y < 0 || x >= rootRect.Width || y >= rootRect.Height)
             throw new InvalidOperationException("The requested click coordinates fall outside the target window.");
 
+        if (!rightClick)
+        {
+            var point = new System.Windows.Point(rootRect.X + x, rootRect.Y + y);
+            var accessibleTarget = AutomationElement.FromPoint(point);
+            if (accessibleTarget != null && TryInvokeElement(accessibleTarget)) return;
+        }
+
         MouseClickScreenPoint(
             (int)Math.Round(rootRect.X + x),
             (int)Math.Round(rootRect.Y + y),
@@ -542,18 +565,29 @@ internal static class ComputerUseHelper
 
     private static void MouseClickScreenPoint(int x, int y, bool rightClick)
     {
+        NativePoint original;
+        bool restore = GetCursorPos(out original);
         if (!SetCursorPos(x, y))
             throw new InvalidOperationException("Windows refused to move the pointer to the requested click target.");
-        Thread.Sleep(30);
-        if (rightClick)
+        try
         {
-            mouse_event(MouseEventRightDown, 0, 0, 0, UIntPtr.Zero);
-            mouse_event(MouseEventRightUp, 0, 0, 0, UIntPtr.Zero);
+            Thread.Sleep(30);
+            if (rightClick)
+            {
+                mouse_event(MouseEventRightDown, 0, 0, 0, UIntPtr.Zero);
+                mouse_event(MouseEventRightUp, 0, 0, 0, UIntPtr.Zero);
+            }
+            else
+            {
+                mouse_event(MouseEventLeftDown, 0, 0, 0, UIntPtr.Zero);
+                mouse_event(MouseEventLeftUp, 0, 0, 0, UIntPtr.Zero);
+            }
         }
-        else
+        finally
         {
-            mouse_event(MouseEventLeftDown, 0, 0, 0, UIntPtr.Zero);
-            mouse_event(MouseEventLeftUp, 0, 0, 0, UIntPtr.Zero);
+            NativePoint current;
+            if (restore && GetCursorPos(out current) && Math.Abs(current.X - x) <= 2 && Math.Abs(current.Y - y) <= 2)
+                SetCursorPos(original.X, original.Y);
         }
     }
 
@@ -573,7 +607,18 @@ internal static class ComputerUseHelper
         // those controls without interpreting braces, plus signs, or other
         // SendKeys metacharacters as commands.
         try { element.SetFocus(); }
-        catch { throw new InvalidOperationException("The target element is not writable and could not receive keyboard focus."); }
+        catch
+        {
+            Rect editRect = element.Current.BoundingRectangle;
+            if (editRect.IsEmpty || editRect.Width <= 1 || editRect.Height <= 1)
+                throw new InvalidOperationException("The target element is not writable and has no usable bounds for keyboard focus.");
+            MouseClickScreenPoint(
+                (int)Math.Round(editRect.X + editRect.Width / 2.0),
+                (int)Math.Round(editRect.Y + editRect.Height / 2.0),
+                false
+            );
+        }
+        Thread.Sleep(50);
         SendKeys.SendWait("^a");
         SendKeys.SendWait(EscapeSendKeysText(value));
     }

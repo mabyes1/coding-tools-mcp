@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "CODING MCP 主控台",
-  "version": "0.1.15",
-  "description": "把 coding-tools 工作紀錄與 HUMAN_HELP 直接嵌入 ChatGPT 網頁。",
-  "permissions": ["storage"],
+  "version": "0.2.0",
+  "description": "把 coding-tools 工作紀錄與 HUMAN_HELP 嵌入 ChatGPT，並提供不接管使用者分頁的 Browser Use。",
+  "permissions": ["storage", "tabs", "tabGroups", "debugger"],
   "host_permissions": ["http://127.0.0.1:8768/*"],
   "background": {
     "service_worker": "background.js"
