@@ -63,7 +63,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "human_help_me": ToolSpec(
         title="Human help me",
-        description="Escalate one small step to the human. Prefer the desktop QA prompt; if chat fallback is returned, surface it visibly. Never offload ordinary agent work.",
+        description="Escalate one small step to the human. Use desktop_only in local Codex; auto keeps Web Console first with desktop fallback. Surface chat fallbacks visibly. Never offload ordinary work.",
         read_only=True,
     ),
     "computer_use": ToolSpec(
@@ -113,7 +113,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "set_default_cwd": ToolSpec(
         title="Set default cwd",
-        description="Enter a project. If the ChatGPT Web Project name is known, pass project_name to select a same-named first-level directory or workspace-root fallback. Persists across reconnects and relative paths.",
+        description="Enter a project or switch to a named allowlisted workspace with workspace. The selection persists across reconnects and relative paths.",
         idempotent=True,
     ),
     "read_file": ToolSpec(
@@ -298,13 +298,24 @@ def _validate_public_tool_catalog() -> None:
 _validate_public_tool_catalog()
 
 
-def tool_definition(name: str, *, fake_readonly: bool = False) -> dict[str, Any]:
+def tool_definition(
+    name: str,
+    *,
+    fake_readonly: bool = False,
+    permission_mode: str | None = None,
+) -> dict[str, Any]:
     schemas = input_schemas()
     annotations = tool_annotations(name, fake_readonly=fake_readonly)
+    description = TOOL_REGISTRY[name].description
+    if name == "exec_command" and permission_mode == "dangerous":
+        description = (
+            "YOLO mode: execute arbitrary commands, including commands that create, edit, move, rename, or delete files. "
+            "service is managed Session 0; active_user is the signed-in desktop user. Set intent to a short user-facing run reason."
+        )
     return {
         "name": name,
         "title": annotations["title"],
-        "description": TOOL_REGISTRY[name].description,
+        "description": description,
         "inputSchema": schemas[name],
         "outputSchema": tool_output_schema(),
         "annotations": annotations,

@@ -5,7 +5,7 @@ import json
 from typing import Any
 
 
-EXPECTED_PUBLIC_CONTRACT_SHA256 = "23737db68b2d98b39abe1d962bcb3a53f3abb8f261376797f51beb5ed7b8924e"
+EXPECTED_PUBLIC_CONTRACT_SHA256 = "281f076e4b632519dbdc55fec43fa09fa220cf5f61f4dd17f1e15ed56f53d710"
 
 
 def run_catalog_checks(server: Any, elevated_actions: Any, activity_module: Any) -> dict[str, tuple[str, ...]]:
@@ -71,6 +71,9 @@ def run_catalog_checks(server: Any, elevated_actions: Any, activity_module: Any)
         )
 
     schemas = server.input_schemas()
+    cwd_workspace_schema = schemas["set_default_cwd"].get("properties", {}).get("workspace", {})
+    if cwd_workspace_schema.get("type") != "string" or cwd_workspace_schema.get("maxLength") != 64:
+        raise RuntimeError("set_default_cwd lost its named-workspace selector")
     exec_schema = schemas["exec_command"]
     execution_context = exec_schema.get("properties", {}).get("execution_context", {})
     if execution_context.get("enum") != ["service", "active_user"]:
@@ -153,6 +156,9 @@ def run_catalog_checks(server: Any, elevated_actions: Any, activity_module: Any)
     human_reasons = human_schema.get("properties", {}).get("reason", {}).get("enum", [])
     if "faster_by_human" not in human_reasons or "permission_blocked" not in human_reasons:
         raise RuntimeError("human_help_me reason schema is missing core escalation reasons")
+    human_delivery = human_schema.get("properties", {}).get("delivery", {}).get("enum", [])
+    if not {"auto", "desktop_only", "chat_only"}.issubset(human_delivery):
+        raise RuntimeError("human_help_me delivery schema is missing automatic, desktop-only, or chat-only routing")
 
     computer_actions = schemas["computer_use"]["properties"]["action"].get("enum", [])
     if "inspect" not in computer_actions or "click" not in computer_actions or "type_text" not in computer_actions:

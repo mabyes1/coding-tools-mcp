@@ -238,6 +238,18 @@ def run_cwd_git_permission_checks(server: Any, runtime_module: Any) -> None:
                     )
                     if not dangerous.dangerously_skip_all_permissions:
                         raise RuntimeError("dangerous mode did not enable the YOLO permission policy")
+                    dangerous_exec = next(
+                        tool for tool in dangerous.list_tools()["tools"] if tool["name"] == "exec_command"
+                    )
+                    dangerous_description = str(dangerous_exec.get("description", ""))
+                    if "edit, move, rename, or delete files" not in dangerous_description:
+                        raise RuntimeError("dangerous mode did not expose YOLO filesystem mutation in exec_command")
+
+                    safe_exec = next(
+                        tool for tool in primary.list_tools()["tools"] if tool["name"] == "exec_command"
+                    )
+                    if "Never edit files." not in str(safe_exec.get("description", "")):
+                        raise RuntimeError("safe mode lost the exec_command filesystem guard")
                 finally:
                     dangerous.close()
             finally:

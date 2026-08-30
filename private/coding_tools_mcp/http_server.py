@@ -620,6 +620,14 @@ class RuntimeHTTPServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 64
 
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """Do not print scary tracebacks for ordinary client disconnects."""
+
+        _exc_type, exc, _traceback = sys.exc_info()
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+            return
+        super().handle_error(request, client_address)
+
     def __init__(
         self,
         address: tuple[str, int],

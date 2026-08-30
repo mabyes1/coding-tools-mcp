@@ -234,6 +234,7 @@ def request_human_help(
     return_to_agent: str,
     mode: str,
     fallback: str,
+    delivery: str,
     timeout_seconds: float,
 ) -> dict[str, Any]:
     """Ask the signed-in human one focused question/action through the desktop broker."""
@@ -275,6 +276,7 @@ def request_human_help(
         "return_to_agent": str(return_to_agent),
         "mode": str(mode),
         "fallback": str(fallback),
+        "delivery": str(delivery),
         "timeout_seconds": int(timeout),
     }
     try:

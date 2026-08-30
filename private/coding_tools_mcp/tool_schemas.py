@@ -183,7 +183,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "return_to_agent": {**string, "maxLength": 4000},
                 "mode": {**string, "enum": ["prefer_human", "blocking"], "default": "prefer_human"},
                 "fallback": {**string, "enum": ["continue_best_effort", "wait_for_human"], "default": "continue_best_effort"},
-                "delivery": {**string, "enum": ["auto", "chat_only"], "default": "auto"},
+                "delivery": {**string, "enum": ["auto", "desktop_only", "chat_only"], "default": "auto"},
                 "timeout_seconds": {**integer, "minimum": 5, "maximum": 300, "default": 60},
             },
             ["reason", "request"],
@@ -247,6 +247,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
             {
                 "path": {**string, "default": "."},
                 "project_name": {**string, "minLength": 1, "maxLength": 255},
+                "workspace": {**string, "minLength": 1, "maxLength": 64},
             }
         ),
         "read_file": object_schema(

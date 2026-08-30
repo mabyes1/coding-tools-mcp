@@ -77,6 +77,17 @@ def run_workspace_filesystem_checks(server: Any) -> None:
             (docs / "binary.bin").write_bytes(b"abc\x00def")
             filesystem_runtime = server.Runtime(alpha, enable_view_image=False)
             try:
+                switched = filesystem_runtime.set_default_cwd({"workspace": "Beta"})
+                if switched.get("name") != "Beta" or filesystem_runtime.workspace.root != beta.resolve():
+                    raise RuntimeError("set_default_cwd no longer switches named allowlisted workspaces")
+                try:
+                    filesystem_runtime.set_default_cwd({"workspace": "Alpha", "path": "docs"})
+                except server.ToolFailure as exc:
+                    if exc.code != "INVALID_ARGUMENT":
+                        raise
+                else:
+                    raise RuntimeError("set_default_cwd accepted conflicting workspace and path selectors")
+                filesystem_runtime.set_default_cwd({"workspace": "Alpha"})
                 read_result = filesystem_runtime.read_file(
                     {"path": "docs/a.txt", "start_line": 2, "max_lines": 1}
                 )

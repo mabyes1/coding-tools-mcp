@@ -44,7 +44,7 @@ $env:CODING_TOOLS_MCP_HEALTH_PORT = "8766"
 $env:CODING_TOOLS_MCP_TUNNEL_PORT = "8767"
 $env:CODING_TOOLS_MCP_RUNTIME_ROOT = Join-Path $serviceRoot "runtime"
 $env:CODING_TOOLS_MCP_PWSH_PATH = "C:\Program Files\PowerShell\7\pwsh.exe"
-$env:CODING_TOOLS_MCP_WORKSPACE_ALLOWLIST = "coding-tools=D:\coding-tools-mcp"
+$env:CODING_TOOLS_MCP_WORKSPACE_ALLOWLIST = "coding-tools=D:\coding-tools-mcp;bulter=M:\"
 $env:CODING_TOOLS_MCP_EXECUTABLE_ALLOWLIST = "adb.exe;git.exe;dotnet.exe;node.exe;pwsh.exe"
 $env:CODING_TOOLS_MCP_ELEVATED_QUEUE = Join-Path $serviceRoot "elevated-requests"
 $env:PYTHONPATH = $privateAppRoot

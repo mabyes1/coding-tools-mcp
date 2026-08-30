@@ -20,7 +20,7 @@ if (-not (Test-Path -LiteralPath $serviceRoot -PathType Container)) {
 }
 
 New-Item -ItemType Directory -Path $queueRoot -Force | Out-Null
-foreach ($file in @("interactive-broker.ps1", "manage-interactive-broker.ps1")) {
+foreach ($file in @("interactive-broker.ps1", "manage-interactive-broker.ps1", "manage-mcp-permissions.ps1", "manage-web-console-system.ps1")) {
     $source = Join-Path $sourceRoot $file
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
         throw "Interactive broker source is missing: $source"
@@ -67,7 +67,8 @@ $bridgeSource = Join-Path $sourceRoot "WebConsoleBridge.cs"
 if (-not (Test-Path -LiteralPath $bridgeSource -PathType Leaf)) { throw "Web Console bridge source is missing: $bridgeSource" }
 $bridgeExe = Join-Path $serviceRoot "web-console-bridge.exe"
 & $csc /nologo /target:winexe /optimize+ /out:$bridgeExe `
-    /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\System.Web.Extensions.dll" $bridgeSource
+    /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\System.Web.Extensions.dll" `
+    /reference:System.ServiceProcess.dll $bridgeSource
 if ($LASTEXITCODE -ne 0) { throw "Could not build Web Console bridge." }
 
 $extensionSource = Join-Path (Split-Path -Parent $sourceRoot) "browser-extension"
@@ -83,7 +84,7 @@ if (Test-Path -LiteralPath $extensionSource -PathType Container) {
     "${localServiceSid}:(OI)(CI)M" /C | Out-Host
 if ($LASTEXITCODE -ne 0) { throw "Could not secure the interactive broker queue." }
 
-foreach ($file in @("interactive-broker.ps1", "manage-interactive-broker.ps1")) {
+foreach ($file in @("interactive-broker.ps1", "manage-interactive-broker.ps1", "manage-mcp-permissions.ps1", "manage-web-console-system.ps1")) {
     $installed = Join-Path $serviceRoot $file
     & icacls.exe $installed /grant:r "${currentAccount}:RX" "${localServiceSid}:RX" /C | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "Could not grant broker file access: $installed" }

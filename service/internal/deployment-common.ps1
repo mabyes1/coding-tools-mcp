@@ -250,6 +250,8 @@ function Get-CodingToolsManagedServiceFiles {
         "interactive-broker.ps1",
         "manage-interactive-broker.ps1",
         "install-interactive-broker.ps1",
+        "manage-mcp-permissions.ps1",
+        "manage-web-console-system.ps1",
         "interactive-broker-launcher.exe",
         "computer-use-helper.exe",
         "computer-use-overlay.exe",
@@ -269,7 +271,8 @@ function New-CodingToolsBrokerArtifactStage(
     New-Item -ItemType Directory -Path $serviceStage -Force | Out-Null
     foreach ($file in @(
         "elevated-broker.ps1", "manage-elevated-broker.ps1",
-        "interactive-broker.ps1", "manage-interactive-broker.ps1", "install-interactive-broker.ps1"
+        "interactive-broker.ps1", "manage-interactive-broker.ps1", "install-interactive-broker.ps1",
+        "manage-mcp-permissions.ps1", "manage-web-console-system.ps1"
     )) {
         $source = Join-Path $ServiceSourceRoot $file
         Assert-DeploymentPath $source "Broker source"
@@ -305,6 +308,7 @@ function New-CodingToolsBrokerArtifactStage(
     if ($LASTEXITCODE -ne 0) { throw "Could not stage the Activity Log viewer." }
     & $csc /nologo /target:winexe /optimize+ ("/out:" + (Join-Path $serviceStage "web-console-bridge.exe")) `
         /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\System.Web.Extensions.dll" `
+        /reference:System.ServiceProcess.dll `
         (Join-Path $ServiceSourceRoot "WebConsoleBridge.cs")
     if ($LASTEXITCODE -ne 0) { throw "Could not stage the Web Console bridge." }
 
@@ -354,6 +358,17 @@ function Invoke-CodingToolsTunnelServerInfo([int]$TimeoutSeconds = 3) {
     return $info
 }
 
+function Get-CodingToolsServerPackageVersion([object]$ServerInfo) {
+    $packageVersion = ""
+    if ($ServerInfo -and $ServerInfo.build_identity) {
+        $packageVersion = [string]$ServerInfo.build_identity.package_version
+    }
+    if ([string]::IsNullOrWhiteSpace($packageVersion)) {
+        $packageVersion = [string]$ServerInfo.version
+    }
+    return $packageVersion
+}
+
 function Wait-CodingToolsMcpReady([int]$Seconds = 30) {
     $deadline = (Get-Date).AddSeconds($Seconds)
     $lastError = "not probed"
@@ -366,8 +381,9 @@ function Wait-CodingToolsMcpReady([int]$Seconds = 30) {
                 continue
             }
             $serverInfo = Invoke-CodingToolsTunnelServerInfo -TimeoutSeconds 3
-            if ($serverInfo.version -ne $health.version) {
-                $lastError = "health/tunnel version mismatch ($($health.version) != $($serverInfo.version))"
+            $serverPackageVersion = Get-CodingToolsServerPackageVersion $serverInfo
+            if ($serverPackageVersion -ne $health.version) {
+                $lastError = "health/tunnel version mismatch ($($health.version) != $serverPackageVersion; tunnel display=$($serverInfo.version))"
                 continue
             }
             if ($serverInfo.workspace -ne $health.workspace) {
@@ -467,8 +483,9 @@ function Start-CodingToolsPrivateServices(
     Set-CodingToolsMcpRecoveryPolicy
     Start-Service -Name WebGPTCodingToolsMCP
     $serverInfo = Wait-CodingToolsMcpReady
-    if (-not [string]::IsNullOrWhiteSpace($ExpectedVersion) -and $serverInfo.version -ne $ExpectedVersion) {
-        throw "MCP started with version $($serverInfo.version), expected $ExpectedVersion."
+    $serverPackageVersion = Get-CodingToolsServerPackageVersion $serverInfo
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedVersion) -and $serverPackageVersion -ne $ExpectedVersion) {
+        throw "MCP started with package version $serverPackageVersion (display $($serverInfo.version)), expected $ExpectedVersion."
     }
     $secureTunnel = Get-Service -Name OpenAITunnelClient -ErrorAction SilentlyContinue
     if ($secureTunnel) {

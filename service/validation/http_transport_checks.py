@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextlib
+import io
 import time
 from typing import Any
 
@@ -58,3 +60,13 @@ def run_http_transport_checks(
     disconnect = DisconnectingHandler()
     if server._write_http_body_safely(disconnect, b"test") or not disconnect.close_connection:
         raise RuntimeError("client disconnects are not handled as normal response termination")
+
+    quiet_server = object.__new__(server.RuntimeHTTPServer)
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        try:
+            raise ConnectionResetError("selfcheck disconnect")
+        except ConnectionResetError:
+            quiet_server.handle_error(None, ("127.0.0.1", 1))
+    if stderr.getvalue():
+        raise RuntimeError("ordinary client disconnects still print server tracebacks")

@@ -2,7 +2,8 @@
 param(
     [ValidateSet("Menu", "Status", "Safe", "Trusted", "Yolo")]
     [string]$Action = "Menu",
-    [switch]$NoRestart
+    [switch]$NoRestart,
+    [switch]$ConfirmYolo
 )
 
 $ErrorActionPreference = "Stop"
@@ -30,6 +31,7 @@ function Show-Status {
 
 function Restart-McpServices {
     Stop-Service WebGPTCloudflareTunnel -Force -ErrorAction SilentlyContinue
+    Stop-Service OpenAITunnelClient -Force -ErrorAction SilentlyContinue
     Stop-Service WebGPTCodingToolsMCP -Force -ErrorAction SilentlyContinue
     Start-Service WebGPTCodingToolsMCP
     $deadline = (Get-Date).AddSeconds(30)
@@ -38,15 +40,18 @@ function Restart-McpServices {
         $health = try { Invoke-RestMethod http://127.0.0.1:8766/healthz -TimeoutSec 2 } catch { $null }
     } while (-not $health -and (Get-Date) -lt $deadline)
     if (-not $health) { throw "MCP health endpoint did not recover after permission-mode restart." }
-    Start-Service WebGPTCloudflareTunnel
+    if (Get-Service OpenAITunnelClient -ErrorAction SilentlyContinue) { Start-Service OpenAITunnelClient }
+    if (Get-Service WebGPTCloudflareTunnel -ErrorAction SilentlyContinue) { Start-Service WebGPTCloudflareTunnel }
 }
 
 function Set-Mode([string]$Mode) {
     if ($Mode -notin $validModes) { throw "Unsupported permission mode: $Mode" }
     if ($Mode -eq "dangerous") {
         Write-Host "WARNING: YOLO disables command permission gates, network restrictions, secret-env filtering, and the Linux sandbox." -ForegroundColor Red
-        $confirmation = Read-Host "Type YOLO to continue"
-        if ($confirmation -cne "YOLO") { Write-Host "Cancelled."; return }
+        if (-not $ConfirmYolo) {
+            $confirmation = Read-Host "Type YOLO to continue"
+            if ($confirmation -cne "YOLO") { Write-Host "Cancelled."; return }
+        }
     }
     $temporary = "$modePath.$([Guid]::NewGuid().ToString('N')).tmp"
     [IO.File]::WriteAllText($temporary, "$Mode`r`n", [Text.UTF8Encoding]::new($false))

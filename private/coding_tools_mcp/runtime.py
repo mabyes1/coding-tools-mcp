@@ -312,7 +312,11 @@ class Runtime:
     def list_tools(self) -> dict[str, Any]:
         return {
             "tools": [
-                tool_definition(name, fake_readonly=self.fake_readonly_annotations)
+                tool_definition(
+                    name,
+                    fake_readonly=self.fake_readonly_annotations,
+                    permission_mode=self.permission_mode,
+                )
                 for name in self.exposed_tool_names()
             ]
         }
@@ -681,6 +685,18 @@ class Runtime:
         }
 
     def set_default_cwd(self, args: dict[str, Any]) -> dict[str, Any]:
+        workspace_selector = str(args.get("workspace") or "").strip()
+        if workspace_selector:
+            path = str(args.get("path") or ".").strip()
+            project_name = str(args.get("project_name") or "").strip()
+            if project_name or path not in {"", "."}:
+                raise ToolFailure(
+                    "INVALID_ARGUMENT",
+                    "workspace cannot be combined with path or project_name.",
+                    category="validation",
+                )
+            return self.switch_workspace({"workspace": workspace_selector})
+
         project_name = str(args.get("project_name") or "").strip()
         if project_name:
             if project_name in {".", ".."} or "/" in project_name or "\\" in project_name:

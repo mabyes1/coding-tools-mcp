@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.ServiceProcess;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -13,17 +15,21 @@ internal sealed class WebConsoleBridge
     private readonly string _logPath;
     private readonly string _queueRoot;
     private readonly string _permissionModePath;
+    private readonly string _repoRoot;
+    private readonly string _serviceRoot;
     private readonly string _pidPath;
     private readonly int _port;
     private readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = 1024 * 1024 };
     private readonly object _fileLock = new object();
     private volatile bool _running = true;
 
-    public WebConsoleBridge(string logPath, string queueRoot, string permissionModePath, string pidPath, int port)
+    public WebConsoleBridge(string logPath, string queueRoot, string permissionModePath, string repoRoot, string pidPath, int port)
     {
         _logPath = logPath;
         _queueRoot = queueRoot;
         _permissionModePath = permissionModePath;
+        _repoRoot = repoRoot;
+        _serviceRoot = Path.GetDirectoryName(permissionModePath) ?? AppDomain.CurrentDomain.BaseDirectory;
         _pidPath = pidPath;
         _port = port;
     }
@@ -155,6 +161,31 @@ internal sealed class WebConsoleBridge
             WriteJson(stream, 200, new Dictionary<string, object> { { "ok", true }, { "dnd", IsDnd() } }, origin);
             return;
         }
+        if (request.Method == "POST" && request.Path == "/v1/system/action")
+        {
+            var body = DeserializeBody(request);
+            var action = body.ContainsKey("action") ? Convert.ToString(body["action"]).Trim().ToLowerInvariant() : "";
+            if (action == "health")
+            {
+                var result = InvokeLoopbackJson("GET", "http://127.0.0.1:8766/healthz");
+                WriteJson(stream, Convert.ToBoolean(result["ok"]) ? 200 : 409, result, origin);
+                return;
+            }
+            if (action == "prune")
+            {
+                var result = InvokeLoopbackJson("POST", "http://127.0.0.1:8766/prune");
+                WriteJson(stream, Convert.ToBoolean(result["ok"]) ? 200 : 409, result, origin);
+                return;
+            }
+            var launched = LaunchAdminAction(action);
+            if (launched == null)
+            {
+                WriteJson(stream, 400, new Dictionary<string, object> { { "ok", false }, { "error", "invalid_system_action" } }, origin);
+                return;
+            }
+            WriteJson(stream, Convert.ToBoolean(launched["ok"]) ? 200 : 409, launched, origin);
+            return;
+        }
         if (request.Method == "POST" && request.Path == "/v1/activity/clear")
         {
             lock (_fileLock)
@@ -205,9 +236,136 @@ internal sealed class WebConsoleBridge
             { "activity", ReadTail(_logPath, 192 * 1024) },
             { "dnd", IsDnd() },
             { "permission_mode", ReadSmallText(_permissionModePath, "safe") },
+            { "services", ReadServiceStates() },
             { "human_help", ReadPendingHumanHelp() }
         };
         return state;
+    }
+
+    private Dictionary<string, object> ReadServiceStates()
+    {
+        return new Dictionary<string, object>
+        {
+            { "mcp", ReadServiceState("WebGPTCodingToolsMCP") },
+            { "secure_tunnel", ReadServiceState("OpenAITunnelClient") },
+            { "legacy_tunnel", ReadServiceState("WebGPTCloudflareTunnel") }
+        };
+    }
+
+    private static Dictionary<string, object> ReadServiceState(string name)
+    {
+        try
+        {
+            using (var service = new ServiceController(name))
+            {
+                return new Dictionary<string, object>
+                {
+                    { "name", name },
+                    { "installed", true },
+                    { "status", service.Status.ToString().ToLowerInvariant() }
+                };
+            }
+        }
+        catch
+        {
+            return new Dictionary<string, object>
+            {
+                { "name", name },
+                { "installed", false },
+                { "status", "missing" }
+            };
+        }
+    }
+
+    private Dictionary<string, object> InvokeLoopbackJson(string method, string url)
+    {
+        try
+        {
+            var request = (HttpWebRequest)WebRequest.Create(url);
+            request.Method = method;
+            request.Timeout = 3000;
+            request.ReadWriteTimeout = 3000;
+            if (String.Equals(method, "POST", StringComparison.OrdinalIgnoreCase)) request.ContentLength = 0;
+            using (var response = (HttpWebResponse)request.GetResponse())
+            using (var reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
+            {
+                var text = reader.ReadToEnd();
+                var payload = _json.DeserializeObject(text) as Dictionary<string, object>;
+                if (payload == null) payload = new Dictionary<string, object> { { "raw", text } };
+                payload["ok"] = true;
+                return payload;
+            }
+        }
+        catch (Exception exc)
+        {
+            return new Dictionary<string, object>
+            {
+                { "ok", false },
+                { "error", exc.Message }
+            };
+        }
+    }
+
+    private Dictionary<string, object> LaunchAdminAction(string action)
+    {
+        var actionMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "start_all", "StartAll" },
+            { "stop_all", "StopAll" },
+            { "restart_all", "RestartAll" },
+            { "restart_tunnel", "RestartTunnel" },
+            { "update", "Update" },
+            { "rollback", "Rollback" },
+            { "safe", "Safe" },
+            { "trusted", "Trusted" },
+            { "yolo", "Yolo" }
+        };
+        string mapped;
+        if (!actionMap.TryGetValue(action, out mapped)) return null;
+
+        var script = Path.Combine(_serviceRoot, "manage-web-console-system.ps1");
+        if (!File.Exists(script))
+        {
+            return new Dictionary<string, object> { { "ok", false }, { "error", "web_console_admin_helper_missing" } };
+        }
+        try
+        {
+            var windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            var powershell = Path.Combine(windows, @"System32\WindowsPowerShell\v1.0\powershell.exe");
+            var arguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -File " + QuoteArgument(script)
+                + " -Action " + QuoteArgument(mapped)
+                + " -RepoRoot " + QuoteArgument(_repoRoot);
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = powershell,
+                Arguments = arguments,
+                WorkingDirectory = _serviceRoot,
+                UseShellExecute = true,
+                Verb = "runas",
+                WindowStyle = ProcessWindowStyle.Normal
+            });
+            return new Dictionary<string, object>
+            {
+                { "ok", true },
+                { "accepted", true },
+                { "requires_uac", true },
+                { "action", action }
+            };
+        }
+        catch (Exception exc)
+        {
+            return new Dictionary<string, object>
+            {
+                { "ok", false },
+                { "error", exc.Message },
+                { "action", action }
+            };
+        }
+    }
+
+    private static string QuoteArgument(string value)
+    {
+        return "\"" + (value ?? "").Replace("\"", "") + "\"";
     }
 
     private object ReadPendingHumanHelp()
@@ -389,9 +547,10 @@ internal sealed class WebConsoleBridge
             var queue = values.ContainsKey("--queue") ? values["--queue"] : @"C:\ProgramData\WebGPTCodingToolsMCPService\interactive-requests";
             var log = values.ContainsKey("--log") ? values["--log"] : @"C:\ProgramData\WebGPTCodingToolsMCPService\logs\ai-activity.log";
             var mode = values.ContainsKey("--permission-mode") ? values["--permission-mode"] : @"C:\ProgramData\WebGPTCodingToolsMCPService\permission-mode.txt";
+            var repo = values.ContainsKey("--repo") ? values["--repo"] : @"D:\coding-tools-mcp\coding-tools-mcp";
             var pid = values.ContainsKey("--pid") ? values["--pid"] : Path.Combine(queue, "web-console.pid");
             var port = values.ContainsKey("--port") ? Int32.Parse(values["--port"]) : 8768;
-            new WebConsoleBridge(log, queue, mode, pid, port).Run();
+            new WebConsoleBridge(log, queue, mode, repo, pid, port).Run();
             return 0;
         }
         catch (Exception exc)

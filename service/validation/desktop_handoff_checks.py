@@ -50,14 +50,47 @@ def run_desktop_handoff_checks(server: Any, runtime_module: Any, workspace: Path
     with tempfile.TemporaryDirectory(prefix="coding-tools-desktop-contract-") as temporary:
         desktop_runtime = server.Runtime(Path(temporary), enable_view_image=False)
         original_computer_use = runtime_module.request_computer_use
+        original_human_help = runtime_module.request_human_help
         desktop_calls: list[dict[str, object]] = []
+        human_help_calls: list[dict[str, object]] = []
 
         def fake_computer_use(**kwargs: object) -> dict[str, object]:
             desktop_calls.append(dict(kwargs))
             return {"ok": True, "action": kwargs.get("action")}
 
+        def fake_human_help(**kwargs: object) -> dict[str, object]:
+            human_help_calls.append(dict(kwargs))
+            return {
+                "ok": True,
+                "outcome": "done",
+                "answer": "",
+                "execution_context": "active_user" if kwargs.get("delivery") == "desktop_only" else "web_console",
+            }
+
         runtime_module.request_computer_use = fake_computer_use
+        runtime_module.request_human_help = fake_human_help
         try:
+            desktop_help = desktop_runtime.human_help_me(
+                {
+                    "reason": "gui_required",
+                    "request": "Confirm the desktop-only prompt.",
+                    "delivery": "desktop_only",
+                }
+            )
+            auto_help = desktop_runtime.human_help_me(
+                {
+                    "reason": "gui_required",
+                    "request": "Confirm the automatic prompt.",
+                    "delivery": "auto",
+                }
+            )
+            if [call.get("delivery") for call in human_help_calls] != ["desktop_only", "auto"]:
+                raise RuntimeError("human_help_me no longer forwards the requested delivery policy")
+            if desktop_help.get("delivery") != "desktop_qa":
+                raise RuntimeError("desktop_only human help no longer reports desktop QA delivery")
+            if auto_help.get("delivery") != "web_qa":
+                raise RuntimeError("auto human help no longer preserves Web Console delivery")
+
             windows_result = desktop_runtime.computer_use(
                 {
                     "action": "click",
@@ -95,4 +128,5 @@ def run_desktop_handoff_checks(server: Any, runtime_module: Any, workspace: Path
                 raise RuntimeError("browser_use navigate URL mapping drifted")
         finally:
             runtime_module.request_computer_use = original_computer_use
+            runtime_module.request_human_help = original_human_help
             desktop_runtime.close()

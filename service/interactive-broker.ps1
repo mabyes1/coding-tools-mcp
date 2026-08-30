@@ -110,6 +110,7 @@ function Start-WebConsoleBridge {
             "--log", $activityLogPath,
             "--queue", $queueRoot,
             "--permission-mode", (Join-Path $serviceRoot "permission-mode.txt"),
+            "--repo", "D:\coding-tools-mcp\coding-tools-mcp",
             "--pid", $webConsolePid,
             "--port", "8768"
         ) | Out-Null
@@ -552,13 +553,15 @@ function Handle-HumanHelpRequest([string]$RequestId, $Request) {
     $reason = [string]$Request.reason
     $mode = [string]$Request.mode
     $fallback = [string]$Request.fallback
+    $delivery = [string]$Request.delivery
+    if ([string]::IsNullOrWhiteSpace($delivery)) { $delivery = "auto" }
     $timeoutSeconds = [Math]::Max(5, [Math]::Min([int]$Request.timeout_seconds, 300))
     if ([string]::IsNullOrWhiteSpace($requestText) -or $requestText.Length -gt 4000) {
         Complete-Request $RequestId @{ ok = $false; error = "HUMAN_HELP_REQUEST_INVALID"; message = "Human-help request is missing or too large."; retryable = $false }
         return
     }
 
-    if (Try-HandleHumanHelpInWebConsole $RequestId $Request $timeoutSeconds) { return }
+    if ($delivery -ne "desktop_only" -and (Try-HandleHumanHelpInWebConsole $RequestId $Request $timeoutSeconds)) { return }
 
     try {
         Write-BrokerLog "HUMAN_HELP_START id=$RequestId reason=$reason mode=$mode fallback=$fallback timeout=$timeoutSeconds"

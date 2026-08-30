@@ -110,6 +110,8 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
 
     for readiness_contract in (
         "Invoke-CodingToolsTunnelServerInfo",
+        "Get-CodingToolsServerPackageVersion",
+        "$ServerInfo.build_identity.package_version",
         "Set-CodingToolsMcpRecoveryPolicy",
         'method = "tools/call"',
         'name = "server_info"',
@@ -121,6 +123,12 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
     ):
         if readiness_contract not in deployment_common_text:
             raise RuntimeError(f"service readiness lost real Tunnel MCP handshake contract: {readiness_contract}")
+    if deployment_common_text.count("Get-CodingToolsServerPackageVersion $serverInfo") < 2:
+        raise RuntimeError(
+            "service readiness must compare canonical package versions for both health matching and expected-version validation"
+        )
+    if "$serverInfo.version -ne $health.version" in deployment_common_text:
+        raise RuntimeError("service readiness regressed to comparing display/build version against package health version")
 
     for tunnel_independence_contract in (
         "[switch]$IncludeLegacyCloudflare",
@@ -277,6 +285,7 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
     helper_text = helper_source.read_text(encoding="utf-8")
     interactive_broker_text = (service_root / "interactive-broker.ps1").read_text(encoding="utf-8")
     web_console_bridge_text = web_console_bridge_source.read_text(encoding="utf-8")
+    web_console_admin_text = (service_root / "manage-web-console-system.ps1").read_text(encoding="utf-8")
     extension_manifest = json.loads((browser_extension_root / "manifest.json").read_text(encoding="utf-8"))
     extension_background_text = (browser_extension_root / "background.js").read_text(encoding="utf-8")
     extension_content_text = (browser_extension_root / "content.js").read_text(encoding="utf-8")
@@ -302,6 +311,10 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
         raise RuntimeError("Computer Use overlay must use per-operation leases")
     if "Try-HandleHumanHelpInWebConsole" not in interactive_broker_text:
         raise RuntimeError("HUMAN HELP stopped preferring the in-page Web Console")
+    if '$delivery -ne "desktop_only"' not in interactive_broker_text:
+        raise RuntimeError("HUMAN HELP desktop-only delivery no longer bypasses the Web Console")
+    if '"delivery": str(delivery)' not in interactive_exec_text or "delivery=delivery" not in desktop_tool_text:
+        raise RuntimeError("HUMAN HELP no longer forwards its delivery policy to the interactive broker")
     if "GetLastWriteTimeUtc($webConsoleHeartbeat)" not in interactive_broker_text:
         raise RuntimeError("Web Console liveness must use heartbeat metadata instead of contended content reads")
     for web_help_delivery_contract in ("HUMAN_HELP_WEB_SEEN", "HUMAN_HELP_WEB_NOT_SEEN", ".web-human-help.seen", ".web-human-help.activity", "HUMAN_HELP_WEB_ACTIVITY"):
@@ -333,7 +346,7 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
         raise RuntimeError("Web Console DND must not suppress HUMAN HELP focus mode or automatic response-panel opening")
     if 'helpId !== lastPresentedHelpId && !state.dnd && document.visibilityState' in extension_content_text:
         raise RuntimeError("Web Console DND regressed to forcing HUMAN HELP desktop fallback")
-    if 'activeTab = "help";' not in extension_content_text or "setOpen(true);" not in extension_content_text:
+    if ('activeTab = "help";' not in extension_content_text and 'selectTab("help")' not in extension_content_text) or "setOpen(true);" not in extension_content_text:
         raise RuntimeError("Web Console HUMAN HELP must force the response panel open even while DND is enabled")
     for input_activity_contract in (
         "HELP_ACTIVITY_THROTTLE_MS",
@@ -380,9 +393,46 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
     for timeout_contract in ("REQUEST_TIMEOUT_MS", "主控台請求逾時"):
         if timeout_contract not in extension_content_text:
             raise RuntimeError(f"Web Console content bridge lost timeout contract: {timeout_contract}")
-    for ui_contract in ("attachShadow", "CODING MCP 主控台", "HUMAN_HELP", "coding-tools-console-request"):
+    for ui_contract in ("attachShadow", "CODING MCP 主控台", "HUMAN_HELP", 'data-tab="settings"', "coding-tools-console-request"):
         if ui_contract not in extension_content_text:
             raise RuntimeError(f"Web Console drawer lost UI contract: {ui_contract}")
+    for settings_contract in (
+        'request("/v1/system/action"',
+        '"restart_all"',
+        '"restart_tunnel"',
+        '"update"',
+        '"rollback"',
+        '"yolo"',
+        "function renderSettings()",
+        ':host([data-theme="dark"])',
+        "function syncPageTheme()",
+        "background:var(--glass-bg)",
+    ):
+        if settings_contract not in extension_content_text:
+            raise RuntimeError(f"Web Console settings surface lost contract: {settings_contract}")
+    for bridge_settings_contract in (
+        'request.Path == "/v1/system/action"',
+        "LaunchAdminAction(action)",
+        '"start_all"',
+        '"restart_all"',
+        '"restart_tunnel"',
+        '"safe"',
+        '"trusted"',
+        '"yolo"',
+        '"services", ReadServiceStates()',
+    ):
+        if bridge_settings_contract not in web_console_bridge_text:
+            raise RuntimeError(f"Web Console bridge lost settings contract: {bridge_settings_contract}")
+    for web_console_admin_contract in (
+        'Join-Path $PSHOME "powershell.exe"',
+        '$ErrorActionPreference = "Continue"',
+        '$childExitCode = $LASTEXITCODE',
+        'Maintenance script exited with code',
+    ):
+        if web_console_admin_contract not in web_console_admin_text:
+            raise RuntimeError(
+                f"Web Console admin helper may regress to treating child stderr warnings as fatal: {web_console_admin_contract}"
+            )
     for local_network_contract in ('targetAddressSpace: "loopback"', "coding-tools-bridge-frame", "127.0.0.1:8768"):
         if local_network_contract not in extension_bridge_text:
             raise RuntimeError(f"Web Console Local Network Access bootstrap lost contract: {local_network_contract}")
@@ -413,7 +463,7 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
         "function findEscapeComposer()",
         "function updateFocusMask()",
         "const enabled = Boolean(state && state.human_help)",
-        'activeTab = "help";',
+        'selectTab("help")',
         "setOpen(true);",
     ):
         if focus_mode_contract not in extension_content_text:
@@ -592,6 +642,7 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
                 "/optimize+",
                 f"/out:{web_console_output}",
                 f"/reference:{windows_root / 'Microsoft.NET' / 'Framework64' / 'v4.0.30319' / 'System.Web.Extensions.dll'}",
+                "/reference:System.ServiceProcess.dll",
                 str(web_console_bridge_source),
             ],
             stdout=subprocess.PIPE,

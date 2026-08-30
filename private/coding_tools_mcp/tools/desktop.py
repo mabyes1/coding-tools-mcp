@@ -35,6 +35,7 @@ def human_help_tool(
                 return_to_agent=return_to_agent,
                 mode=mode,
                 fallback=fallback,
+                delivery=delivery,
                 timeout_seconds=timeout_seconds,
             )
             outcome = str(response.get("outcome") or "unknown")
