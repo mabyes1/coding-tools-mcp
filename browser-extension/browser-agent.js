@@ -286,14 +286,19 @@ async function executeBrowserAgentRequest(request) {
 }
 
 async function browserAgentTick() {
-  const pending = await browserAgentRequest("/v1/browser/next", { timeout: 10000 });
-  if (!pending || !pending.request_id || !pending.request) return;
-  let response;
-  try { response = await executeBrowserAgentRequest(pending.request); }
-  catch (error) {
-    response = { ok: false, error: "BROWSER_EXTENSION_ACTION_FAILED", message: String(error && error.message || error), retryable: true };
+  // One alarm wake opens a bounded active window. The loopback endpoint long
+  // polls for 3.5 seconds, so follow-up tool actions can run immediately
+  // without waiting for another 30-second Chrome alarm.
+  for (let cycle = 0; cycle < 10; cycle += 1) {
+    const pending = await browserAgentRequest("/v1/browser/next", { timeout: 10000 });
+    if (!pending || !pending.request_id || !pending.request) continue;
+    let response;
+    try { response = await executeBrowserAgentRequest(pending.request); }
+    catch (error) {
+      response = { ok: false, error: "BROWSER_EXTENSION_ACTION_FAILED", message: String(error && error.message || error), retryable: true };
+    }
+    await browserAgentRequest("/v1/browser/respond", { method: "POST", body: { request_id: pending.request_id, response }, timeout: 10000 });
   }
-  await browserAgentRequest("/v1/browser/respond", { method: "POST", body: { request_id: pending.request_id, response }, timeout: 10000 });
 }
 
 function kickCodingToolsBrowserAgent() {

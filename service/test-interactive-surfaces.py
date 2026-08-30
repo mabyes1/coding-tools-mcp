@@ -75,7 +75,7 @@ def wait_window(request: Any, title: str, *, browser_only: bool, timeout: float 
     while time.time() < deadline:
         last = request(
             action="list_windows", browser_only=browser_only,
-            include_screenshot=False, include_text=False, timeout_seconds=20,
+            include_screenshot=False, include_text=False, timeout_seconds=60 if browser_only else 20,
         )
         matches = [row for row in last.get("windows", []) if title.lower() in str(row.get("title") or "").lower()]
         if len(matches) == 1:
