@@ -589,9 +589,7 @@ internal static class ComputerUseHelper
         }
         finally
         {
-            NativePoint current;
-            if (restore && GetCursorPos(out current) && Math.Abs(current.X - x) <= 2 && Math.Abs(current.Y - y) <= 2)
-                SetCursorPos(original.X, original.Y);
+            if (restore) SetCursorPos(original.X, original.Y);
         }
     }
 

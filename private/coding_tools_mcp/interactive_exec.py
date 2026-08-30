@@ -292,12 +292,18 @@ def request_human_help(
 
     deadline = time.monotonic() + timeout + 10.0
     last_activity_mtime_ns = 0
+    invalid_response_since: float | None = None
     try:
         while time.monotonic() < deadline:
             if response_path.exists():
                 try:
                     response = json.loads(response_path.read_text(encoding="utf-8-sig"))
                 except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    if invalid_response_since is None:
+                        invalid_response_since = time.monotonic()
+                    if time.monotonic() - invalid_response_since < 1.0:
+                        time.sleep(0.05)
+                        continue
                     raise ToolFailure(
                         "INTERACTIVE_RESPONSE_INVALID",
                         "The desktop broker returned an invalid human-help response.",
@@ -428,12 +434,18 @@ def request_computer_use(
         ) from exc
 
     deadline = time.monotonic() + timeout + 5.0
+    invalid_response_since: float | None = None
     try:
         while time.monotonic() < deadline:
             if response_path.exists():
                 try:
                     response = json.loads(response_path.read_text(encoding="utf-8-sig"))
                 except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    if invalid_response_since is None:
+                        invalid_response_since = time.monotonic()
+                    if time.monotonic() - invalid_response_since < 1.0:
+                        time.sleep(0.05)
+                        continue
                     raise ToolFailure(
                         "COMPUTER_USE_RESPONSE_INVALID",
                         "The desktop broker returned an invalid Computer Use response.",
