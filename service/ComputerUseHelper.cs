@@ -560,10 +560,45 @@ internal static class ComputerUseHelper
     private static void SetElementValue(AutomationElement element, string value)
     {
         object raw;
-        if (!element.TryGetCurrentPattern(ValuePattern.Pattern, out raw)) throw new InvalidOperationException("The target element does not expose a writable ValuePattern.");
-        var pattern = (ValuePattern)raw;
-        if (pattern.Current.IsReadOnly) throw new InvalidOperationException("The target value control is read-only.");
-        pattern.SetValue(value);
+        if (element.TryGetCurrentPattern(ValuePattern.Pattern, out raw))
+        {
+            var pattern = (ValuePattern)raw;
+            if (pattern.Current.IsReadOnly) throw new InvalidOperationException("The target value control is read-only.");
+            pattern.SetValue(value);
+            return;
+        }
+
+        // Some native and WinForms edit controls are writable but expose only
+        // keyboard focus through UI Automation.  Keep type_text useful on
+        // those controls without interpreting braces, plus signs, or other
+        // SendKeys metacharacters as commands.
+        try { element.SetFocus(); }
+        catch { throw new InvalidOperationException("The target element is not writable and could not receive keyboard focus."); }
+        SendKeys.SendWait("^a");
+        SendKeys.SendWait(EscapeSendKeysText(value));
+    }
+
+    private static string EscapeSendKeysText(string value)
+    {
+        var escaped = new StringBuilder();
+        foreach (char character in value ?? "")
+        {
+            if (character == '\r') continue;
+            if (character == '\n') escaped.Append("{ENTER}");
+            else if (character == '\t') escaped.Append("{TAB}");
+            else if (character == '{') escaped.Append("{{}");
+            else if (character == '}') escaped.Append("{}}");
+            else if (character == '+') escaped.Append("{+}");
+            else if (character == '^') escaped.Append("{^}");
+            else if (character == '%') escaped.Append("{%}");
+            else if (character == '~') escaped.Append("{~}");
+            else if (character == '(') escaped.Append("{(}");
+            else if (character == ')') escaped.Append("{)}");
+            else if (character == '[') escaped.Append("{[}");
+            else if (character == ']') escaped.Append("{]}");
+            else escaped.Append(character);
+        }
+        return escaped.ToString();
     }
 
     private static void ScrollElement(AutomationElement element, int delta)

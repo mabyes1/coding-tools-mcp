@@ -16,7 +16,7 @@ $serviceSourceRoot = Split-Path -Parent $PSScriptRoot
 $repoRoot = Split-Path -Parent $serviceSourceRoot
 $privateSource = Join-Path $repoRoot "private\coding_tools_mcp"
 $sourceRunner = Join-Path $serviceSourceRoot "run-mcp-service.ps1"
-$sourceValidator = Join-Path $serviceSourceRoot "validate-private-source.py"
+$sourceTestRunner = Join-Path $serviceSourceRoot "test-coding-tools.py"
 $workspaceRoot = Split-Path -Parent $repoRoot
 $serverPython = Join-Path $serviceRoot "venv\Scripts\python.exe"
 $appPath = Join-Path $serviceRoot "app"
@@ -76,15 +76,28 @@ function Write-BuildIdentity([string]$PackageRoot, [string]$PackageVersion) {
 }
 
 function Test-SourceBehavior([string]$PackageParent) {
-    Assert-DeploymentPath $sourceValidator "Private source validator"
+    Assert-DeploymentPath $sourceTestRunner "Private source test runner"
     $previousPythonPath = $env:PYTHONPATH
+    $previousRuntimeRoot = $env:CODING_TOOLS_MCP_RUNTIME_ROOT
+    $testRuntimeRoot = Join-Path ([IO.Path]::GetTempPath()) ("coding-tools-mcp-deploy-tests-" + [Guid]::NewGuid().ToString("N"))
     try {
         $env:PYTHONPATH = $PackageParent
-        & $serverPython $sourceValidator --package-parent $PackageParent --workspace $workspaceRoot
-        if ($LASTEXITCODE -ne 0) { throw "Private source behavioral validation failed." }
+        $env:CODING_TOOLS_MCP_RUNTIME_ROOT = $testRuntimeRoot
+        & $serverPython $sourceTestRunner `
+            --mode full `
+            --package-parent $PackageParent `
+            --workspace $workspaceRoot
+        if ($LASTEXITCODE -ne 0) { throw "Private source regression tests failed." }
     }
     finally {
         $env:PYTHONPATH = $previousPythonPath
+        if ($null -eq $previousRuntimeRoot) {
+            Remove-Item Env:CODING_TOOLS_MCP_RUNTIME_ROOT -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:CODING_TOOLS_MCP_RUNTIME_ROOT = $previousRuntimeRoot
+        }
+        Remove-Item -LiteralPath $testRuntimeRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 

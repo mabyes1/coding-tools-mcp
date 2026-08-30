@@ -112,13 +112,20 @@ def process_tree_for_pid(pid: int) -> list[dict[str, Any]]:
         try:
             completed = subprocess.run(
                 [shell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
-                text=True,
+                # PowerShell inherits the machine's OEM code page on Windows.
+                # Read bytes first so Python's background communicate reader
+                # cannot raise a UnicodeDecodeError before this function gets
+                # a chance to apply replacement decoding.
+                text=False,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 timeout=8,
                 check=False,
             )
-            parsed = json.loads(completed.stdout or "[]")
+            raw_stdout = completed.stdout or b""
+            if isinstance(raw_stdout, bytes):
+                raw_stdout = raw_stdout.decode("utf-8", errors="replace")
+            parsed = json.loads(raw_stdout or "[]")
             if isinstance(parsed, dict):
                 parsed = [parsed]
             for row in parsed if isinstance(parsed, list) else []:

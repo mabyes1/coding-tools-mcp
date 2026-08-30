@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Any
 
 
-def run_windows_deployment_checks(package_parent: Path, action_contract: dict[str, Any]) -> None:
+def run_windows_deployment_checks(
+    package_parent: Path,
+    action_contract: dict[str, Any],
+    *,
+    include_desktop_surfaces: bool = True,
+) -> None:
     if os.name != "nt":
         return
 
@@ -307,6 +312,8 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
         raise RuntimeError("screenshot capture must not foreground the target window")
     if "try { element.SetFocus(); return; }" in helper_text:
         raise RuntimeError("click must not report success when it only focused the element")
+    if "EscapeSendKeysText" not in helper_text or 'SendKeys.SendWait("^a")' not in helper_text:
+        raise RuntimeError("type_text lost its keyboard fallback for writable controls without ValuePattern")
     if "computer-use-overlay-leases" not in helper_text:
         raise RuntimeError("Computer Use overlay must use per-operation leases")
     if "Try-HandleHumanHelpInWebConsole" not in interactive_broker_text:
@@ -581,33 +588,34 @@ def run_windows_deployment_checks(package_parent: Path, action_contract: dict[st
             raise RuntimeError(
                 "Computer Use helper failed to compile:\n" + compile_result.stdout[-8000:]
             )
-        request_json = json.dumps(
-            {
-                "action": "list_windows",
-                "browser_only": False,
-                "include_screenshot": False,
-                "include_text": False,
-            },
-            separators=(",", ":"),
-        ).encode("utf-8")
-        helper_smoke = subprocess.run(
-            [str(helper_output), "--request-base64", base64.b64encode(request_json).decode("ascii")],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-            timeout=15,
-        )
-        if helper_smoke.returncode != 0:
-            raise RuntimeError("Computer Use list_windows smoke test failed:\n" + helper_smoke.stdout[-8000:])
-        try:
-            smoke_payload = json.loads(helper_smoke.stdout)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("Computer Use list_windows smoke test returned invalid JSON") from exc
-        if not smoke_payload.get("ok") or smoke_payload.get("action") != "list_windows":
-            raise RuntimeError("Computer Use list_windows smoke test returned an invalid payload")
+        if include_desktop_surfaces:
+            request_json = json.dumps(
+                {
+                    "action": "list_windows",
+                    "browser_only": False,
+                    "include_screenshot": False,
+                    "include_text": False,
+                },
+                separators=(",", ":"),
+            ).encode("utf-8")
+            helper_smoke = subprocess.run(
+                [str(helper_output), "--request-base64", base64.b64encode(request_json).decode("ascii")],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+                timeout=15,
+            )
+            if helper_smoke.returncode != 0:
+                raise RuntimeError("Computer Use list_windows smoke test failed:\n" + helper_smoke.stdout[-8000:])
+            try:
+                smoke_payload = json.loads(helper_smoke.stdout)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("Computer Use list_windows smoke test returned invalid JSON") from exc
+            if not smoke_payload.get("ok") or smoke_payload.get("action") != "list_windows":
+                raise RuntimeError("Computer Use list_windows smoke test returned an invalid payload")
 
         activity_viewer_output = Path(helper_temp) / "activity-log-viewer.exe"
         viewer_compile = subprocess.run(
