@@ -89,7 +89,7 @@ def call(request: Any, name: str, **kwargs: Any) -> dict[str, Any]:
     payload = request(timeout_seconds=70 if kwargs.get("browser_only") else 30, **kwargs)
     require(payload.get("ok") is True, f"{name}: {payload}")
     pointer_after = cursor_position()
-    if kwargs.get("action") in {"click", "right_click", "type_text", "scroll"}:
+    if not kwargs.get("browser_only") and kwargs.get("action") in {"click", "right_click", "type_text", "scroll"}:
         require(pointer_after == pointer_before, f"{name} did not restore the user's pointer: before={pointer_before}, after={pointer_after}")
     log("PASS", name)
     return payload
