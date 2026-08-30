@@ -364,6 +364,7 @@ function Handle-BrowserExtensionRequest([string]$RequestId, $Request) {
         Move-Item -LiteralPath $temporary -Destination $pendingPath -Force
         $deadline = [DateTimeOffset]::UtcNow.AddSeconds(65)
         while ([DateTimeOffset]::UtcNow -lt $deadline) {
+            Update-BrokerHeartbeat
             if (Test-Path -LiteralPath $responsePath -PathType Leaf) {
                 $decoded = [IO.File]::ReadAllText($responsePath, [Text.UTF8Encoding]::new($false)) | ConvertFrom-Json -ErrorAction Stop
                 $payload = @{}
