@@ -424,14 +424,14 @@ def run_windows_deployment_checks(
     for browser_bridge_contract in (
         'request.Path == "/v1/browser/next"',
         'request.Path == "/v1/browser/respond"',
-        ".browser-extension.request",
+        ".browser-extension.pending",
         ".browser-extension.response",
     ):
         if browser_bridge_contract not in web_console_bridge_text:
             raise RuntimeError(f"Browser Use loopback bridge contract is missing: {browser_bridge_contract}")
     for browser_broker_contract in (
         "Handle-BrowserExtensionRequest $RequestId $Request",
-        ".browser-extension.request",
+        ".browser-extension.pending",
         "BROWSER_EXTENSION_UNAVAILABLE",
     ):
         if browser_broker_contract not in interactive_broker_text:

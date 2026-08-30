@@ -272,13 +272,13 @@ internal sealed class WebConsoleBridge
                 string processing = null;
                 lock (_fileLock)
                 {
-                    var files = Directory.GetFiles(_queueRoot, "*.browser-extension.request");
+                    var files = Directory.GetFiles(_queueRoot, "*.browser-extension.pending");
                     Array.Sort(files, delegate(string left, string right) { return File.GetCreationTimeUtc(left).CompareTo(File.GetCreationTimeUtc(right)); });
                     if (files.Length > 0)
                     {
                         selected = files[0];
                         var name = Path.GetFileName(selected);
-                        processing = Path.Combine(_queueRoot, name.Substring(0, name.Length - ".request".Length) + ".processing");
+                        processing = Path.Combine(_queueRoot, name.Substring(0, name.Length - ".pending".Length) + ".processing");
                         File.Move(selected, processing);
                     }
                 }

@@ -59,7 +59,7 @@ function Update-BrokerHeartbeat {
 function Clear-StaleBrokerArtifacts {
     # A broker restart invalidates unfinished IPC. Replaying an interactive
     # action is unsafe because we cannot know whether it already happened.
-    foreach ($pattern in @("*.request", "*.processing", "*.response", "*.web-human-help.json", "*.web-human-help.response", "*.web-human-help.seen")) {
+    foreach ($pattern in @("*.request", "*.processing", "*.response", "*.browser-extension.pending", "*.web-human-help.json", "*.web-human-help.response", "*.web-human-help.seen")) {
         Get-ChildItem -LiteralPath $queueRoot -Filter $pattern -File -ErrorAction SilentlyContinue |
             Remove-Item -Force -ErrorAction SilentlyContinue
     }
@@ -351,7 +351,7 @@ function Handle-ComputerUseRequest([string]$RequestId, $Request) {
 
 function Handle-BrowserExtensionRequest([string]$RequestId, $Request) {
     Start-WebConsoleBridge
-    $pendingPath = Join-Path $queueRoot "$RequestId.browser-extension.request"
+    $pendingPath = Join-Path $queueRoot "$RequestId.browser-extension.pending"
     $processingPath = Join-Path $queueRoot "$RequestId.browser-extension.processing"
     $responsePath = Join-Path $queueRoot "$RequestId.browser-extension.response"
     try {

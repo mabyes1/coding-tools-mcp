@@ -606,19 +606,20 @@ internal static class ComputerUseHelper
         // keyboard focus through UI Automation.  Keep type_text useful on
         // those controls without interpreting braces, plus signs, or other
         // SendKeys metacharacters as commands.
-        try { element.SetFocus(); }
-        catch
-        {
-            Rect editRect = element.Current.BoundingRectangle;
-            if (editRect.IsEmpty || editRect.Width <= 1 || editRect.Height <= 1)
-                throw new InvalidOperationException("The target element is not writable and has no usable bounds for keyboard focus.");
-            MouseClickScreenPoint(
-                (int)Math.Round(editRect.X + editRect.Width / 2.0),
-                (int)Math.Round(editRect.Y + editRect.Height / 2.0),
-                false
-            );
-        }
-        Thread.Sleep(50);
+        try { element.SetFocus(); } catch { }
+        Rect editRect = element.Current.BoundingRectangle;
+        if (editRect.IsEmpty || editRect.Width <= 1 || editRect.Height <= 1)
+            throw new InvalidOperationException("The target element is not writable and has no usable bounds for keyboard focus.");
+        // UI Automation can report SetFocus success while the native child
+        // HWND still lacks keyboard focus. A real click establishes the same
+        // focus path a user would, then MouseClickScreenPoint restores the
+        // user's pointer before we type.
+        MouseClickScreenPoint(
+            (int)Math.Round(editRect.X + editRect.Width / 2.0),
+            (int)Math.Round(editRect.Y + editRect.Height / 2.0),
+            false
+        );
+        Thread.Sleep(75);
         SendKeys.SendWait("^a");
         SendKeys.SendWait(EscapeSendKeysText(value));
     }
