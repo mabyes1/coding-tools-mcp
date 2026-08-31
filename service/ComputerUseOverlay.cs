@@ -45,7 +45,7 @@ internal sealed class ComputerUseOverlayForm : Form
         BackColor = Color.FromArgb(14, 20, 29);
         ForeColor = Color.FromArgb(238, 243, 249);
         Opacity = 0.0;
-        _agentCursor = new AgentCursorForm();
+        _agentCursor = new AgentCursorForm(mascotPath);
 
         var area = Screen.PrimaryScreen.WorkingArea;
         Location = new Point(area.Right - Width - 22, area.Top + 22);
@@ -250,17 +250,28 @@ internal sealed class AgentCursorForm : Form
     private const int WsExToolWindow = 0x00000080;
     private const int WsExTransparent = 0x00000020;
 
-    public AgentCursorForm()
+    private readonly Image _mascot;
+
+    public AgentCursorForm(string mascotPath)
     {
         FormBorderStyle = FormBorderStyle.None;
-        Text = "Coding Tools AI Cursor";
+        Text = "Coding Tools HUMAN HELP Cursor";
         ShowInTaskbar = false;
         TopMost = true;
         StartPosition = FormStartPosition.Manual;
-        ClientSize = new Size(58, 64);
+        ClientSize = new Size(78, 70);
         BackColor = Color.Magenta;
         TransparencyKey = Color.Magenta;
         DoubleBuffered = true;
+        if (File.Exists(mascotPath))
+        {
+            try
+            {
+                using (var source = Image.FromFile(mascotPath))
+                    _mascot = new Bitmap(source);
+            }
+            catch { }
+        }
     }
 
     protected override bool ShowWithoutActivation { get { return true; } }
@@ -282,7 +293,9 @@ internal sealed class AgentCursorForm : Form
             if (Visible) Hide();
             return;
         }
-        Location = new Point(screenPoint.X - 5, screenPoint.Y - 4);
+        // Match Browser Use: the arrow tip is the actual action point, while
+        // the mascot sits just above-left as if it were holding the cursor.
+        Location = new Point(screenPoint.X - 46, screenPoint.Y - 32);
         if (!Visible) Show();
         Invalidate();
     }
@@ -290,11 +303,14 @@ internal sealed class AgentCursorForm : Form
     protected override void OnPaint(PaintEventArgs e)
     {
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        e.Graphics.InterpolationMode = InterpolationMode.HighQualityBicubic;
+        if (_mascot != null)
+            e.Graphics.DrawImage(_mascot, new Rectangle(0, 0, 58, 58));
         var points = new[]
         {
-            new PointF(5, 4), new PointF(5, 42), new PointF(16, 31),
-            new PointF(25, 57), new PointF(36, 52), new PointF(27, 28),
-            new PointF(45, 28)
+            new PointF(46, 32), new PointF(46, 57), new PointF(53, 50),
+            new PointF(59, 64), new PointF(65, 61), new PointF(59, 48),
+            new PointF(70, 48)
         };
         using (var path = new GraphicsPath())
         using (var fill = new SolidBrush(Color.FromArgb(255, 145, 42)))
@@ -304,14 +320,13 @@ internal sealed class AgentCursorForm : Form
             e.Graphics.FillPath(fill, path);
             e.Graphics.DrawPath(border, path);
         }
-        using (var badge = new SolidBrush(Color.FromArgb(238, 92, 19)))
-        using (var text = new SolidBrush(Color.White))
-        using (var font = new Font("Segoe UI", 7.5f, FontStyle.Bold))
-        {
-            e.Graphics.FillEllipse(badge, 35, 39, 21, 21);
-            e.Graphics.DrawString("AI", font, text, 38, 42);
-        }
         base.OnPaint(e);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing && _mascot != null) _mascot.Dispose();
+        base.Dispose(disposing);
     }
 }
 

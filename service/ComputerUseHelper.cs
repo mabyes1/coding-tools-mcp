@@ -126,7 +126,7 @@ internal static class ComputerUseHelper
             var overlayPath = Path.Combine(serviceRoot, "computer-use-overlay.exe");
             var leasesRoot = Path.Combine(queueRoot, "computer-use-overlay-leases");
             var pidPath = Path.Combine(queueRoot, "computer-use-overlay.pid");
-            var mascotPath = Path.Combine(serviceRoot, "assets", "human-help-mascot.png");
+            var mascotPath = Path.Combine(serviceRoot, "assets", "human-help-mascot-256.png");
             var browserOnly = GetBool(request, "browser_only", false);
             var mode = browserOnly ? "browser" : "computer";
             var action = GetString(request, "action", "inspect").Trim().ToLowerInvariant();

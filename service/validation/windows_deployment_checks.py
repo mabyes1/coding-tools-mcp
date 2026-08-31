@@ -329,14 +329,16 @@ def run_windows_deployment_checks(
             raise RuntimeError(f"Computer Use orange cursor publishing contract is missing: {computer_cursor_contract}")
     for computer_cursor_contract in (
         "AgentCursorForm",
-        "Coding Tools AI Cursor",
+        "Coding Tools HUMAN HELP Cursor",
+        "new AgentCursorForm(mascotPath)",
+        "e.Graphics.DrawImage(_mascot",
         "Color.FromArgb(255, 145, 42)",
         "WsExTransparent",
     ):
         if computer_cursor_contract not in overlay_text:
             raise RuntimeError(f"Computer Use orange cursor overlay contract is missing: {computer_cursor_contract}")
     if '"human-help-mascot-256.png"' not in deployment_common_text:
-        raise RuntimeError("deployment must stage the compact HUMAN HELP mascot for Browser Use")
+        raise RuntimeError("deployment must stage the compact HUMAN HELP mascot for Computer Use and Browser Use")
     if "Try-HandleHumanHelpInWebConsole" not in interactive_broker_text:
         raise RuntimeError("HUMAN HELP stopped preferring the in-page Web Console")
     if '$delivery -ne "desktop_only"' not in interactive_broker_text:
