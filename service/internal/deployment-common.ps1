@@ -321,6 +321,12 @@ function New-CodingToolsBrokerArtifactStage(
     if (Test-Path -LiteralPath $assetsSource -PathType Container) {
         Copy-Item -LiteralPath $assetsSource -Destination (Join-Path $serviceStage "assets") -Recurse -Force
     }
+    $smallMascotSource = Join-Path (Split-Path -Parent $ServiceSourceRoot) "human-help-mascot-256.png"
+    if (Test-Path -LiteralPath $smallMascotSource -PathType Leaf) {
+        $stagedAssets = Join-Path $serviceStage "assets"
+        New-Item -ItemType Directory -Path $stagedAssets -Force | Out-Null
+        Copy-Item -LiteralPath $smallMascotSource -Destination (Join-Path $stagedAssets "human-help-mascot-256.png") -Force
+    }
     New-ElevatedActionManifest `
         (Join-Path $serviceStage "elevated-broker.ps1") `
         (Join-Path $serviceStage "elevated-actions.manifest.json")

@@ -17,6 +17,7 @@ using System.Windows.Forms;
 internal static class ComputerUseHelper
 {
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 16 * 1024 * 1024 };
+    private static string _activeOverlayLeasePath;
 
     private const uint MouseEventLeftDown = 0x0002;
     private const uint MouseEventLeftUp = 0x0004;
@@ -66,6 +67,7 @@ internal static class ComputerUseHelper
             var requestJson = Encoding.UTF8.GetString(Convert.FromBase64String(encoded));
             var request = Json.Deserialize<Dictionary<string, object>>(requestJson);
             var overlayLease = BeginComputerUseOverlay(request);
+            _activeOverlayLeasePath = overlayLease;
             Dictionary<string, object> response;
             try
             {
@@ -73,6 +75,7 @@ internal static class ComputerUseHelper
             }
             finally
             {
+                _activeOverlayLeasePath = null;
                 EndComputerUseOverlay(overlayLease);
             }
             var serialized = Json.Serialize(response);
@@ -179,6 +182,24 @@ internal static class ComputerUseHelper
     {
         if (String.IsNullOrWhiteSpace(leasePath)) return;
         try { if (File.Exists(leasePath)) File.Delete(leasePath); }
+        catch { }
+    }
+
+    private static void PublishOverlayCursor(int x, int y)
+    {
+        var leasePath = _activeOverlayLeasePath;
+        if (String.IsNullOrWhiteSpace(leasePath) || !File.Exists(leasePath)) return;
+        try
+        {
+            var parts = File.ReadAllText(leasePath).Trim().Split('|');
+            if (parts.Length < 2 || !String.Equals(parts[0], "computer", StringComparison.OrdinalIgnoreCase)) return;
+            File.WriteAllText(
+                leasePath,
+                parts[0] + "|" + parts[1] + "|" + DateTimeOffset.Now.ToString("o")
+                    + "|" + x.ToString() + "|" + y.ToString(),
+                new UTF8Encoding(false)
+            );
+        }
         catch { }
     }
 
@@ -516,6 +537,12 @@ internal static class ComputerUseHelper
         if (request.ContainsKey("element_index") && request["element_index"] != null)
         {
             var element = ResolveElement(request, windowId);
+            Rect elementRect = element.Current.BoundingRectangle;
+            if (!elementRect.IsEmpty && elementRect.Width > 1 && elementRect.Height > 1)
+                PublishOverlayCursor(
+                    (int)Math.Round(elementRect.X + elementRect.Width / 2.0),
+                    (int)Math.Round(elementRect.Y + elementRect.Height / 2.0)
+                );
             if (!rightClick && TryInvokeElement(element)) return;
 
             if (rightClick && browserOnly)
@@ -529,7 +556,6 @@ internal static class ComputerUseHelper
                 catch { }
             }
 
-            Rect elementRect = element.Current.BoundingRectangle;
             if (elementRect.IsEmpty || elementRect.Width <= 1 || elementRect.Height <= 1)
                 throw new InvalidOperationException("The target element has no usable screen bounds for a physical click.");
             MouseClickScreenPoint(
@@ -556,6 +582,7 @@ internal static class ComputerUseHelper
         if (!rightClick)
         {
             var point = new System.Windows.Point(rootRect.X + x, rootRect.Y + y);
+            PublishOverlayCursor((int)Math.Round(point.X), (int)Math.Round(point.Y));
             var accessibleTarget = AutomationElement.FromPoint(point);
             if (accessibleTarget != null && TryInvokeElement(accessibleTarget)) return;
         }
@@ -569,6 +596,7 @@ internal static class ComputerUseHelper
 
     private static void MouseClickScreenPoint(int x, int y, bool rightClick)
     {
+        PublishOverlayCursor(x, y);
         NativePoint original;
         bool restore = GetCursorPos(out original);
         if (!SetCursorPos(x, y))

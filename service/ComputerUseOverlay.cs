@@ -19,11 +19,14 @@ internal sealed class ComputerUseOverlayForm : Form
     private readonly Timer _timer;
     private readonly Label _title;
     private readonly Label _subtitle;
+    private readonly AgentCursorForm _agentCursor;
     private DateTime _lastLeaseUtc;
     private bool _fadingOut;
     private int _pulse;
     private string _mode = "computer";
     private string _action = "inspect";
+    private Point _agentCursorPoint;
+    private DateTime _lastAgentCursorUtc = DateTime.MinValue;
 
     public ComputerUseOverlayForm(string leasesRoot, string pidPath, string mascotPath)
     {
@@ -42,6 +45,7 @@ internal sealed class ComputerUseOverlayForm : Form
         BackColor = Color.FromArgb(14, 20, 29);
         ForeColor = Color.FromArgb(238, 243, 249);
         Opacity = 0.0;
+        _agentCursor = new AgentCursorForm();
 
         var area = Screen.PrimaryScreen.WorkingArea;
         Location = new Point(area.Right - Width - 22, area.Top + 22);
@@ -94,6 +98,7 @@ internal sealed class ComputerUseOverlayForm : Form
         };
         FormClosed += delegate
         {
+            try { _agentCursor.Close(); } catch { }
             try
             {
                 if (File.Exists(_pidPath)) File.Delete(_pidPath);
@@ -179,6 +184,15 @@ internal sealed class ComputerUseOverlayForm : Form
                 var parts = raw.Split('|');
                 if (parts.Length > 0 && !String.IsNullOrWhiteSpace(parts[0])) _mode = parts[0].Trim().ToLowerInvariant();
                 if (parts.Length > 1 && !String.IsNullOrWhiteSpace(parts[1])) _action = parts[1].Trim().ToLowerInvariant();
+                int cursorX;
+                int cursorY;
+                if (parts.Length > 4
+                    && Int32.TryParse(parts[3], out cursorX)
+                    && Int32.TryParse(parts[4], out cursorY))
+                {
+                    _agentCursorPoint = new Point(cursorX, cursorY);
+                    _lastAgentCursorUtc = now;
+                }
                 return true;
             }
         }
@@ -211,6 +225,10 @@ internal sealed class ComputerUseOverlayForm : Form
         var browser = String.Equals(_mode, "browser", StringComparison.OrdinalIgnoreCase);
         _title.Text = browser ? "AI 正在操作瀏覽器" : "AI 正在操作電腦";
         _subtitle.Text = (browser ? "Browser Use" : "Computer Use") + " · " + ActionLabel(_action) + "  " + (_pulse < 12 ? "●" : "•");
+        var showAgentCursor = !browser
+            && _lastAgentCursorUtc != DateTime.MinValue
+            && (DateTime.UtcNow - _lastAgentCursorUtc).TotalMilliseconds < 900;
+        _agentCursor.SetAgentPosition(_agentCursorPoint, showAgentCursor);
 
         if (!_fadingOut && Opacity < 0.96)
             Opacity = Math.Min(0.96, Opacity + 0.12);
@@ -223,6 +241,77 @@ internal sealed class ComputerUseOverlayForm : Form
             Opacity = Math.Max(0.0, Opacity - 0.10);
             if (Opacity <= 0.01) Close();
         }
+    }
+}
+
+internal sealed class AgentCursorForm : Form
+{
+    private const int WsExNoActivate = 0x08000000;
+    private const int WsExToolWindow = 0x00000080;
+    private const int WsExTransparent = 0x00000020;
+
+    public AgentCursorForm()
+    {
+        FormBorderStyle = FormBorderStyle.None;
+        Text = "Coding Tools AI Cursor";
+        ShowInTaskbar = false;
+        TopMost = true;
+        StartPosition = FormStartPosition.Manual;
+        ClientSize = new Size(58, 64);
+        BackColor = Color.Magenta;
+        TransparencyKey = Color.Magenta;
+        DoubleBuffered = true;
+    }
+
+    protected override bool ShowWithoutActivation { get { return true; } }
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            cp.ExStyle |= WsExNoActivate | WsExToolWindow | WsExTransparent;
+            return cp;
+        }
+    }
+
+    public void SetAgentPosition(Point screenPoint, bool visible)
+    {
+        if (!visible)
+        {
+            if (Visible) Hide();
+            return;
+        }
+        Location = new Point(screenPoint.X - 5, screenPoint.Y - 4);
+        if (!Visible) Show();
+        Invalidate();
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        var points = new[]
+        {
+            new PointF(5, 4), new PointF(5, 42), new PointF(16, 31),
+            new PointF(25, 57), new PointF(36, 52), new PointF(27, 28),
+            new PointF(45, 28)
+        };
+        using (var path = new GraphicsPath())
+        using (var fill = new SolidBrush(Color.FromArgb(255, 145, 42)))
+        using (var border = new Pen(Color.White, 3.2f))
+        {
+            path.AddPolygon(points);
+            e.Graphics.FillPath(fill, path);
+            e.Graphics.DrawPath(border, path);
+        }
+        using (var badge = new SolidBrush(Color.FromArgb(238, 92, 19)))
+        using (var text = new SolidBrush(Color.White))
+        using (var font = new Font("Segoe UI", 7.5f, FontStyle.Bold))
+        {
+            e.Graphics.FillEllipse(badge, 35, 39, 21, 21);
+            e.Graphics.DrawString("AI", font, text, 38, 42);
+        }
+        base.OnPaint(e);
     }
 }
 

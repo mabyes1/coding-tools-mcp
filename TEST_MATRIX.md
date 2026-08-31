@@ -26,6 +26,7 @@
 - Computer Use：`list_windows`、`inspect`、`screenshot`、`activate`、`click`、`right_click`、`type_text`、`press_key`、`scroll`
 - Browser Use：上述動作加上 `navigate`
 - 測試目標：專用 Windows 測試視窗、localhost 測試頁、沿用目前 Profile 的 Coding Tools 背景代理分頁
+- 可見提示：Computer Use 使用橘色 `AI` 游標；Browser Use 使用 HUMAN HELP 機器人與藍色頁面游標
 - 執行方式：`.\test-coding-tools.ps1 -Mode Interactive`
 
 ## 一般模式下暫停

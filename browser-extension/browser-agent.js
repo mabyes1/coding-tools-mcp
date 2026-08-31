@@ -3,6 +3,7 @@ const BROWSER_AGENT_STORAGE_KEY = "codingToolsBrowserAgentTabId";
 const BROWSER_AGENT_GROUP_TITLE = "Coding Tools · Browser Use";
 const BROWSER_AGENT_ALARM = "coding-tools-browser-agent-poll";
 let browserAgentTickPromise = null;
+let browserAgentMascotDataUrl = null;
 
 async function browserAgentRequest(path, options = {}) {
   const controller = new AbortController();
@@ -27,6 +28,23 @@ async function browserAgentRequest(path, options = {}) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function getBrowserAgentMascotDataUrl() {
+  if (browserAgentMascotDataUrl) return browserAgentMascotDataUrl;
+  const response = await fetch(`${BROWSER_AGENT_BASE}/v1/assets/human-help-mascot`, {
+    headers: { "X-Coding-Tools-Console": "1", "X-Coding-Tools-Extension": "1" },
+    cache: "no-store",
+    targetAddressSpace: "loopback"
+  });
+  if (!response.ok) throw new Error("browser_mascot_unavailable");
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 8192) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 8192));
+  }
+  browserAgentMascotDataUrl = `data:image/png;base64,${btoa(binary)}`;
+  return browserAgentMascotDataUrl;
 }
 
 async function getStoredAgentTabId() {
@@ -145,15 +163,16 @@ async function inspectBrowserAgentTab(tabId) {
 }
 
 async function targetPoint(tabId, request) {
-  return await executeInAgentTab(tabId, req => {
+  const mascotDataUrl = await getBrowserAgentMascotDataUrl();
+  return await executeInAgentTab(tabId, (req, mascotUrl) => {
     function ensureCursor() {
       let cursor = document.getElementById("__coding_tools_browser_cursor__");
       if (cursor) return cursor;
       cursor = document.createElement("div");
       cursor.id = "__coding_tools_browser_cursor__";
       cursor.setAttribute("aria-hidden", "true");
-      cursor.style.cssText = "position:fixed;left:0;top:0;width:30px;height:36px;z-index:2147483647;pointer-events:none;filter:drop-shadow(0 1px 2px #0008);transition:transform .08s ease;";
-      cursor.innerHTML = '<svg viewBox="0 0 30 36" width="30" height="36"><path d="M3 2v25l7-7 6 14 6-3-6-13h11z" fill="#4ac2ff" stroke="white" stroke-width="2.6" stroke-linejoin="round"/></svg>';
+      cursor.style.cssText = "position:fixed;left:0;top:0;width:78px;height:70px;z-index:2147483647;pointer-events:none;filter:drop-shadow(0 2px 3px #0009);transition:transform .1s cubic-bezier(.2,.8,.2,1),opacity .18s ease;";
+      cursor.innerHTML = `<img alt="" src="${mascotUrl}" style="position:absolute;left:0;top:0;width:58px;height:58px;object-fit:contain"><svg viewBox="0 0 30 36" width="30" height="36" style="position:absolute;left:43px;top:30px;transform:rotate(-8deg)"><path d="M3 2v25l7-7 6 14 6-3-6-13h11z" fill="#4ac2ff" stroke="white" stroke-width="2.6" stroke-linejoin="round"/></svg>`;
       (document.documentElement || document.body).appendChild(cursor);
       return cursor;
     }
@@ -176,7 +195,7 @@ async function targetPoint(tabId, request) {
       element = document.elementFromPoint(x, y);
     }
     const cursor = ensureCursor();
-    cursor.style.transform = `translate(${Math.round(x - 4)}px,${Math.round(y - 3)}px)`;
+    cursor.style.transform = `translate(${Math.round(x - 46)}px,${Math.round(y - 32)}px)`;
     cursor.style.opacity = "1";
     clearTimeout(window.__codingToolsCursorTimer);
     window.__codingToolsCursorTimer = setTimeout(() => { cursor.style.opacity = ".35"; }, 850);
@@ -185,7 +204,7 @@ async function targetPoint(tabId, request) {
       if (req.replace === true && typeof element.select === "function") element.select();
     }
     return { x: Math.round(x), y: Math.round(y) };
-  }, [request]);
+  }, [request, mascotDataUrl]);
 }
 
 async function withDebugger(tabId, operation) {

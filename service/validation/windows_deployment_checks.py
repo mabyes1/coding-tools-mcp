@@ -34,6 +34,7 @@ def run_windows_deployment_checks(
     activity_viewer_source = service_root / "ActivityLogViewer.cs"
     web_console_bridge_source = service_root / "WebConsoleBridge.cs"
     browser_extension_root = service_root.parent / "browser-extension"
+    small_mascot_source = service_root.parent / "human-help-mascot-256.png"
     action_contract_source = package_parent / "coding_tools_mcp" / "computer-use-actions.json"
     elevated_install_text = (service_root / "install-elevated-broker.ps1").read_text(encoding="utf-8")
     interactive_install_text = (service_root / "install-interactive-broker.ps1").read_text(encoding="utf-8")
@@ -276,6 +277,7 @@ def run_windows_deployment_checks(
             browser_extension_root / "content.js",
             browser_extension_root / "bridge-frame.html",
             browser_extension_root / "bridge-frame.js",
+            small_mascot_source,
             action_contract_source,
             *helper_refs,
         ]
@@ -289,6 +291,7 @@ def run_windows_deployment_checks(
 
     # Regression contracts come from bugs we actually hit in production.
     helper_text = helper_source.read_text(encoding="utf-8")
+    overlay_text = overlay_source.read_text(encoding="utf-8")
     interactive_broker_text = (service_root / "interactive-broker.ps1").read_text(encoding="utf-8")
     web_console_bridge_text = web_console_bridge_source.read_text(encoding="utf-8")
     web_console_admin_text = (service_root / "manage-web-console-system.ps1").read_text(encoding="utf-8")
@@ -318,6 +321,22 @@ def run_windows_deployment_checks(
         raise RuntimeError("type_text lost its keyboard fallback for writable controls without ValuePattern")
     if "computer-use-overlay-leases" not in helper_text:
         raise RuntimeError("Computer Use overlay must use per-operation leases")
+    for computer_cursor_contract in (
+        "PublishOverlayCursor",
+        "_activeOverlayLeasePath",
+    ):
+        if computer_cursor_contract not in helper_text:
+            raise RuntimeError(f"Computer Use orange cursor publishing contract is missing: {computer_cursor_contract}")
+    for computer_cursor_contract in (
+        "AgentCursorForm",
+        "Coding Tools AI Cursor",
+        "Color.FromArgb(255, 145, 42)",
+        "WsExTransparent",
+    ):
+        if computer_cursor_contract not in overlay_text:
+            raise RuntimeError(f"Computer Use orange cursor overlay contract is missing: {computer_cursor_contract}")
+    if '"human-help-mascot-256.png"' not in deployment_common_text:
+        raise RuntimeError("deployment must stage the compact HUMAN HELP mascot for Browser Use")
     if "Try-HandleHumanHelpInWebConsole" not in interactive_broker_text:
         raise RuntimeError("HUMAN HELP stopped preferring the in-page Web Console")
     if '$delivery -ne "desktop_only"' not in interactive_broker_text:
@@ -421,12 +440,17 @@ def run_windows_deployment_checks(
         "BROWSER_AGENT_ALARM",
         "chrome.alarms.create",
         "chrome.alarms.onAlarm.addListener",
+        "getBrowserAgentMascotDataUrl",
+        "__coding_tools_browser_cursor__",
+        'fill="#4ac2ff"',
     ):
         if browser_agent_contract not in extension_agent_text:
             raise RuntimeError(f"Browser Use extension contract is missing: {browser_agent_contract}")
     for browser_bridge_contract in (
         'request.Path == "/v1/browser/next"',
         'request.Path == "/v1/browser/respond"',
+        'request.Path == "/v1/assets/human-help-mascot"',
+        '"human-help-mascot-256.png"',
         ".browser-extension.pending",
         ".browser-extension.response",
     ):

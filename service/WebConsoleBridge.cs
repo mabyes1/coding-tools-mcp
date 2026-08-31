@@ -116,6 +116,17 @@ internal sealed class WebConsoleBridge
             WriteJson(stream, 200, BuildState(), origin);
             return;
         }
+        if (request.Method == "GET" && request.Path == "/v1/assets/human-help-mascot")
+        {
+            var mascotPath = Path.Combine(_serviceRoot, "assets", "human-help-mascot-256.png");
+            if (!File.Exists(mascotPath))
+            {
+                WriteJson(stream, 404, new Dictionary<string, object> { { "ok", false }, { "error", "mascot_not_found" } }, origin);
+                return;
+            }
+            WriteResponse(stream, 200, "image/png", File.ReadAllBytes(mascotPath), origin);
+            return;
+        }
         if (request.Method == "GET" && request.Path == "/v1/browser/next")
         {
             var pending = TakeNextBrowserRequest(3500);
