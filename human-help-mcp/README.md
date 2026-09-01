@@ -1,21 +1,52 @@
 # Human Help MCP
 
-A standalone MCP server that lets an AI agent deliberately hand one small step back to a human.
+Standalone Human Help MCP extraction for the hackathon.
 
-This first extraction intentionally **does not modify `coding-tools-mcp`**. It reuses the existing Windows interactive broker / Web Console queue so the current Human Help UI, Web Console focus mode, desktop fallback, and typing-based timeout extension keep working unchanged.
+## Included now
 
-## Tool
+This branch contains the full Human Help source surface, not only the MCP protocol shim:
+
+- `human_help_mcp.py` — standalone stdio MCP exposing only `human_help_me`
+- `browser-extension/` — the existing browser drawer / Human Help overlay UI source copied unchanged
+- `assets/` — the existing Human Help mascot images copied unchanged
+- `windows/interactive-broker.ps1` — the current signed-in Windows broker source, including the desktop Human Help form and mascot rendering
+- `windows/WebConsoleBridge.cs` — the current browser bridge source used by the Human Help overlay
+- Windows broker launcher/install/manage source
+
+The copied UI/broker sources are intentionally byte-for-byte references to the currently working Coding Tools implementation. They are present here so the Human Help project has its actual face, not a rewritten imitation.
+
+## Current test architecture
+
+For now, the standalone MCP can reuse the already-installed Coding Tools broker queue:
+
+```text
+Agent / CLI
+  -> Human Help MCP
+  -> C:\ProgramData\WebGPTCodingToolsMCPService\interactive-requests
+  -> existing signed-in broker
+  -> Web Console Human Help overlay OR desktop Human Help form + mascot
+  -> human answer
+  -> MCP
+  -> agent resumes
+```
+
+This means another MCP-capable CLI on the same Windows machine can test the independent MCP immediately without replacing the stable Coding Tools installation.
+
+## MCP tool
+
+Only one tool is exposed:
 
 `human_help_me`
 
-Use it when the agent is blocked by something that genuinely needs a human: a physical action, a decision, missing information, a GUI-only step, or a permission boundary.
-
-The input contract is intentionally kept compatible with the current `coding-tools-mcp` implementation:
+Required arguments:
 
 - `reason`: `permission_blocked | gui_required | physical_action | faster_by_human | need_information | need_decision | other`
 - `request`: focused human request
-- `expected_result`: optional success condition
-- `return_to_agent`: optional instruction for what the agent should do next
+
+Optional:
+
+- `expected_result`
+- `return_to_agent`
 - `mode`: `prefer_human | blocking`
 - `fallback`: `continue_best_effort | wait_for_human`
 - `delivery`: `auto | desktop_only | chat_only`
@@ -29,19 +60,12 @@ No third-party Python dependency is required.
 python human_help_mcp.py
 ```
 
-Or install the local package:
-
-```powershell
-pip install -e .
-human-help-mcp
-```
-
 Generic MCP stdio configuration:
 
 ```json
 {
   "mcpServers": {
-    "human-help": {
+    "Human-Help": {
       "command": "python",
       "args": ["D:\\coding-tools-mcp\\human-help-mcp\\human_help_mcp.py"]
     }
@@ -49,36 +73,22 @@ Generic MCP stdio configuration:
 }
 ```
 
-## Current bridge
+## Suggested live test
 
-By default the server writes Human Help requests to the same broker queue used by the existing Coding Tools installation:
+Ask the CLI:
 
-```text
-C:\ProgramData\WebGPTCodingToolsMCPService\interactive-requests
-```
+> Use `human_help_me` to ask me whether you should choose option A or option B.
 
-Queue override precedence:
+Expected result: the same Human Help UI you already know appears, including the existing browser overlay behavior or desktop mascot fallback, and the answer returns to that CLI.
 
-1. `HUMAN_HELP_MCP_INTERACTIVE_QUEUE`
-2. `CODING_TOOLS_MCP_INTERACTIVE_QUEUE`
-3. the default path above
+## Important boundary
 
-This means the standalone MCP is already a separate **agent-facing MCP surface**, while the presentation/broker layer is temporarily shared.
+The MCP surface itself contains no shell, Git, filesystem, workspace, Browser Use, or Computer Use tools.
 
-After the hackathon, the broker, Web Console bridge, and UI can be moved into this project too. That later migration can happen without changing the MCP tool contract.
+The copied `windows/interactive-broker.ps1` is currently the original shared broker source, so it still contains legacy Coding Tools handlers internally. That is deliberate for this first extraction because the goal is to preserve the proven UI behavior while testing the independent MCP. After the hackathon, the broker can be pruned into a Human-Help-only implementation without changing the MCP contract.
 
-## Design boundary
-
-This project intentionally contains no shell execution, Git, filesystem, workspace, or Computer Use tools.
-
-Its job is one sentence:
-
-> When an agent should not or cannot do one small step itself, give the human a clean way to take over and return the result.
-
-## Smoke test
+## Smoke tests
 
 ```powershell
 python -m unittest discover -s tests -v
 ```
-
-The tests use `delivery=chat_only`, so they do not require the Windows broker.
