@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "CODING MCP 主控台",
+  "version": "0.1.15",
+  "description": "把 coding-tools 工作紀錄與 HUMAN_HELP 直接嵌入 ChatGPT 網頁。",
+  "permissions": ["storage"],
+  "host_permissions": ["http://127.0.0.1:8768/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "action": {
+    "default_title": "開啟 CODING MCP 主控台"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["bridge-frame.html", "bridge-frame.js"],
+      "matches": ["https://chatgpt.com/*"]
+    }
+  ]
+}
