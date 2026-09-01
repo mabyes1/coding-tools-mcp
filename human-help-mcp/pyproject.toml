@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "human-help-mcp"
+version = "0.1.0"
+description = "A tiny MCP server that lets AI agents ask a human for one focused step."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+human-help-mcp = "human_help_mcp:main"
+
+[tool.setuptools]
+py-modules = ["human_help_mcp"]
