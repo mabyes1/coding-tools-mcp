@@ -66,10 +66,24 @@ if ($LASTEXITCODE -ne 0) { throw "Could not build Activity Log viewer." }
 $bridgeSource = Join-Path $sourceRoot "WebConsoleBridge.cs"
 if (-not (Test-Path -LiteralPath $bridgeSource -PathType Leaf)) { throw "Web Console bridge source is missing: $bridgeSource" }
 $bridgeExe = Join-Path $serviceRoot "web-console-bridge.exe"
-& $csc /nologo /target:winexe /optimize+ /out:$bridgeExe `
+Get-Process -Name "web-console-bridge" -ErrorAction SilentlyContinue |
+    Stop-Process -Force -ErrorAction SilentlyContinue
+$bridgeBuild = Join-Path $env:TEMP ("web-console-bridge-{0}.exe" -f $PID)
+Remove-Item -LiteralPath $bridgeBuild -Force -ErrorAction SilentlyContinue
+& $csc /nologo /target:winexe /optimize+ /out:$bridgeBuild `
     /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\System.Web.Extensions.dll" `
-    /reference:System.ServiceProcess.dll $bridgeSource
+    /reference:System.ServiceProcess.dll /reference:System.Windows.Forms.dll $bridgeSource
 if ($LASTEXITCODE -ne 0) { throw "Could not build Web Console bridge." }
+try {
+    Copy-Item -LiteralPath $bridgeBuild -Destination $bridgeExe -Force -ErrorAction Stop
+}
+catch {
+    if (-not (Test-Path -LiteralPath $bridgeExe -PathType Leaf)) { throw }
+    Write-Warning "Existing Web Console bridge is still locked; keeping the installed bridge for this broker recovery."
+}
+finally {
+    Remove-Item -LiteralPath $bridgeBuild -Force -ErrorAction SilentlyContinue
+}
 
 $extensionSource = Join-Path (Split-Path -Parent $sourceRoot) "browser-extension"
 if (Test-Path -LiteralPath $extensionSource -PathType Container) {

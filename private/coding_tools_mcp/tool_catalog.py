@@ -63,7 +63,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "human_help_me": ToolSpec(
         title="Human help me",
-        description="Escalate one small step to the human. Use desktop_only in local Codex; auto keeps Web Console first with desktop fallback. Surface chat fallbacks visibly. Never offload ordinary work.",
+        description="Ask the human for a small step when human execution is clearly faster, simpler, safer, or more reliable than continuing with agent tools. Compare human effort against agent cost in time, tokens, tool calls, complexity, and risk. This is an efficiency tradeoff, not a last resort. Give complete actionable steps, the expected result, and what the human should return.",
         read_only=True,
     ),
     "computer_use": ToolSpec(
@@ -291,8 +291,8 @@ def _validate_public_tool_catalog() -> None:
             raise RuntimeError(f"Public MCP tool is not registered: {name}")
         if not spec.title.strip() or not spec.description.strip():
             raise RuntimeError(f"Public MCP tool needs a concise title and description: {name}")
-        if len(spec.description) > 200:
-            raise RuntimeError(f"Public MCP tool description is too long (>200 chars): {name}")
+        if len(spec.description) > 400:
+            raise RuntimeError(f"Public MCP tool description is too long (>400 chars): {name}")
 
 
 _validate_public_tool_catalog()

@@ -7,6 +7,57 @@ $serverPython = Join-Path $serviceRoot "venv\Scripts\python.exe"
 $privateAppRoot = Join-Path $serviceRoot "app"
 $oauthStatePath = Join-Path $serviceRoot "data\oauth-state.sqlite"
 $permissionModePath = Join-Path $serviceRoot "permission-mode.txt"
+$workspaceConfigPath = Join-Path $serviceRoot "data\workspace-config.json"
+
+$defaultWorkspaceConfig = [pscustomobject]@{
+    selected = "coding-tools"
+    workspaces = @(
+        [pscustomobject]@{ name = "coding-tools"; path = "D:\coding-tools-mcp" },
+        [pscustomobject]@{ name = "bulter"; path = "M:\" }
+    )
+}
+
+function Get-WorkspaceRuntimeConfig {
+    $config = $defaultWorkspaceConfig
+    if (Test-Path -LiteralPath $workspaceConfigPath -PathType Leaf) {
+        try {
+            $config = Get-Content -LiteralPath $workspaceConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        }
+        catch {
+            throw "Workspace configuration is invalid: $workspaceConfigPath ($($_.Exception.Message))"
+        }
+    }
+    $entries = @($config.workspaces)
+    if ($entries.Count -lt 1) { throw "Workspace configuration has no workspaces: $workspaceConfigPath" }
+    $seenNames = @{}
+    foreach ($entry in $entries) {
+        $name = [string]$entry.name
+        $path = [string]$entry.path
+        if ($name -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') {
+            throw "Workspace selector is invalid: $name"
+        }
+        if ([string]::IsNullOrWhiteSpace($path)) { throw "Workspace path is empty for selector: $name" }
+        $nameKey = $name.ToLowerInvariant()
+        if ($seenNames.ContainsKey($nameKey)) { throw "Workspace selector is duplicated: $name" }
+        $seenNames[$nameKey] = $true
+    }
+    $selectedToken = [string]$config.selected
+    $selected = $entries | Where-Object {
+        ([string]$_.name).Equals($selectedToken, [StringComparison]::OrdinalIgnoreCase) -or
+        ([string]$_.path).Equals($selectedToken, [StringComparison]::OrdinalIgnoreCase)
+    } | Select-Object -First 1
+    if (-not $selected) { throw "Selected workspace is not in the configured allowlist: $selectedToken" }
+    return [pscustomobject]@{
+        Selected = $selected
+        Entries = $entries
+    }
+}
+
+$workspaceConfig = Get-WorkspaceRuntimeConfig
+$workspaceRoot = [string]$workspaceConfig.Selected.path
+$workspaceAllowlist = ($workspaceConfig.Entries | ForEach-Object {
+    "{0}={1}" -f ([string]$_.name), ([string]$_.path)
+}) -join ";"
 
 function Unprotect-MachineSecret([string]$Path) {
     $encryptedBytes = [Convert]::FromBase64String(
@@ -44,7 +95,7 @@ $env:CODING_TOOLS_MCP_HEALTH_PORT = "8766"
 $env:CODING_TOOLS_MCP_TUNNEL_PORT = "8767"
 $env:CODING_TOOLS_MCP_RUNTIME_ROOT = Join-Path $serviceRoot "runtime"
 $env:CODING_TOOLS_MCP_PWSH_PATH = "C:\Program Files\PowerShell\7\pwsh.exe"
-$env:CODING_TOOLS_MCP_WORKSPACE_ALLOWLIST = "coding-tools=D:\coding-tools-mcp;bulter=M:\"
+$env:CODING_TOOLS_MCP_WORKSPACE_ALLOWLIST = $workspaceAllowlist
 $env:CODING_TOOLS_MCP_EXECUTABLE_ALLOWLIST = "adb.exe;git.exe;dotnet.exe;node.exe;pwsh.exe"
 $env:CODING_TOOLS_MCP_ELEVATED_QUEUE = Join-Path $serviceRoot "elevated-requests"
 $env:PYTHONPATH = $privateAppRoot
@@ -77,7 +128,7 @@ foreach ($requiredPath in @($serverPython, (Join-Path $privateAppRoot "coding_to
 }
 
 & $serverPython -m coding_tools_mcp `
-    --workspace "D:\coding-tools-mcp" `
+    --workspace $workspaceRoot `
     --host 127.0.0.1 `
     --port 8765 `
     --oauth-mode

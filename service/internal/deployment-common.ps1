@@ -309,6 +309,7 @@ function New-CodingToolsBrokerArtifactStage(
     & $csc /nologo /target:winexe /optimize+ ("/out:" + (Join-Path $serviceStage "web-console-bridge.exe")) `
         /reference:"$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\System.Web.Extensions.dll" `
         /reference:System.ServiceProcess.dll `
+        /reference:System.Windows.Forms.dll `
         (Join-Path $ServiceSourceRoot "WebConsoleBridge.cs")
     if ($LASTEXITCODE -ne 0) { throw "Could not stage the Web Console bridge." }
 

@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -9,6 +10,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Web.Script.Serialization;
+using System.Windows.Forms;
 
 internal sealed class WebConsoleBridge
 {
@@ -21,6 +23,7 @@ internal sealed class WebConsoleBridge
     private readonly int _port;
     private readonly JavaScriptSerializer _json = new JavaScriptSerializer { MaxJsonLength = 1024 * 1024 };
     private readonly object _fileLock = new object();
+    private readonly object _workspacePickerLock = new object();
     private volatile bool _running = true;
 
     public WebConsoleBridge(string logPath, string queueRoot, string permissionModePath, string repoRoot, string pidPath, int port)
@@ -114,6 +117,107 @@ internal sealed class WebConsoleBridge
         if (request.Method == "GET" && request.Path == "/v1/state")
         {
             WriteJson(stream, 200, BuildState(), origin);
+            return;
+        }
+        if (request.Method == "POST" && request.Path == "/v1/workspace/pick")
+        {
+            var picked = PickWorkspaceFolder();
+            WriteJson(stream, Convert.ToBoolean(picked["ok"]) ? 200 : 409, picked, origin);
+            return;
+        }
+        if (request.Method == "POST" && request.Path == "/v1/workspace/add")
+        {
+            var body = DeserializeBody(request);
+            var selectedPath = body.ContainsKey("path") ? Convert.ToString(body["path"]).Trim() : "";
+            if (String.IsNullOrWhiteSpace(selectedPath) || !Directory.Exists(selectedPath))
+            {
+                WriteJson(stream, 400, new Dictionary<string, object>
+                {
+                    { "ok", false },
+                    { "error", "workspace_path_invalid" }
+                }, origin);
+                return;
+            }
+            try { selectedPath = new DirectoryInfo(selectedPath).FullName; }
+            catch
+            {
+                WriteJson(stream, 400, new Dictionary<string, object>
+                {
+                    { "ok", false },
+                    { "error", "workspace_path_invalid" }
+                }, origin);
+                return;
+            }
+            var launched = LaunchAdminAction("add_workspace", selectedPath);
+            if (launched == null)
+            {
+                WriteJson(stream, 400, new Dictionary<string, object> { { "ok", false }, { "error", "invalid_workspace_action" } }, origin);
+                return;
+            }
+            launched["workspace_path"] = selectedPath;
+            WriteJson(stream, Convert.ToBoolean(launched["ok"]) ? 200 : 409, launched, origin);
+            return;
+        }
+        if (request.Method == "POST" && request.Path == "/v1/workspace/switch")
+        {
+            var body = DeserializeBody(request);
+            var selector = body.ContainsKey("workspace") ? Convert.ToString(body["workspace"]).Trim() : "";
+            if (String.IsNullOrWhiteSpace(selector))
+            {
+                WriteJson(stream, 400, new Dictionary<string, object> { { "ok", false }, { "error", "workspace_required" } }, origin);
+                return;
+            }
+            var health = InvokeLoopbackJson("GET", "http://127.0.0.1:8766/healthz");
+            if (!Convert.ToBoolean(health["ok"]))
+            {
+                WriteJson(stream, 409, new Dictionary<string, object>
+                {
+                    { "ok", false },
+                    { "error", "mcp_health_unavailable" },
+                    { "detail", health.ContainsKey("error") ? health["error"] : "MCP health endpoint is unavailable." }
+                }, origin);
+                return;
+            }
+            var workspaceConfig = ReadWorkspaceConfiguration();
+            if (!Convert.ToBoolean(workspaceConfig["ok"]))
+            {
+                WriteJson(stream, 409, workspaceConfig, origin);
+                return;
+            }
+            var selectedEntry = FindWorkspaceEntry(workspaceConfig.ContainsKey("workspaces") ? workspaceConfig["workspaces"] : null, selector);
+            if (selectedEntry == null)
+            {
+                WriteJson(stream, 400, new Dictionary<string, object>
+                {
+                    { "ok", false },
+                    { "error", "workspace_not_allowed" },
+                    { "workspace", selector }
+                }, origin);
+                return;
+            }
+            var selectedName = Convert.ToString(selectedEntry["name"]);
+            var selectedPath = Convert.ToString(selectedEntry["path"]);
+            var currentPath = health.ContainsKey("workspace") ? Convert.ToString(health["workspace"]) : "";
+            if (String.Equals(currentPath, selectedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                WriteJson(stream, 200, new Dictionary<string, object>
+                {
+                    { "ok", true },
+                    { "changed", false },
+                    { "workspace", selectedName },
+                    { "workspace_path", selectedPath }
+                }, origin);
+                return;
+            }
+            var launched = LaunchAdminAction("switch_workspace", selectedName);
+            if (launched == null)
+            {
+                WriteJson(stream, 400, new Dictionary<string, object> { { "ok", false }, { "error", "invalid_workspace_action" } }, origin);
+                return;
+            }
+            launched["workspace"] = selectedName;
+            launched["workspace_path"] = selectedPath;
+            WriteJson(stream, Convert.ToBoolean(launched["ok"]) ? 200 : 409, launched, origin);
             return;
         }
         if (request.Method == "GET" && request.Path == "/v1/assets/human-help-mascot")
@@ -222,7 +326,7 @@ internal sealed class WebConsoleBridge
                 WriteJson(stream, Convert.ToBoolean(result["ok"]) ? 200 : 409, result, origin);
                 return;
             }
-            var launched = LaunchAdminAction(action);
+            var launched = LaunchAdminAction(action, null);
             if (launched == null)
             {
                 WriteJson(stream, 400, new Dictionary<string, object> { { "ok", false }, { "error", "invalid_system_action" } }, origin);
@@ -324,6 +428,8 @@ internal sealed class WebConsoleBridge
 
     private Dictionary<string, object> BuildState()
     {
+        var mcpHealth = InvokeLoopbackJson("GET", "http://127.0.0.1:8766/healthz");
+        var workspaceConfig = ReadWorkspaceConfiguration();
         var state = new Dictionary<string, object>
         {
             { "ok", true },
@@ -334,7 +440,132 @@ internal sealed class WebConsoleBridge
             { "services", ReadServiceStates() },
             { "human_help", ReadPendingHumanHelp() }
         };
+        if (Convert.ToBoolean(mcpHealth["ok"]))
+        {
+            state["workspace"] = mcpHealth.ContainsKey("workspace") ? mcpHealth["workspace"] : "";
+            state["workspace_allowlist"] = Convert.ToBoolean(workspaceConfig["ok"])
+                ? workspaceConfig["workspaces"]
+                : (mcpHealth.ContainsKey("workspace_allowlist") ? mcpHealth["workspace_allowlist"] : new object[0]);
+        }
+        else
+        {
+            state["workspace"] = "";
+            state["workspace_allowlist"] = new object[0];
+            state["workspace_error"] = mcpHealth.ContainsKey("error") ? mcpHealth["error"] : "MCP health endpoint is unavailable.";
+        }
         return state;
+    }
+
+    private Dictionary<string, object> ReadWorkspaceConfiguration()
+    {
+        var configPath = Path.Combine(_serviceRoot, "data", "workspace-config.json");
+        try
+        {
+            if (!File.Exists(configPath))
+            {
+                return new Dictionary<string, object> { { "ok", false }, { "error", "workspace_config_missing" } };
+            }
+            var config = _json.DeserializeObject(File.ReadAllText(configPath, Encoding.UTF8)) as Dictionary<string, object>;
+            if (config == null || !config.ContainsKey("workspaces") || !(config["workspaces"] is IEnumerable))
+            {
+                return new Dictionary<string, object> { { "ok", false }, { "error", "workspace_config_invalid" } };
+            }
+            config["ok"] = true;
+            return config;
+        }
+        catch (Exception exc)
+        {
+            return new Dictionary<string, object> { { "ok", false }, { "error", exc.Message } };
+        }
+    }
+
+    private Dictionary<string, object> PickWorkspaceFolder()
+    {
+        if (!Monitor.TryEnter(_workspacePickerLock))
+        {
+            return new Dictionary<string, object>
+            {
+                { "ok", false },
+                { "error", "workspace_picker_busy" }
+            };
+        }
+        try
+        {
+            var selectedPath = "";
+            var cancelled = true;
+            Exception failure = null;
+            var dialogThread = new Thread(new ThreadStart(delegate
+            {
+                try
+                {
+                    using (var owner = new Form())
+                    using (var dialog = new FolderBrowserDialog())
+                    {
+                        owner.Text = "Coding Tools 工作區";
+                        owner.ShowInTaskbar = false;
+                        owner.StartPosition = FormStartPosition.CenterScreen;
+                        owner.FormBorderStyle = FormBorderStyle.FixedToolWindow;
+                        owner.Width = 1;
+                        owner.Height = 1;
+                        owner.Opacity = 0;
+                        owner.TopMost = true;
+                        owner.Show();
+                        owner.Activate();
+                        owner.BringToFront();
+                        dialog.Description = "選擇要加入 Coding Tools 的工作區資料夾";
+                        dialog.ShowNewFolderButton = false;
+                        dialog.RootFolder = Environment.SpecialFolder.MyComputer;
+                        var health = InvokeLoopbackJson("GET", "http://127.0.0.1:8766/healthz");
+                        if (Convert.ToBoolean(health["ok"]) && health.ContainsKey("workspace"))
+                        {
+                            var current = Convert.ToString(health["workspace"]);
+                            if (Directory.Exists(current)) dialog.SelectedPath = current;
+                        }
+                        if (dialog.ShowDialog(owner) == DialogResult.OK && !String.IsNullOrWhiteSpace(dialog.SelectedPath))
+                        {
+                            selectedPath = dialog.SelectedPath;
+                            cancelled = false;
+                        }
+                    }
+                }
+                catch (Exception exc) { failure = exc; }
+            }));
+            dialogThread.SetApartmentState(ApartmentState.STA);
+            dialogThread.Start();
+            dialogThread.Join();
+            if (failure != null)
+            {
+                return new Dictionary<string, object>
+                {
+                    { "ok", false },
+                    { "error", failure.Message }
+                };
+            }
+            return new Dictionary<string, object>
+            {
+                { "ok", true },
+                { "cancelled", cancelled },
+                { "path", cancelled ? "" : new DirectoryInfo(selectedPath).FullName }
+            };
+        }
+        finally { Monitor.Exit(_workspacePickerLock); }
+    }
+
+    private static IDictionary FindWorkspaceEntry(object rawAllowlist, string selector)
+    {
+        var entries = rawAllowlist as IEnumerable;
+        if (entries == null) return null;
+        IDictionary pathMatch = null;
+        foreach (var rawEntry in entries)
+        {
+            var entry = rawEntry as IDictionary;
+            if (entry == null) continue;
+            var name = entry.Contains("name") ? Convert.ToString(entry["name"]) : "";
+            var path = entry.Contains("path") ? Convert.ToString(entry["path"]) : "";
+            if (String.Equals(name, selector, StringComparison.OrdinalIgnoreCase)) return entry;
+            if (String.Equals(path, selector, StringComparison.OrdinalIgnoreCase)) pathMatch = entry;
+        }
+        return pathMatch;
     }
 
     private Dictionary<string, object> ReadServiceStates()
@@ -401,7 +632,7 @@ internal sealed class WebConsoleBridge
         }
     }
 
-    private Dictionary<string, object> LaunchAdminAction(string action)
+    private Dictionary<string, object> LaunchAdminAction(string action, string workspace)
     {
         var actionMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -413,7 +644,9 @@ internal sealed class WebConsoleBridge
             { "rollback", "Rollback" },
             { "safe", "Safe" },
             { "trusted", "Trusted" },
-            { "yolo", "Yolo" }
+            { "yolo", "Yolo" },
+            { "switch_workspace", "SwitchWorkspace" },
+            { "add_workspace", "AddWorkspace" }
         };
         string mapped;
         if (!actionMap.TryGetValue(action, out mapped)) return null;
@@ -430,6 +663,15 @@ internal sealed class WebConsoleBridge
             var arguments = "-NoLogo -NoProfile -ExecutionPolicy Bypass -File " + QuoteArgument(script)
                 + " -Action " + QuoteArgument(mapped)
                 + " -RepoRoot " + QuoteArgument(_repoRoot);
+            if (String.Equals(mapped, "SwitchWorkspace", StringComparison.OrdinalIgnoreCase)
+                || String.Equals(mapped, "AddWorkspace", StringComparison.OrdinalIgnoreCase))
+            {
+                if (String.IsNullOrWhiteSpace(workspace))
+                {
+                    return new Dictionary<string, object> { { "ok", false }, { "error", "workspace_required" } };
+                }
+                arguments += " -Workspace " + QuoteArgument(workspace);
+            }
             Process.Start(new ProcessStartInfo
             {
                 FileName = powershell,

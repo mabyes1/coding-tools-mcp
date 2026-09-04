@@ -7,7 +7,7 @@ from .errors import JsonRpcError
 
 PROTOCOL_VERSION = "2025-11-25"
 STATELESS_PROTOCOL_VERSION = "2026-07-28"
-SUPPORTED_PROTOCOL_VERSIONS = (PROTOCOL_VERSION, "2025-06-18", STATELESS_PROTOCOL_VERSION)
+SUPPORTED_PROTOCOL_VERSIONS = ("2024-11-05", "2024-10-07", PROTOCOL_VERSION, "2025-06-18", STATELESS_PROTOCOL_VERSION)
 
 
 def jsonrpc_error(
@@ -60,13 +60,9 @@ def validate_initialize_params(params: dict[str, Any]) -> str:
     requested = params.get("protocolVersion")
     if requested is None:
         return PROTOCOL_VERSION
-    if not protocol_version_is_supported(requested):
-        raise JsonRpcError(
-            -32602,
-            "Unsupported MCP protocol version",
-            {"supported": list(SUPPORTED_PROTOCOL_VERSIONS), "received": requested},
-        )
-    return str(requested)
+    if str(requested) in SUPPORTED_PROTOCOL_VERSIONS:
+        return str(requested)
+    return PROTOCOL_VERSION
 
 
 def validate_initialize_request(request: dict[str, Any]) -> None:

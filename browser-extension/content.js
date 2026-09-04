@@ -12,9 +12,6 @@
       :host([data-theme="dark"]){--fg:#f1f5f9;--muted:#a7b2bd;--muted-2:#83909c;--glass-bg:rgba(10,14,18,.24);--glass:rgba(255,255,255,.07);--glass-hi:rgba(255,255,255,.34);--glass-mid:rgba(255,255,255,.13);--glass-low:rgba(255,255,255,.025);--line:rgba(255,255,255,.13);--line-strong:rgba(255,255,255,.42);--good:#62d6a6;--warn:#ffd27a;--bad:#ff8f8f;--shadow:0 28px 90px rgba(0,0,0,.40)}
       *{box-sizing:border-box}button,input,textarea{font:inherit}button{cursor:pointer}
       .edge,.shell{font-family:"Segoe UI","Microsoft JhengHei UI","Noto Sans TC",sans-serif}
-      .focusMask{position:fixed;background:#07101882;backdrop-filter:blur(9px) saturate(.7);-webkit-backdrop-filter:blur(9px) saturate(.7);pointer-events:auto;opacity:0;visibility:hidden;transition:opacity .16s ease;z-index:1}
-      .focusMask.on{opacity:1;visibility:visible}.focusMask.top{left:0;right:0;top:0}.focusMask.left,.focusMask.right{top:0}.focusMask.bottom{left:0;right:0;bottom:0}
-      .escapeHint{position:fixed;pointer-events:none;border:1px solid #79d7b04d;border-radius:18px;box-shadow:0 0 0 1px #07101866,0 0 34px #79d7b020;opacity:0;visibility:hidden;transition:opacity .16s ease;z-index:2}.escapeHint.on{opacity:1;visibility:visible}
       .edge{pointer-events:auto;position:fixed;right:10px;top:42%;width:36px;height:116px;border:1px solid var(--line-strong);border-radius:18px;background:linear-gradient(145deg,var(--glass-mid) 0%,var(--glass-low) 38%,transparent 64%),var(--glass-bg);backdrop-filter:blur(28px) saturate(170%);-webkit-backdrop-filter:blur(28px) saturate(170%);color:var(--fg);box-shadow:0 14px 42px rgba(0,0,0,.16),inset 0 1px 0 var(--glass-hi),inset 1px 0 0 var(--glass-mid),inset 0 -1px 0 var(--glass-low);display:grid;place-items:center;transition:transform .22s ease,opacity .22s ease}
       .edge:hover{background:var(--glass);border-color:var(--line-strong)}.edge span{writing-mode:vertical-rl;letter-spacing:.16em;font-size:11px}.edge i{position:absolute;top:13px;width:7px;height:7px;border-radius:50%;background:#7d8995}.edge i.live{background:#55d6a3;box-shadow:0 0 0 4px #55d6a31c}.edge i.attn{background:#ffb45e;animation:pulse 1.4s infinite}
       .shell{pointer-events:auto;position:fixed;right:14px;top:14px;bottom:14px;height:auto;width:min(450px,calc(100vw - 28px));background:linear-gradient(145deg,var(--glass-mid) 0%,var(--glass-low) 20%,transparent 46%),linear-gradient(325deg,var(--glass-low) 0%,transparent 34%),var(--glass-bg);backdrop-filter:blur(34px) saturate(175%) contrast(102%);-webkit-backdrop-filter:blur(34px) saturate(175%) contrast(102%);border:1px solid var(--line-strong);border-radius:26px;box-shadow:var(--shadow),0 1px 0 rgba(255,255,255,.10),inset 0 1px 0 var(--glass-hi),inset 1px 0 0 var(--glass-mid),inset -1px 0 0 rgba(255,255,255,.04),inset 0 -1px 0 var(--glass-low);transform:translateX(calc(100% + 36px));transition:transform .25s cubic-bezier(.2,.8,.2,1);display:grid;grid-template-rows:auto auto 1fr auto;color:var(--fg);z-index:3;overflow:hidden;isolation:isolate}
@@ -29,17 +26,12 @@
       .event{display:grid;grid-template-columns:52px 1fr;gap:8px;padding:10px 2px;border-bottom:1px solid var(--line)}.eventTime{color:var(--muted-2);font:11px/1.6 Consolas,monospace}.eventMain{min-width:0}.eventTitle{font-size:12px;color:var(--fg);line-height:1.45}.event.start .eventTitle{color:#2f7fbd}.event.done .eventTitle{color:#159a6f}.event.fail .eventTitle{color:#c43d4d}.eventDetail{margin-top:5px;color:var(--muted);font:11px/1.55 Consolas,"Microsoft JhengHei UI",monospace;white-space:pre-wrap;overflow-wrap:anywhere}.eventDetail[hidden]{display:none}
       .currentWork{margin:0 0 14px;padding:12px;border:1px solid rgba(21,154,111,.22);border-radius:12px;background:var(--glass);box-shadow:var(--shadow),inset 0 1px 0 rgba(255,255,255,.10);backdrop-filter:blur(18px) saturate(112%);-webkit-backdrop-filter:blur(18px) saturate(112%)}.currentLabel{font-size:10px;font-weight:700;letter-spacing:.12em;color:var(--good);margin-bottom:7px}.currentItem{padding:8px 0;border-top:1px solid var(--line)}.currentItem:first-of-type{border-top:0}.currentTitle{font-size:12px;color:var(--fg);line-height:1.5}.currentDetail{margin-top:4px;color:var(--muted);font:10px/1.45 Consolas,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.sessionBadge{display:inline-block;margin-right:7px;padding:2px 5px;border:1px solid var(--line);border-radius:5px;color:var(--muted);background:transparent;font:9px/1.2 Consolas,monospace;vertical-align:1px}
       .help{border:1px solid rgba(167,101,0,.24);border-radius:12px;background:var(--glass);box-shadow:var(--shadow),inset 0 1px 0 rgba(255,255,255,.10);backdrop-filter:blur(18px) saturate(112%);-webkit-backdrop-filter:blur(18px) saturate(112%);padding:15px;margin-bottom:12px}.helpEyebrow{color:var(--warn);font-size:10px;font-weight:700;letter-spacing:.14em}.help h2{font-size:18px;line-height:1.45;margin:9px 0 7px;color:var(--fg)}.help p{font-size:12px;line-height:1.65;color:var(--muted);margin:0}.help textarea{width:100%;min-height:102px;margin-top:14px;resize:vertical;border:1px solid var(--line);border-radius:9px;background:transparent;color:var(--fg);padding:11px 12px;outline:0}.help textarea:focus{border-color:var(--good);box-shadow:0 0 0 3px rgba(21,154,111,.08)}.helpActions{display:flex;gap:8px;margin-top:10px}.primary,.secondary{border:1px solid transparent;border-radius:8px;padding:9px 13px;font-size:12px}.primary{background:var(--fg);color:var(--glass-bg);font-weight:700}.secondary{background:transparent;border-color:var(--line);color:var(--fg)}.primary:hover{opacity:.88}.secondary:hover{border-color:var(--line-strong);background:var(--glass)}
-      .settings{display:grid;gap:12px}.glassCard{border:1px solid var(--line-strong);border-radius:13px;background:linear-gradient(145deg,var(--glass-mid) 0%,var(--glass-low) 34%,transparent 70%),var(--glass);box-shadow:0 12px 34px rgba(0,0,0,.08),inset 0 1px 0 var(--glass-hi),inset 1px 0 0 var(--glass-low);backdrop-filter:blur(20px) saturate(135%);-webkit-backdrop-filter:blur(20px) saturate(135%);overflow:hidden}.cardHead{display:flex;align-items:flex-start;gap:12px;padding:13px 14px 11px;border-bottom:1px solid var(--line)}.cardHeadText{min-width:0}.cardTitle{font-size:12px;font-weight:800;color:var(--fg);letter-spacing:.03em}.cardHint{margin-top:3px;color:var(--muted);font-size:10px;line-height:1.45}.cardBody{padding:12px 14px}.serviceList{display:grid;gap:8px}.serviceRow{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;padding:9px 10px;border:1px solid var(--line);border-radius:9px;background:linear-gradient(145deg,var(--glass-low),transparent 65%)}.serviceName{font-size:11px;color:var(--fg)}.serviceTech{display:block;margin-top:2px;color:var(--muted);font:9px/1.3 Consolas,monospace}.statusPill{padding:3px 7px;border:1px solid var(--line);border-radius:999px;font:700 9px/1 Consolas,monospace;text-transform:uppercase;color:var(--muted)}.statusPill.running{color:#159a6f;border-color:rgba(21,154,111,.26);background:rgba(21,154,111,.07)}.statusPill.stopped{color:#c43d4d;border-color:rgba(196,61,77,.24);background:rgba(196,61,77,.06)}.statusPill.missing{color:var(--muted-2)}.actionGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.actionBtn{min-height:38px;border:1px solid var(--line);border-radius:9px;background:linear-gradient(145deg,var(--glass-low),transparent 68%);color:var(--fg);padding:8px 10px;text-align:left;font-size:11px;transition:.14s ease}.actionBtn:hover{background:linear-gradient(145deg,var(--glass-mid),var(--glass-low));border-color:var(--line-strong);transform:translateY(-1px);box-shadow:inset 0 1px 0 var(--glass-hi)}.actionBtn:disabled{opacity:.46;cursor:wait;transform:none}.actionBtn strong{display:block;font-size:11px}.actionBtn small{display:block;margin-top:2px;color:var(--muted);font-size:9px;line-height:1.3}.actionBtn.danger{border-color:rgba(196,61,77,.18)}.actionBtn.danger:hover{background:rgba(196,61,77,.06);border-color:rgba(196,61,77,.32)}.permissionGrid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}.permissionBtn{border:1px solid var(--line);border-radius:9px;background:linear-gradient(145deg,var(--glass-low),transparent 68%);color:var(--muted);padding:9px 6px;font:700 10px/1 Consolas,monospace}.permissionBtn:hover{color:var(--fg);border-color:var(--line-strong)}.permissionBtn.active{color:var(--fg);background:linear-gradient(145deg,var(--glass-mid),var(--glass-low));border-color:var(--line-strong);box-shadow:inset 0 1px 0 var(--glass-hi)}.permissionBtn.yolo.active{color:#c43d4d;border-color:rgba(196,61,77,.32);background:rgba(196,61,77,.07)}.healthBox{margin-top:9px;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:linear-gradient(145deg,var(--glass-low),transparent 72%);color:var(--muted);font:9px/1.5 Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.healthBox strong{color:var(--fg)}.settingsBusy{display:inline-block;margin-left:auto;color:var(--warn);font:9px/1.3 Consolas,monospace}
+      .settings{display:grid;gap:12px}.glassCard{border:1px solid var(--line-strong);border-radius:13px;background:linear-gradient(145deg,var(--glass-mid) 0%,var(--glass-low) 34%,transparent 70%),var(--glass);box-shadow:0 12px 34px rgba(0,0,0,.08),inset 0 1px 0 var(--glass-hi),inset 1px 0 0 var(--glass-low);backdrop-filter:blur(20px) saturate(135%);-webkit-backdrop-filter:blur(20px) saturate(135%);overflow:hidden}.cardHead{display:flex;align-items:flex-start;gap:12px;padding:13px 14px 11px;border-bottom:1px solid var(--line)}.cardHeadText{min-width:0}.cardTitle{font-size:12px;font-weight:800;color:var(--fg);letter-spacing:.03em}.cardHint{margin-top:3px;color:var(--muted);font-size:10px;line-height:1.45}.cardBody{padding:12px 14px}.workspacePicker{display:grid;gap:9px}.workspaceCurrent{padding:9px 10px;border:1px solid rgba(21,154,111,.22);border-radius:9px;background:linear-gradient(145deg,rgba(21,154,111,.08),transparent 72%)}.workspaceCurrentLabel{color:var(--good);font-size:10px;font-weight:700;letter-spacing:.08em}.workspaceCurrentPath{margin-top:4px;color:var(--fg);font:10px/1.45 Consolas,monospace;overflow-wrap:anywhere}.workspaceSelect{width:100%;min-height:36px;border:1px solid var(--line);border-radius:9px;background:var(--glass-low);color:var(--fg);padding:7px 9px;outline:0}.workspaceSelect:focus{border-color:var(--good);box-shadow:0 0 0 3px rgba(21,154,111,.08)}.workspaceSelect option{background:#20252a;color:#f1f5f9}.workspaceActions{display:flex;gap:7px;justify-content:stretch}.workspaceApply,.workspaceAdd{flex:1;margin-top:1px}.workspaceApply:disabled,.workspaceAdd:disabled{opacity:.46;cursor:wait}.serviceList{display:grid;gap:8px}.serviceRow{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:center;padding:9px 10px;border:1px solid var(--line);border-radius:9px;background:linear-gradient(145deg,var(--glass-low),transparent 65%)}.serviceName{font-size:11px;color:var(--fg)}.serviceTech{display:block;margin-top:2px;color:var(--muted);font:9px/1.3 Consolas,monospace}.statusPill{padding:3px 7px;border:1px solid var(--line);border-radius:999px;font:700 9px/1 Consolas,monospace;text-transform:uppercase;color:var(--muted)}.statusPill.running{color:#159a6f;border-color:rgba(21,154,111,.26);background:rgba(21,154,111,.07)}.statusPill.stopped{color:#c43d4d;border-color:rgba(196,61,77,.24);background:rgba(196,61,77,.06)}.statusPill.missing{color:var(--muted-2)}.actionGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.actionBtn{min-height:38px;border:1px solid var(--line);border-radius:9px;background:linear-gradient(145deg,var(--glass-low),transparent 68%);color:var(--fg);padding:8px 10px;text-align:left;font-size:11px;transition:.14s ease}.actionBtn:hover{background:linear-gradient(145deg,var(--glass-mid),var(--glass-low));border-color:var(--line-strong);transform:translateY(-1px);box-shadow:inset 0 1px 0 var(--glass-hi)}.actionBtn:disabled{opacity:.46;cursor:wait;transform:none}.actionBtn strong{display:block;font-size:11px}.actionBtn small{display:block;margin-top:2px;color:var(--muted);font-size:9px;line-height:1.3}.actionBtn.danger{border-color:rgba(196,61,77,.18)}.actionBtn.danger:hover{background:rgba(196,61,77,.06);border-color:rgba(196,61,77,.32)}.permissionGrid{display:grid;grid-template-columns:repeat(3,1fr);gap:7px}.permissionBtn{border:1px solid var(--line);border-radius:9px;background:linear-gradient(145deg,var(--glass-low),transparent 68%);color:var(--muted);padding:9px 6px;font:700 10px/1 Consolas,monospace}.permissionBtn:hover{color:var(--fg);border-color:var(--line-strong)}.permissionBtn.active{color:var(--fg);background:linear-gradient(145deg,var(--glass-mid),var(--glass-low));border-color:var(--line-strong);box-shadow:inset 0 1px 0 var(--glass-hi)}.permissionBtn.yolo.active{color:#c43d4d;border-color:rgba(196,61,77,.32);background:rgba(196,61,77,.07)}.healthBox{margin-top:9px;padding:9px 10px;border:1px solid var(--line);border-radius:8px;background:linear-gradient(145deg,var(--glass-low),transparent 72%);color:var(--muted);font:9px/1.5 Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}.healthBox strong{color:var(--fg)}.settingsBusy{display:inline-block;margin-left:auto;color:var(--warn);font:9px/1.3 Consolas,monospace}
       .footer{display:flex;align-items:center;gap:10px;padding:10px 14px;border-top:1px solid var(--line);background:transparent;color:var(--muted);font-size:11px}.toggle{display:inline-flex;align-items:center;gap:6px}.toggle input{accent-color:#159a6f}.clear{margin-left:auto;border:0;background:transparent;color:var(--muted);font-size:11px}.clear:hover{color:var(--bad)}.toast{position:absolute;left:16px;right:16px;bottom:54px;padding:10px 12px;border-radius:14px;background:var(--glass-bg);backdrop-filter:blur(24px) saturate(150%);-webkit-backdrop-filter:blur(24px) saturate(150%);border:1px solid var(--line-strong);color:var(--fg);font-size:12px;box-shadow:0 12px 34px rgba(0,0,0,.16),inset 0 1px 0 rgba(255,255,255,.18);opacity:0;transform:translateY(8px);transition:.2s;pointer-events:none}.toast.show{opacity:1;transform:none}
       @keyframes pulse{50%{box-shadow:0 0 0 7px #ffb45e20}}
       @media (max-width:520px){.shell{right:8px;top:8px;bottom:8px;width:calc(100vw - 16px);border-radius:22px}.edge{top:auto;bottom:18%;height:92px}}
       @media (prefers-reduced-motion:reduce){.shell,.edge,.toast{transition:none}.edge i.attn{animation:none}}
     </style>
-    <div class="focusMask top" aria-hidden="true"></div>
-    <div class="focusMask left" aria-hidden="true"></div>
-    <div class="focusMask right" aria-hidden="true"></div>
-    <div class="focusMask bottom" aria-hidden="true"></div>
-    <div class="escapeHint" aria-hidden="true"></div>
     <aside class="shell" aria-label="CODING MCP 主控台">
       <header class="header">
         <div class="titleRow"><div class="mark">MCP</div><div class="title">CODING MCP 主控台</div><div class="spacer"></div><button class="iconBtn close" title="收合">×</button></div>
@@ -62,8 +54,6 @@
   const details = $(".details");
   const dnd = $(".dnd");
   const badge = $(".badge");
-  const focusMasks = Array.from(root.querySelectorAll(".focusMask"));
-  const escapeHint = $(".escapeHint");
   let state = null;
   let activeTab = "activity";
   let connected = false;
@@ -71,10 +61,10 @@
   let renderedHelpId = "";
   let pollTimer = null;
   let connectionError = "";
-  let allowHelpInputFocus = false;
-  let focusMaskRaf = 0;
   let lastHelpActivitySentAt = 0;
   let settingsBusy = "";
+  let selectedWorkspaceName = "";
+  let pendingAddedWorkspacePath = "";
   let lastHealth = null;
   const REQUEST_TIMEOUT_MS = 5000;
   const HELP_ACTIVITY_THROTTLE_MS = 300;
@@ -139,11 +129,12 @@
   function extensionRequest(path, options = {}) {
     return new Promise((resolve, reject) => {
       let settled = false;
+      const requestTimeoutMs = Math.max(1000, Math.min(Number(options.timeoutMs) || REQUEST_TIMEOUT_MS, 120000));
       const timeout = setTimeout(() => {
         if (settled) return;
         settled = true;
         reject(new Error("主控台請求逾時"));
-      }, REQUEST_TIMEOUT_MS);
+      }, requestTimeoutMs);
       chrome.runtime.sendMessage(
         { type: "coding-tools-console-request", path, options },
         (response) => {
@@ -160,7 +151,8 @@
 
   async function directRequest(path, options = {}) {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    const requestTimeoutMs = Math.max(1000, Math.min(Number(options.timeoutMs) || REQUEST_TIMEOUT_MS, 120000));
+    const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
     try {
       const response = await fetch(`${CONSOLE_BASE}${path}`, {
         method: options.method || "GET",
@@ -202,62 +194,6 @@
     shell.classList.toggle("open", open);
     persist();
     if (open) setTimeout(() => { body.scrollTop = body.scrollHeight; }, 20);
-  }
-
-  function findEscapeComposer() {
-    const candidates = Array.from(document.querySelectorAll(
-      '#prompt-textarea, textarea, [contenteditable="true"], [role="textbox"]'
-    ));
-    let best = null;
-    let bestScore = -Infinity;
-    for (const node of candidates) {
-      if (!(node instanceof HTMLElement) || host.contains(node)) continue;
-      const rect = node.getBoundingClientRect();
-      if (rect.width < 180 || rect.height < 24 || rect.bottom < window.innerHeight * .58) continue;
-      const style = getComputedStyle(node);
-      if (style.visibility === "hidden" || style.display === "none") continue;
-      const score = rect.bottom * 3 + rect.width - Math.abs(window.innerWidth / 2 - (rect.left + rect.width / 2));
-      if (score > bestScore) { best = node; bestScore = score; }
-    }
-    return best;
-  }
-
-  function updateFocusMask() {
-    cancelAnimationFrame(focusMaskRaf);
-    focusMaskRaf = requestAnimationFrame(() => {
-      const enabled = Boolean(state && state.human_help);
-      if (!enabled) {
-        focusMasks.forEach((node) => node.classList.remove("on"));
-        escapeHint.classList.remove("on");
-        return;
-      }
-      const composer = findEscapeComposer();
-      const rect = composer ? composer.getBoundingClientRect() : null;
-      const padX = 22;
-      const padY = 14;
-      const hole = rect ? {
-        left: Math.max(0, rect.left - padX),
-        right: Math.min(window.innerWidth, rect.right + padX),
-        top: Math.max(0, rect.top - padY),
-        bottom: Math.min(window.innerHeight, rect.bottom + padY),
-      } : {
-        left: Math.max(12, window.innerWidth * .27),
-        right: Math.min(window.innerWidth - 12, window.innerWidth * .73),
-        top: Math.max(0, window.innerHeight - 132),
-        bottom: window.innerHeight,
-      };
-      const top = $(".focusMask.top");
-      const left = $(".focusMask.left");
-      const right = $(".focusMask.right");
-      const bottom = $(".focusMask.bottom");
-      top.style.height = `${hole.top}px`;
-      left.style.left = "0"; left.style.top = `${hole.top}px`; left.style.width = `${hole.left}px`; left.style.height = `${Math.max(0, hole.bottom - hole.top)}px`;
-      right.style.left = `${hole.right}px`; right.style.top = `${hole.top}px`; right.style.right = "0"; right.style.height = `${Math.max(0, hole.bottom - hole.top)}px`;
-      bottom.style.top = `${hole.bottom}px`;
-      escapeHint.style.left = `${hole.left}px`; escapeHint.style.top = `${hole.top}px`; escapeHint.style.width = `${Math.max(0, hole.right - hole.left)}px`; escapeHint.style.height = `${Math.max(0, hole.bottom - hole.top)}px`;
-      focusMasks.forEach((node) => node.classList.add("on"));
-      escapeHint.classList.add("on");
-    });
   }
 
   function toast(message) {
@@ -392,28 +328,17 @@
     const title = document.createElement("h2"); title.textContent = help.request || "需要你協助";
     const expected = document.createElement("p"); expected.textContent = help.expected_result ? `完成標準：${help.expected_result}` : "請完成這一步後告訴代理。";
     const textarea = document.createElement("textarea"); textarea.placeholder = "輸入結果、補充資訊，或描述你完成了什麼…";
-    textarea.tabIndex = -1;
     textarea.addEventListener("pointerdown", () => {
       noteHumanHelpActivity(help.request_id);
-      allowHelpInputFocus = true;
-      textarea.tabIndex = 0;
     });
     for (const eventName of ["keydown", "input", "paste", "compositionupdate"]) {
       textarea.addEventListener(eventName, () => noteHumanHelpActivity(help.request_id));
     }
-    textarea.addEventListener("focus", () => {
-      if (allowHelpInputFocus) return;
-      textarea.blur();
-    });
-    textarea.addEventListener("blur", () => {
-      allowHelpInputFocus = false;
-      textarea.tabIndex = -1;
-    });
     const actions = document.createElement("div"); actions.className = "helpActions";
     const done = document.createElement("button"); done.className = "primary"; done.textContent = "完成並交還代理";
-    const cancel = document.createElement("button"); cancel.className = "secondary"; cancel.textContent = "目前無法完成";
+    const cancel = document.createElement("button"); cancel.className = "secondary"; cancel.textContent = "不能";
     done.onclick = () => respondHelp(help.request_id, "completed", textarea.value);
-    cancel.onclick = () => respondHelp(help.request_id, "cancelled", textarea.value);
+    cancel.onclick = () => respondHelp(help.request_id, "cancelled", textarea.value.trim() || "不能");
     actions.append(done, cancel); card.append(eyebrow, title, expected, textarea, actions); body.appendChild(card);
   }
 
@@ -454,6 +379,56 @@
     body.replaceChildren();
     const wrap = document.createElement("div"); wrap.className = "settings";
     const services = state && state.services || {};
+
+    const workspaceCard = createSettingsCard("工作區", "MCP 的檔案與指令會限制在選定的工作區內");
+    const workspacePicker = document.createElement("div"); workspacePicker.className = "workspacePicker";
+    const workspaceEntries = Array.isArray(state && state.workspace_allowlist)
+      ? state.workspace_allowlist.filter((item) => item && item.name && item.path)
+      : [];
+    const currentWorkspace = String(state && state.workspace || "");
+    const activeWorkspace = workspaceEntries.find((item) => String(item.path).toLowerCase() === currentWorkspace.toLowerCase());
+    const current = document.createElement("div"); current.className = "workspaceCurrent";
+    const currentLabel = document.createElement("div"); currentLabel.className = "workspaceCurrentLabel"; currentLabel.textContent = "目前工作區";
+    const currentPath = document.createElement("div"); currentPath.className = "workspaceCurrentPath";
+    currentPath.textContent = currentWorkspace || "尚未取得 MCP 工作區";
+    current.append(currentLabel, currentPath);
+    workspacePicker.appendChild(current);
+    const workspaceSelect = document.createElement("select"); workspaceSelect.className = "workspaceSelect";
+    workspaceSelect.disabled = Boolean(settingsBusy) || !workspaceEntries.length;
+    for (const entry of workspaceEntries) {
+      const option = document.createElement("option");
+      option.value = String(entry.name);
+      option.textContent = `${entry.name} · ${entry.path}`;
+      workspaceSelect.appendChild(option);
+    }
+    const newlyAddedWorkspace = workspaceEntries.find((item) => String(item.path).toLowerCase() === pendingAddedWorkspacePath.toLowerCase());
+    if (newlyAddedWorkspace) {
+      selectedWorkspaceName = String(newlyAddedWorkspace.name);
+      pendingAddedWorkspacePath = "";
+    }
+    if (!workspaceEntries.some((item) => String(item.name) === selectedWorkspaceName)) {
+      selectedWorkspaceName = activeWorkspace ? String(activeWorkspace.name) : String(workspaceEntries[0] && workspaceEntries[0].name || "");
+    }
+    workspaceSelect.value = selectedWorkspaceName;
+    workspaceSelect.onchange = () => { selectedWorkspaceName = workspaceSelect.value; };
+    const workspaceActions = document.createElement("div"); workspaceActions.className = "workspaceActions";
+    const workspaceApply = document.createElement("button"); workspaceApply.className = "primary workspaceApply";
+    workspaceApply.textContent = "切換工作區";
+    workspaceApply.disabled = Boolean(settingsBusy) || !workspaceEntries.length || !selectedWorkspaceName;
+    workspaceApply.onclick = () => switchWorkspace(workspaceSelect.value);
+    const workspaceAdd = document.createElement("button"); workspaceAdd.className = "secondary workspaceAdd";
+    workspaceAdd.textContent = "新增資料夾";
+    workspaceAdd.disabled = Boolean(settingsBusy);
+    workspaceAdd.onclick = () => addWorkspace();
+    workspaceActions.append(workspaceApply, workspaceAdd);
+    if (!workspaceEntries.length) {
+      const empty = document.createElement("div"); empty.className = "healthBox";
+      empty.textContent = "MCP 尚未回報可選的工作區。";
+      workspacePicker.appendChild(empty);
+    }
+    workspacePicker.append(workspaceSelect, workspaceActions);
+    workspaceCard.body.appendChild(workspacePicker);
+    wrap.appendChild(workspaceCard.card);
 
     const statusCard = createSettingsCard("系統狀態", "MCP 與 Tunnel 的即時 Windows Service 狀態");
     if (settingsBusy) {
@@ -521,6 +496,48 @@
     body.appendChild(wrap);
   }
 
+  async function switchWorkspace(selector) {
+    const selected = String(selector || "").trim();
+    if (!selected || settingsBusy) return;
+    if (!window.confirm("切換工作區會短暫重啟 MCP，請先確認沒有進行中的工作。確定切換？")) return;
+    settingsBusy = "切換工作區";
+    renderSettings();
+    try {
+      const result = await request("/v1/workspace/switch", { method:"POST", body:{ workspace:selected } });
+      toast(result && result.changed === false ? "工作區已經是目前選擇" : "工作區切換已送出 · 請確認 UAC");
+    } catch (error) {
+      toast(`切換工作區失敗：${error.message}`);
+    } finally {
+      settingsBusy = "";
+      if (activeTab === "settings") renderSettings();
+      setTimeout(poll, 900);
+    }
+  }
+
+  async function addWorkspace() {
+    if (settingsBusy) return;
+    settingsBusy = "選擇工作區";
+    renderSettings();
+    try {
+      const picked = await request("/v1/workspace/pick", { method:"POST", timeoutMs:120000 });
+      if (picked && picked.cancelled) {
+        toast("已取消選擇工作區");
+        return;
+      }
+      const path = String(picked && picked.path || "").trim();
+      if (!path) throw new Error("沒有取得資料夾路徑");
+      pendingAddedWorkspacePath = path;
+      await request("/v1/workspace/add", { method:"POST", body:{ path } });
+      toast("工作區新增已送出 · 請確認 UAC；不會切換或重啟");
+    } catch (error) {
+      toast(`新增工作區失敗：${error.message}`);
+    } finally {
+      settingsBusy = "";
+      if (activeTab === "settings") renderSettings();
+      setTimeout(poll, 900);
+    }
+  }
+
   function render() {
     syncPageTheme();
     statusDot.classList.toggle("live", connected);
@@ -532,7 +549,6 @@
     mode.textContent = permissionMode === "dangerous" ? "YOLO MODE" : permissionMode === "trusted" ? "TRUSTED" : permissionMode === "safe" ? "SAFE" : "";
     dnd.checked = Boolean(state && state.dnd);
     const help = state && state.human_help;
-    updateFocusMask();
     badge.hidden = !help;
     edge.querySelector("i").className = help ? "attn" : connected ? "live" : "";
     $(".detailsToggle").hidden = activeTab !== "activity";
@@ -548,7 +564,7 @@
       start_all:"啟動服務", stop_all:"停止服務", restart_all:"重新啟動服務",
       restart_tunnel:"重啟 Tunnel",
       update:"更新 MCP", rollback:"回滾 MCP", safe:"切換 SAFE", trusted:"切換 TRUSTED",
-      yolo:"切換 YOLO", health:"健康檢查", prune:"清理 Session"
+      yolo:"切換 YOLO", health:"健康檢查", prune:"清理 Session", switch_workspace:"切換工作區"
     };
     settingsBusy = labels[action] || action;
     if (activeTab === "settings") renderSettings();
@@ -587,26 +603,9 @@
     request("/v1/human-help/activity", { method:"POST", body:{ request_id:requestId } }).catch(() => {});
   }
 
-  function isEditableTarget(target) {
-    if (!(target instanceof HTMLElement) || host.contains(target)) return false;
-    return target.matches("textarea,input,[contenteditable='true'],[role='textbox']") || Boolean(target.closest("textarea,input,[contenteditable='true'],[role='textbox']"));
-  }
-
-  function noteEscapeComposerActivity(event) {
-    const helpId = state && state.human_help && state.human_help.request_id || "";
-    if (helpId && isEditableTarget(event.target)) noteHumanHelpActivity(helpId);
-  }
-
   async function poll() {
     clearTimeout(pollTimer);
     let helpToAcknowledge = "";
-    const activeBeforePoll = document.activeElement;
-    let focusToRestore = (
-      activeBeforePoll &&
-      activeBeforePoll !== document.body &&
-      activeBeforePoll !== host &&
-      !host.contains(activeBeforePoll)
-    ) ? activeBeforePoll : null;
     try {
       state = await request("/v1/state"); connected = true;
       const helpId = state.human_help && state.human_help.request_id || "";
@@ -625,15 +624,6 @@
       } catch (error) {
         connectionError = String(error && error.message || error);
       }
-    }
-    if (focusToRestore && focusToRestore.isConnected) {
-      const restoreFocus = () => {
-        if (!focusToRestore.isConnected || document.activeElement === focusToRestore) return;
-        try { focusToRestore.focus({ preventScroll: true }); }
-        catch (_) { try { focusToRestore.focus(); } catch (_) { } }
-      };
-      queueMicrotask(restoreFocus);
-      setTimeout(restoreFocus, 60);
     }
     pollTimer = setTimeout(poll, shell.classList.contains("open") ? 700 : 1800);
   }
@@ -654,10 +644,5 @@
     catch (error) { toast(`清除失敗：${error.message}`); }
   };
   chrome.runtime.onMessage.addListener((message) => { if (message && message.type === "coding-tools-console-toggle") setOpen(!shell.classList.contains("open")); });
-  for (const eventName of ["keydown", "input", "paste", "compositionupdate", "pointerdown"]) {
-    document.addEventListener(eventName, noteEscapeComposerActivity, true);
-  }
-  window.addEventListener("resize", updateFocusMask);
-  window.addEventListener("scroll", updateFocusMask, true);
   poll();
 })();

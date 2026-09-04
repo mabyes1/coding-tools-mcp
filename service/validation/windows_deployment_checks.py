@@ -33,6 +33,7 @@ def run_windows_deployment_checks(
     overlay_source = service_root / "ComputerUseOverlay.cs"
     activity_viewer_source = service_root / "ActivityLogViewer.cs"
     web_console_bridge_source = service_root / "WebConsoleBridge.cs"
+    workspace_config_source = service_root / "workspace-config.json"
     browser_extension_root = service_root.parent / "browser-extension"
     small_mascot_source = service_root.parent / "human-help-mascot-256.png"
     action_contract_source = package_parent / "coding_tools_mcp" / "computer-use-actions.json"
@@ -43,10 +44,12 @@ def run_windows_deployment_checks(
     deploy_text = internal_root.joinpath("deploy-coding-tools.ps1").read_text(encoding="utf-8")
     install_text = internal_root.joinpath("install-coding-tools.ps1").read_text(encoding="utf-8")
     repair_text = internal_root.joinpath("repair-coding-tools.ps1").read_text(encoding="utf-8")
+    runner_text = (service_root / "run-mcp-service.ps1").read_text(encoding="utf-8")
     mcp_service_xml_text = (service_root / "WebGPTCodingToolsMCP.xml").read_text(encoding="utf-8")
     openai_tunnel_service_xml_text = (service_root / "OpenAITunnelClient.xml").read_text(encoding="utf-8")
     openai_tunnel_config_text = (service_root / "tunnel-client.yaml").read_text(encoding="utf-8")
     openai_tunnel_config = json.loads(openai_tunnel_config_text)
+    workspace_config = json.loads(workspace_config_source.read_text(encoding="utf-8"))
     gitignore_text = service_root.parent.joinpath(".gitignore").read_text(encoding="utf-8")
     bootstrap_text = (package_parent / "coding_tools_mcp" / "bootstrap.py").read_text(encoding="utf-8")
     for label, script_text in (
@@ -90,6 +93,21 @@ def run_windows_deployment_checks(
         for function_name in required_calls:
             if function_name not in script_text:
                 raise RuntimeError(f"{label} stopped using shared deployment primitive {function_name}")
+
+    for workspace_contract in (
+        "workspace-config.json",
+        "function Get-WorkspaceRuntimeConfig",
+        "$env:CODING_TOOLS_MCP_WORKSPACE_ALLOWLIST = $workspaceAllowlist",
+        "--workspace $workspaceRoot",
+    ):
+        if workspace_contract not in runner_text:
+            raise RuntimeError(f"MCP runner lost selectable workspace configuration contract: {workspace_contract}")
+    for install_workspace_contract in (
+        'Join-Path $templateRoot "workspace-config.json"',
+        'data\\workspace-config.json',
+    ):
+        if install_workspace_contract not in install_text:
+            raise RuntimeError(f"fresh install lost workspace configuration contract: {install_workspace_contract}")
     for duplicated_name in (
         "Build-BrokerArtifacts",
         "Stop-PrivateServices",
@@ -271,6 +289,7 @@ def run_windows_deployment_checks(
             overlay_source,
             activity_viewer_source,
             web_console_bridge_source,
+            workspace_config_source,
             browser_extension_root / "manifest.json",
             browser_extension_root / "background.js",
             browser_extension_root / "browser-agent.js",
@@ -288,6 +307,11 @@ def run_windows_deployment_checks(
             "Computer Use helper build inputs are missing: "
             + ", ".join(str(path) for path in missing_helper_inputs)
         )
+    workspace_entries = workspace_config.get("workspaces")
+    if not isinstance(workspace_entries, list) or not workspace_entries:
+        raise RuntimeError("workspace-config.json must contain at least one workspace entry")
+    if not isinstance(workspace_config.get("selected"), str) or not workspace_config["selected"]:
+        raise RuntimeError("workspace-config.json must declare the selected workspace")
 
     # Regression contracts come from bugs we actually hit in production.
     helper_text = helper_source.read_text(encoding="utf-8")
@@ -383,10 +407,17 @@ def run_windows_deployment_checks(
         "function noteHumanHelpActivity(requestId)",
         'request("/v1/human-help/activity"',
         '"keydown", "input", "paste", "compositionupdate"',
-        "noteEscapeComposerActivity",
+        'textarea.addEventListener(eventName, () => noteHumanHelpActivity(help.request_id));',
     ):
         if input_activity_contract not in extension_content_text:
             raise RuntimeError(f"Web Console HUMAN HELP input activity reset contract regressed: {input_activity_contract}")
+    for human_help_input_contract in (
+        'const textarea = document.createElement("textarea");',
+        'cancel.textContent = "不能";',
+        'cancel.onclick = () => respondHelp(help.request_id, "cancelled", textarea.value.trim() || "不能");',
+    ):
+        if human_help_input_contract not in extension_content_text:
+            raise RuntimeError(f"Web Console HUMAN HELP reply UI lost contract: {human_help_input_contract}")
     for human_help_reason_label in (
         'if (text === "permission_blocked") return "需要系統權限";',
         'if (text === "gui_required") return "需要你操作畫面";',
@@ -476,6 +507,16 @@ def run_windows_deployment_checks(
             raise RuntimeError(f"Web Console drawer lost UI contract: {ui_contract}")
     for settings_contract in (
         'request("/v1/system/action"',
+        'request("/v1/workspace/switch"',
+        'request("/v1/workspace/pick"',
+        'request("/v1/workspace/add"',
+        "workspace_allowlist",
+        "workspaceSelect",
+        "selectedWorkspaceName",
+        "pendingAddedWorkspacePath",
+        "切換工作區",
+        "新增資料夾",
+        "不會切換或重啟",
         '"restart_all"',
         '"restart_tunnel"',
         '"update"',
@@ -490,7 +531,17 @@ def run_windows_deployment_checks(
             raise RuntimeError(f"Web Console settings surface lost contract: {settings_contract}")
     for bridge_settings_contract in (
         'request.Path == "/v1/system/action"',
-        "LaunchAdminAction(action)",
+        'request.Path == "/v1/workspace/switch"',
+        'request.Path == "/v1/workspace/pick"',
+        'request.Path == "/v1/workspace/add"',
+        "FindWorkspaceEntry",
+        "PickWorkspaceFolder",
+        "ReadWorkspaceConfiguration",
+        "dialog.ShowDialog(owner)",
+        "owner.TopMost = true",
+        "LaunchAdminAction(\"switch_workspace\", selectedName)",
+        "LaunchAdminAction(\"add_workspace\", selectedPath)",
+        "LaunchAdminAction(action, null)",
         '"start_all"',
         '"restart_all"',
         '"restart_tunnel"',
@@ -506,11 +557,29 @@ def run_windows_deployment_checks(
         '$ErrorActionPreference = "Continue"',
         '$childExitCode = $LASTEXITCODE',
         'Maintenance script exited with code',
+        '"SwitchWorkspace"',
+        '"AddWorkspace"',
+        'function Set-Workspace',
+        'function Add-Workspace',
+        'workspace-config.json',
+        '-Workspace',
     ):
         if web_console_admin_contract not in web_console_admin_text:
             raise RuntimeError(
                 f"Web Console admin helper may regress to treating child stderr warnings as fatal: {web_console_admin_contract}"
             )
+    add_workspace_start = web_console_admin_text.find("function Add-Workspace")
+    set_workspace_start = web_console_admin_text.find("function Set-Workspace")
+    if add_workspace_start < 0 or set_workspace_start <= add_workspace_start:
+        raise RuntimeError("Web Console workspace helper functions are missing or out of order")
+    add_workspace_block = web_console_admin_text[add_workspace_start:set_workspace_start]
+    for forbidden in ("Set-Workspace $entry.Name", "Assert-NoActiveMcpWork", "Grant-WorkspaceAccess", "Stop-ManagedServices", "Start-ManagedServices"):
+        if forbidden in add_workspace_block:
+            raise RuntimeError(f"Adding a workspace must not switch or restart services: {forbidden}")
+    set_workspace_block = web_console_admin_text[set_workspace_start:web_console_admin_text.find("function Stop-ManagedServices", set_workspace_start)]
+    for required in ("Grant-WorkspaceAccess", "Restart-McpService"):
+        if required not in set_workspace_block:
+            raise RuntimeError(f"Workspace switching lost MCP-only restart contract: {required}")
     for local_network_contract in ('targetAddressSpace: "loopback"', "coding-tools-bridge-frame", "127.0.0.1:8768"):
         if local_network_contract not in extension_bridge_text:
             raise RuntimeError(f"Web Console Local Network Access bootstrap lost contract: {local_network_contract}")
@@ -535,17 +604,19 @@ def run_windows_deployment_checks(
         raise RuntimeError("Web Console content script lost extension-background request transport")
     if "return await extensionRequest(path, options);" not in extension_content_text:
         raise RuntimeError("Web Console requests must prefer extension-background transport before page-context loopback")
-    for focus_mode_contract in (
+    for removed_focus_contract in (
         ".focusMask",
-        "backdrop-filter:blur(9px)",
+        ".escapeHint",
         "function findEscapeComposer()",
         "function updateFocusMask()",
-        "const enabled = Boolean(state && state.human_help)",
-        'selectTab("help")',
-        "setOpen(true);",
+        "focusToRestore",
+        "noteEscapeComposerActivity",
+        "allowHelpInputFocus",
+        "textarea.tabIndex = -1",
+        "focus({ preventScroll: true })",
     ):
-        if focus_mode_contract not in extension_content_text:
-            raise RuntimeError(f"Web Console HUMAN HELP focus mode lost contract: {focus_mode_contract}")
+        if removed_focus_contract in extension_content_text:
+            raise RuntimeError(f"Web Console HUMAN HELP still contains removed focus-stealing UI: {removed_focus_contract}")
     if 'helpId !== lastPresentedHelpId && document.visibilityState === "visible"' not in extension_content_text:
         raise RuntimeError("Web Console HUMAN HELP visible-page presentation contract disappeared")
     if "return await directRequest(path, options);" not in extension_content_text:
@@ -722,6 +793,7 @@ def run_windows_deployment_checks(
                 f"/out:{web_console_output}",
                 f"/reference:{windows_root / 'Microsoft.NET' / 'Framework64' / 'v4.0.30319' / 'System.Web.Extensions.dll'}",
                 "/reference:System.ServiceProcess.dll",
+                "/reference:System.Windows.Forms.dll",
                 str(web_console_bridge_source),
             ],
             stdout=subprocess.PIPE,

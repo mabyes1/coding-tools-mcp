@@ -3,7 +3,8 @@ const CONSOLE_REQUEST_TIMEOUT_MS = 4000;
 
 async function consoleRequest(path, options = {}) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), CONSOLE_REQUEST_TIMEOUT_MS);
+  const requestTimeoutMs = Math.max(1000, Math.min(Number(options.timeoutMs) || CONSOLE_REQUEST_TIMEOUT_MS, 120000));
+  const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
   try {
     const response = await fetch(`${CONSOLE_BASE}${path}`, {
       method: options.method || "GET",

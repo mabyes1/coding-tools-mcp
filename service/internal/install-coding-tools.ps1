@@ -39,6 +39,7 @@ try {
         $templateRoot,
         $privateSource,
         $workspaceRoot,
+        (Join-Path $templateRoot "workspace-config.json"),
         $uv,
         $python,
         $credentialSource,
@@ -97,6 +98,8 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $serviceRoot "app") -Force | Out-Null
     New-Item -ItemType Directory -Path $elevatedQueueRoot -Force | Out-Null
     New-Item -ItemType Directory -Path $interactiveQueueRoot -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $templateRoot "workspace-config.json") `
+        -Destination (Join-Path $serviceRoot "data\workspace-config.json") -Force
     if ($hadTunnelBackup) {
         Copy-Item -LiteralPath $tunnelBackupRoot -Destination (Join-Path $serviceRoot "tunnel") -Recurse -Force
     }

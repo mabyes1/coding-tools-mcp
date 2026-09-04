@@ -5,7 +5,7 @@ import json
 from typing import Any
 
 
-EXPECTED_PUBLIC_CONTRACT_SHA256 = "281f076e4b632519dbdc55fec43fa09fa220cf5f61f4dd17f1e15ed56f53d710"
+EXPECTED_PUBLIC_CONTRACT_SHA256 = "a52c9cce2eead7bf63175461b346220b5e26a255093a9fae8027961397c94f21"
 
 
 def run_catalog_checks(server: Any, elevated_actions: Any, activity_module: Any) -> dict[str, tuple[str, ...]]:
@@ -156,6 +156,10 @@ def run_catalog_checks(server: Any, elevated_actions: Any, activity_module: Any)
     human_reasons = human_schema.get("properties", {}).get("reason", {}).get("enum", [])
     if "faster_by_human" not in human_reasons or "permission_blocked" not in human_reasons:
         raise RuntimeError("human_help_me reason schema is missing core escalation reasons")
+    human_description = server.TOOL_REGISTRY["human_help_me"].description
+    for phrase in ("efficiency tradeoff", "time, tokens, tool calls", "complete actionable steps"):
+        if phrase not in human_description:
+            raise RuntimeError(f"human_help_me description lost efficiency-routing guidance: {phrase}")
     human_delivery = human_schema.get("properties", {}).get("delivery", {}).get("enum", [])
     if not {"auto", "desktop_only", "chat_only"}.issubset(human_delivery):
         raise RuntimeError("human_help_me delivery schema is missing automatic, desktop-only, or chat-only routing")
