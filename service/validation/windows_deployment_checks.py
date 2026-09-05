@@ -317,6 +317,7 @@ def run_windows_deployment_checks(
     helper_text = helper_source.read_text(encoding="utf-8")
     overlay_text = overlay_source.read_text(encoding="utf-8")
     interactive_broker_text = (service_root / "interactive-broker.ps1").read_text(encoding="utf-8")
+    interactive_manager_text = (service_root / "manage-interactive-broker.ps1").read_text(encoding="utf-8")
     web_console_bridge_text = web_console_bridge_source.read_text(encoding="utf-8")
     web_console_admin_text = (service_root / "manage-web-console-system.ps1").read_text(encoding="utf-8")
     extension_manifest = json.loads((browser_extension_root / "manifest.json").read_text(encoding="utf-8"))
@@ -328,6 +329,46 @@ def run_windows_deployment_checks(
     interactive_exec_text = (package_parent / "coding_tools_mcp" / "interactive_exec.py").read_text(encoding="utf-8")
     if "System.Management.Automation.Language.Parser]::ParseInput" not in interactive_broker_text:
         raise RuntimeError("active_user exec must reject PowerShell syntax errors before launching the child shell")
+    wait_helper_start = interactive_broker_text.find("function Wait-BrokerProcess")
+    wait_helper_end = interactive_broker_text.find("\nfunction ", wait_helper_start + 1)
+    if wait_helper_start < 0:
+        raise RuntimeError("Interactive Broker child-process waits must use a heartbeat-aware helper")
+    if wait_helper_end < 0:
+        wait_helper_end = len(interactive_broker_text)
+    wait_helper_text = interactive_broker_text[wait_helper_start:wait_helper_end]
+    for heartbeat_contract in (
+        "Update-BrokerHeartbeat",
+        "AddSeconds($heartbeatIntervalSeconds)",
+        "while (-not $Process.HasExited",
+    ):
+        if heartbeat_contract not in wait_helper_text:
+            raise RuntimeError(
+                "Interactive Broker child-process wait lost heartbeat contract: " + heartbeat_contract
+            )
+    if interactive_broker_text.count("Wait-BrokerProcess -Process $process -Deadline $deadline") < 2:
+        raise RuntimeError(
+            "Both active_user exec and Computer Use helper waits must keep the Interactive Broker heartbeat fresh"
+        )
+    for startup_cleanup_contract in (
+        '$staleWebConsoleHeartbeat = Join-Path $queueRoot "web-console.heartbeat"',
+        "if (Test-Path -LiteralPath $staleWebConsoleHeartbeat -PathType Leaf)",
+    ):
+        if startup_cleanup_contract not in interactive_broker_text:
+            raise RuntimeError(
+                "Interactive Broker startup must tolerate an absent Web Console heartbeat: "
+                + startup_cleanup_contract
+            )
+    for manager_recovery_contract in (
+        "function Get-BrokerLauncherProcesses",
+        'Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue',
+        'throw "Unable to stop Interactive Broker launcher process(es): $ids"',
+        "elseif ($existing -or @(Get-BrokerLauncherProcesses).Count -gt 0)",
+    ):
+        if manager_recovery_contract not in interactive_manager_text:
+            raise RuntimeError(
+                "Interactive Broker manager lost orphan-process recovery contract: "
+                + manager_recovery_contract
+            )
     for action in sorted(set(action_contract["computer_use"]) | set(action_contract["browser_use"])):
         if f'action == "{action}"' not in helper_text:
             raise RuntimeError(f"Computer Use backend has no implementation branch for advertised action: {action}")

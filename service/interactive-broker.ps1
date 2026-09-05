@@ -56,6 +56,26 @@ function Update-BrokerHeartbeat {
     catch { }
 }
 
+function Wait-BrokerProcess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [Diagnostics.Process]$Process,
+        [Parameter(Mandatory = $true)]
+        [DateTimeOffset]$Deadline,
+        [int]$PollMilliseconds = 50
+    )
+
+    $nextHeartbeat = [DateTimeOffset]::UtcNow
+    while (-not $Process.HasExited -and [DateTimeOffset]::UtcNow -lt $Deadline) {
+        if ([DateTimeOffset]::UtcNow -ge $nextHeartbeat) {
+            Update-BrokerHeartbeat
+            $nextHeartbeat = [DateTimeOffset]::UtcNow.AddSeconds($heartbeatIntervalSeconds)
+        }
+        Start-Sleep -Milliseconds ([Math]::Max(25, [Math]::Min($PollMilliseconds, 2000)))
+        $Process.Refresh()
+    }
+}
+
 function Clear-StaleBrokerArtifacts {
     # A broker restart invalidates unfinished IPC. Replaying an interactive
     # action is unsafe because we cannot know whether it already happened.
@@ -63,7 +83,10 @@ function Clear-StaleBrokerArtifacts {
         Get-ChildItem -LiteralPath $queueRoot -Filter $pattern -File -ErrorAction SilentlyContinue |
             Remove-Item -Force -ErrorAction SilentlyContinue
     }
-    Remove-Item -LiteralPath (Join-Path $queueRoot "web-console.heartbeat") -Force -ErrorAction SilentlyContinue
+    $staleWebConsoleHeartbeat = Join-Path $queueRoot "web-console.heartbeat"
+    if (Test-Path -LiteralPath $staleWebConsoleHeartbeat -PathType Leaf) {
+        Remove-Item -LiteralPath $staleWebConsoleHeartbeat -Force -ErrorAction SilentlyContinue
+    }
     $cutoff = (Get-Date).AddDays(-$workRetentionDays)
     Get-ChildItem -LiteralPath $queueRoot -Directory -Filter "work-*" -ErrorAction SilentlyContinue |
         Where-Object LastWriteTime -lt $cutoff |
@@ -296,10 +319,7 @@ function Handle-ComputerUseRequest([string]$RequestId, $Request) {
             throw "Computer Use helper could not be started."
         }
         $deadline = [DateTimeOffset]::UtcNow.AddSeconds(60)
-        while (-not $process.HasExited -and [DateTimeOffset]::UtcNow -lt $deadline) {
-            Start-Sleep -Milliseconds 50
-            $process.Refresh()
-        }
+        Wait-BrokerProcess -Process $process -Deadline $deadline
         if (-not $process.HasExited) {
             Stop-ProcessTree $process.Id
             Complete-Request $RequestId @{ ok = $false; error = "COMPUTER_USE_TIMEOUT"; message = "Computer Use helper timed out."; retryable = $true }
@@ -544,10 +564,7 @@ function Handle-ExecRequest([string]$RequestId, $Request) {
         $argumentList = @("-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", $encoded)
         $process = Start-Process -FilePath $shell -ArgumentList $argumentList -WorkingDirectory $workingDirectory -WindowStyle Hidden -PassThru -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
         $deadline = [DateTimeOffset]::UtcNow.AddMilliseconds($timeoutMs)
-        while (-not $process.HasExited -and [DateTimeOffset]::UtcNow -lt $deadline) {
-            Start-Sleep -Milliseconds 50
-            $process.Refresh()
-        }
+        Wait-BrokerProcess -Process $process -Deadline $deadline
         $timedOut = -not $process.HasExited
         if ($timedOut) {
             Stop-ProcessTree $process.Id

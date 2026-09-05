@@ -24,6 +24,13 @@ function Get-BrokerProcess {
     return Get-Process -Id $brokerPid -ErrorAction SilentlyContinue
 }
 
+function Get-BrokerLauncherProcesses {
+    return @(
+        Get-Process -Name "interactive-broker-launcher" -ErrorAction SilentlyContinue |
+            Where-Object { $_.SessionId -gt 0 }
+    )
+}
+
 function Stop-WebConsoleInstance {
     $webConsolePidPath = Join-Path $queueRoot "web-console.pid"
     if (Test-Path -LiteralPath $webConsolePidPath -PathType Leaf) {
@@ -45,20 +52,33 @@ function Assert-InteractiveCaller {
 }
 
 function Stop-BrokerInstance {
+    Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    $brokerProcesses = @()
     $brokerProcess = Get-BrokerProcess
-    if (-not $brokerProcess) {
-        Stop-WebConsoleInstance
-        Remove-Item -LiteralPath (Join-Path $queueRoot "broker.pid") -Force -ErrorAction SilentlyContinue
-        return
+    if ($brokerProcess) { $brokerProcesses += $brokerProcess }
+    foreach ($candidate in @(Get-BrokerLauncherProcesses)) {
+        if (-not ($brokerProcesses | Where-Object { $_.Id -eq $candidate.Id })) {
+            $brokerProcesses += $candidate
+        }
     }
     $stopPath = Join-Path $queueRoot "broker.stop"
     New-Item -ItemType File -Path $stopPath -Force | Out-Null
-    try { Wait-Process -Id $brokerProcess.Id -Timeout 5 -ErrorAction SilentlyContinue } catch { }
-    if (Get-Process -Id $brokerProcess.Id -ErrorAction SilentlyContinue) {
-        Stop-Process -Id $brokerProcess.Id -Force -ErrorAction SilentlyContinue
+    foreach ($process in $brokerProcesses) {
+        try { Wait-Process -Id $process.Id -Timeout 5 -ErrorAction SilentlyContinue } catch { }
+        if (Get-Process -Id $process.Id -ErrorAction SilentlyContinue) {
+            try { Stop-Process -Id $process.Id -Force -ErrorAction Stop } catch { }
+        }
+    }
+    $remaining = @(
+        $brokerProcesses |
+            Where-Object { Get-Process -Id $_.Id -ErrorAction SilentlyContinue }
+    )
+    if ($remaining.Count -gt 0) {
+        $ids = ($remaining | ForEach-Object { $_.Id }) -join ","
+        throw "Unable to stop Interactive Broker launcher process(es): $ids"
     }
     Remove-Item -LiteralPath $stopPath -Force -ErrorAction SilentlyContinue
-    Remove-Item -LiteralPath (Join-Path $queueRoot "broker.pid") -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $queueRoot "broker.pid"),(Join-Path $queueRoot "broker.status.json"),(Join-Path $queueRoot "broker.heartbeat") -Force -ErrorAction SilentlyContinue
     Stop-WebConsoleInstance
 }
 
@@ -141,10 +161,14 @@ switch ($Action) {
     "Start" {
         $existing = Get-BrokerProcess
         if ($existing -and $existing.SessionId -gt 0) {
-            Write-Host "INTERACTIVE_BROKER_ALREADY_RUNNING PID=$($existing.Id) SESSION=$($existing.SessionId)"
-            break
+            $healthy = Wait-ForInteractiveBroker 1
+            if ($healthy) {
+                Write-Host "INTERACTIVE_BROKER_ALREADY_RUNNING PID=$($existing.Id) SESSION=$($existing.SessionId)"
+                break
+            }
+            Stop-BrokerInstance
         }
-        if ($existing) {
+        elseif ($existing -or @(Get-BrokerLauncherProcesses).Count -gt 0) {
             Stop-BrokerInstance
         }
         else {
